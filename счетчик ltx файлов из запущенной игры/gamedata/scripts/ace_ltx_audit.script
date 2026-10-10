@@ -1,0 +1,231 @@
+--[[
+    ace_ltx_audit.script
+
+    Аудит файловой системы: считает количество .ltx файлов, которые видит
+    процесс игры (включая VFS Mod Organizer 2), и пишет в лог:
+
+        [ACE] Обнаружено X файлов ltx
+
+    Метод: LuaJIT FFI -> Win32 FindFirstFileW / FindNextFileW.
+    Вызовы идут внутри процесса игры, поэтому usvfs (MO2) подставляет
+    виртуальную файловую систему — т.е. счётчик равен тому, что видит движок.
+
+    Дополнительно пишется число секций в итоговом system.ltx
+    (сверка с Resolver3 / Main5).
+]]
+
+local M = {}
+
+---------------------------------------------------------------- логирование
+local function log(fmt, ...)
+    local s = string.format(fmt, ...)
+    if type(printf) == "function" then
+        printf("%s", s)
+    elseif type(print) == "function" then
+        print(s)
+    end
+end
+
+---------------------------------------------------------------- FFI
+local ffi = nil
+local bit = nil
+local INVALID_HANDLE = nil
+
+local CP_UTF8 = 65001
+local FILE_ATTRIBUTE_DIRECTORY = 0x10
+local FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+local ACE_CDEF = [[
+    typedef struct {
+        unsigned long dwFileAttributes;
+        unsigned long ftCreationTime[2];
+        unsigned long ftLastAccessTime[2];
+        unsigned long ftLastWriteTime[2];
+        unsigned long nFileSizeHigh;
+        unsigned long nFileSizeLow;
+        unsigned long dwReserved0;
+        unsigned long dwReserved1;
+        uint16_t      cFileName[260];
+        uint16_t      cAlternateFileName[14];
+    } WIN32_FIND_DATAW;
+
+    void*          FindFirstFileW(const uint16_t*, WIN32_FIND_DATAW*);
+    int            FindNextFileW(void*, WIN32_FIND_DATAW*);
+    int            FindClose(void*);
+    int            MultiByteToWideChar(unsigned int, unsigned long,
+                         const char*, int, uint16_t*, int);
+    int            WideCharToMultiByte(unsigned int, unsigned long,
+                         const uint16_t*, int, char*, int,
+                         const char*, int*);
+    unsigned long  GetModuleFileNameW(void*, uint16_t*, unsigned long);
+]]
+
+local function init_ffi()
+    if ffi then
+        return true
+    end
+
+    local ok, mod = pcall(require, "ffi")
+    if not ok then
+        return false, "require('ffi') failed: " .. tostring(mod)
+    end
+    ffi = mod
+
+    local ok2, err = pcall(function()
+        ffi.cdef(ACE_CDEF)
+    end)
+    if not ok2 then
+        ffi = nil
+        return false, "ffi.cdef failed: " .. tostring(err)
+    end
+
+    local ok3, bitmod = pcall(require, "bit")
+    bit = ok3 and bitmod or nil
+
+    INVALID_HANDLE = ffi.cast("void*", ffi.cast("intptr_t", -1))
+    return true
+end
+
+---------------------------------------------------------------- helpers
+local function to_wide(s)
+    local n = ffi.C.MultiByteToWideChar(CP_UTF8, 0, s, #s, nil, 0)
+    if n <= 0 then
+        return nil
+    end
+    local buf = ffi.new("uint16_t[?]", n + 1)
+    ffi.C.MultiByteToWideChar(CP_UTF8, 0, s, #s, buf, n)
+    buf[n] = 0
+    return buf
+end
+
+local function from_wide(buf)
+    local n = ffi.C.WideCharToMultiByte(CP_UTF8, 0, buf, -1, nil, 0, nil, nil)
+    if n <= 0 then
+        return ""
+    end
+    local cb = ffi.new("char[?]", n)
+    ffi.C.WideCharToMultiByte(CP_UTF8, 0, buf, -1, cb, n, nil, nil)
+    return ffi.string(cb, n - 1)
+end
+
+local function is_dir(attrs)
+    if bit then
+        return bit.band(attrs, FILE_ATTRIBUTE_DIRECTORY) ~= 0
+    end
+    return (attrs % (FILE_ATTRIBUTE_DIRECTORY * 2)) >= FILE_ATTRIBUTE_DIRECTORY
+end
+
+local function is_reparse(attrs)
+    if bit then
+        return bit.band(attrs, FILE_ATTRIBUTE_REPARSE_POINT) ~= 0
+    end
+    return (attrs % (FILE_ATTRIBUTE_REPARSE_POINT * 2)) >= FILE_ATTRIBUTE_REPARSE_POINT
+end
+
+---------------------------------------------------------------- обход каталога
+local function count_ltx_recursive(dir_path, counter)
+    local data = ffi.new("WIN32_FIND_DATAW")
+    local handle = ffi.C.FindFirstFileW(to_wide(dir_path .. "\\*"), data)
+
+    if handle == INVALID_HANDLE then
+        return counter
+    end
+
+    repeat
+        local name = from_wide(data.cFileName)
+
+        if name ~= "." and name ~= ".." then
+            local attrs = data.dwFileAttributes
+
+            if is_dir(attrs) then
+                -- не заходим в junction/symlink, чтобы не было циклов
+                if not is_reparse(attrs) then
+                    counter = count_ltx_recursive(dir_path .. "\\" .. name, counter)
+                end
+            elseif name:lower():sub(-4) == ".ltx" then
+                counter = counter + 1
+            end
+        end
+    until ffi.C.FindNextFileW(handle, data) == 0
+
+    ffi.C.FindClose(handle)
+    return counter
+end
+
+---------------------------------------------------------------- корень игры
+local function get_game_root()
+    local buf = ffi.new("uint16_t[?]", 4096)
+    local n = ffi.C.GetModuleFileNameW(nil, buf, 4096)
+    if n <= 0 then
+        return nil
+    end
+
+    local full = from_wide(buf)
+    log("[ACE] exe path: %s", full)
+
+    -- снимаем имя exe
+    local dir = full:match("^(.*)[\\/][^\\/]+$")
+    if not dir then
+        return nil
+    end
+
+    -- моддинговый exe лежит в <корень игры>\bin — поднимаемся ещё на уровень
+    if dir:lower():match("[\\/]bin$") then
+        dir = dir:match("^(.*)[\\/][^\\/]+$") or dir
+    end
+
+    return dir
+end
+
+---------------------------------------------------------------- секции system.ltx
+local function log_section_count()
+    local ok, res = pcall(function()
+        local ini = system_ini()
+        return ini:section_count()
+    end)
+
+    if ok and type(res) == "number" then
+        log("[ACE] Секций в итоговом system.ltx: %d", res)
+    else
+        log("[ACE] WARNING: не удалось получить section_count: %s", tostring(res))
+    end
+end
+
+---------------------------------------------------------------- входная точка
+function M.run(configs_rel)
+    configs_rel = configs_rel or "gamedata\\configs"
+
+    log("[ACE] === аудит ltx: старт ===")
+
+    local ok, err = init_ffi()
+    if not ok then
+        log("[ACE] ERROR: FFI недоступен (%s)", tostring(err))
+        log("[ACE] ERROR: подсчёт файлов ltx через FS процесса невозможен")
+        log_section_count()
+        return nil
+    end
+
+    local root = get_game_root()
+    if not root then
+        log("[ACE] ERROR: не удалось определить каталог игры")
+        log_section_count()
+        return nil
+    end
+
+    local scan_dir = root .. "\\" .. configs_rel
+    log("[ACE] Каталог сканирования (VFS процесса): %s", scan_dir)
+
+    local count = count_ltx_recursive(scan_dir, 0)
+
+    if count == 0 then
+        log("[ACE] WARNING: 0 файлов ltx в %s — проверьте путь и что игра запущена через MO2", scan_dir)
+    end
+	
+    log("[ACE] Обнаружено %d файлов ltx", count)
+    log_section_count()
+    log("[ACE] === аудит ltx: завершено ===")
+
+    return count
+end
+
+return M

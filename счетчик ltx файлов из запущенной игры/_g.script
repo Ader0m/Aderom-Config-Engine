@@ -1,0 +1,52 @@
+
+-- ============================================================
+-- [ACE] загрузчик аудита ltx (вместо require: движок не ищет .script
+-- через package.path, поэтому грузим dofile по кандидатам путей;
+-- dofile идёт через FS процесса и видит VFS MO2)
+-- ============================================================
+do
+    local function ace_log(s)
+        if type(printf) == "function" then
+            printf("%s", s)
+        elseif type(print) == "function" then
+            print(s)
+        end
+    end
+
+    local ace = nil
+    local tried = {}
+
+    local candidates = {
+        -- CWD обычно = bin
+        [[..\gamedata\scripts\ace_ltx_audit.script]],
+        -- CWD = корень игры
+        [[gamedata\scripts\ace_ltx_audit.script]],
+        -- запасной относительный
+        [[..\..\gamedata\scripts\ace_ltx_audit.script]],
+        -- абсолютные (корень игры и служебный путь движка bin\..)
+        [[H:\GRA2.5\Anomaly 1.5.3 up\gamedata\scripts\ace_ltx_audit.script]],
+        [[H:\GRA2.5\Anomaly 1.5.3 up\bin\..\gamedata\scripts\ace_ltx_audit.script]],
+    }
+
+    for _, p in ipairs(candidates) do
+        table.insert(tried, p)
+        local ok, mod = pcall(dofile, p)
+        if ok and type(mod) == "table" and type(mod.run) == "function" then
+            ace = mod
+            ace_log("[ACE] loader: module loaded from " .. p)
+            break
+        end
+    end
+
+    if ace == nil then
+        ace_log("[ACE] ERROR: ace_ltx_audit.script not found. Tried:")
+        for _, p in ipairs(tried) do
+            ace_log("[ACE]   " .. p)
+        end
+    else
+        local ok, err = pcall(ace.run)
+        if not ok then
+            ace_log("[ACE] audit failed: " .. tostring(err))
+        end
+    end
+end
