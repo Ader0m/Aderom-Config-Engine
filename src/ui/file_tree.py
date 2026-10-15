@@ -4,11 +4,14 @@
 from pathlib import Path
 
 from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QBrush, QColor
 from PyQt5.QtWidgets import QTreeWidget, QTreeWidgetItem
 
 
 class FileTreeWidget(QTreeWidget):
     file_opened = pyqtSignal(str)
+
+    HL_COLOR = QColor("#4f4f00")
 
     def __init__(self, sort_fn=None, parent=None):
         super().__init__(parent)
@@ -16,11 +19,14 @@ class FileTreeWidget(QTreeWidget):
         self.setHeaderLabels(["Имя", "Файлов в дереве", "Прямых детей"])
         self.setColumnWidth(0, 520)
 
-        self._sort = sort_fn or (lambda forest, nodes, col="path", reverse=False: sorted(nodes))
+        self._sort = sort_fn or (
+            lambda forest, nodes, col="path", reverse=False: sorted(nodes)
+        )
 
         self.forest = None
         self._path_to_item = {}
         self._populated = set()
+        self._highlight = set()
 
         self.itemDoubleClicked.connect(self._on_double_clicked)
         self.itemExpanded.connect(self._on_expanded)
@@ -71,6 +77,9 @@ class FileTreeWidget(QTreeWidget):
         item.setData(0, Qt.UserRole, key)
         self._path_to_item[key] = item
 
+        if key in self._highlight:
+            item.setBackground(0, self.HL_COLOR)
+
         if kids:
             item.addChild(QTreeWidgetItem())
 
@@ -97,6 +106,47 @@ class FileTreeWidget(QTreeWidget):
             self._add_node(item, c)
 
         self._populated.add(path)
+
+    # -------------------------------------------------- поиск: подсветка
+    def highlight(self, paths):
+        self._highlight = {str(p) for p in paths}
+
+        for key, item in self._path_to_item.items():
+            if key in self._highlight:
+                item.setBackground(0, self.HL_COLOR)
+            else:
+                item.setBackground(0, QBrush())
+
+    def clear_highlight(self):
+        self._highlight = set()
+
+        for item in self._path_to_item.values():
+            item.setBackground(0, QBrush())
+
+    # -------------------------------------------------- поиск: показать узел
+    def reveal_path(self, path):
+        """Раскрыть цепочку родителей до узла и выделить его."""
+        if self.forest is None:
+            return
+
+        path = Path(path)
+
+        chain = []
+        cur = path
+        while cur is not None:
+            chain.append(cur)
+            cur = self.forest.node_parent.get(cur)
+
+        # раскрываем сверху вниз; раскрытие родителя создаёт детей
+        for p in reversed(chain):
+            item = self._path_to_item.get(str(p))
+            if item is not None and not item.isExpanded():
+                item.setExpanded(True)
+
+        item = self._path_to_item.get(str(path))
+        if item is not None:
+            self.setCurrentItem(item)
+            self.scrollToItem(item)
 
     # -------------------------------------------------- действия
     def _on_double_clicked(self, item, column):

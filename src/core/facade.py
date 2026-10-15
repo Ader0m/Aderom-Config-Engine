@@ -22,6 +22,7 @@ from .fs import (
 from .resolver_adapter import LtxResolverAdapter
 from .tree_builder import TreeBuilder
 from .tree_query_service import TreeQueryService, search_nodes, sort_nodes
+from .fs import detect_config_dir
 
 
 class CoreServices:
@@ -103,3 +104,17 @@ class CoreServices:
 
     def open_notepad(self, path):
         return open_in_notepad_pp(path)
+
+    def detect_config_dir(self, candidates):
+        return detect_config_dir(candidates)
+
+    def assemble_text(self, root_path, forest, config_dir, log=None):
+        """
+        Финальное состояние файла "как в игре":
+        проход через внешний Resolver4 и сборка текста.
+        """
+        adapter = self._ensure_adapter(forest, config_dir)
+        if adapter is None:
+            raise RuntimeError("Resolver4.py не найден")
+        sm = build_source_map(forest)
+        return adapter.assemble_text(root_path, sm)

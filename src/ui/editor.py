@@ -65,15 +65,26 @@ class CodeEditor(QWidget):
             return
 
         try:
-            content = path.read_text(encoding='utf-8', errors='replace')
+            content = path.read_text(encoding="utf-8", errors="replace")
         except UnicodeDecodeError:
-            content = path.read_text(encoding='windows-1251', errors='replace')
+            content = path.read_text(encoding="windows-1251", errors="replace")
 
+        self.editor.setReadOnly(False)
         self.editor.setText(content)
         self.current_file = str(path)
         self.file_label.setText(str(path))
 
         self._apply_lexer(path)
+
+    def show_text(self, text, label, readonly=True):
+        """
+        Показать готовый текст (например, резолвленный через Resolver4).
+        Не привязан к файлу на диске: сохранить его напрямую нельзя.
+        """
+        self.editor.setReadOnly(readonly)
+        self.editor.setText(text)
+        self.current_file = None
+        self.file_label.setText(label)
 
     def _apply_lexer(self, path):
         suffix = path.suffix.lower()

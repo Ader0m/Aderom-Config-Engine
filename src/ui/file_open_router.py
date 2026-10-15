@@ -4,23 +4,14 @@
 import logging
 from pathlib import Path
 
+from sdk.contracts import FileOpenHandler
 from sdk.events import Events
 
 log = logging.getLogger(__name__)
 
 
-class FileOpenHandler:
-    priority = 100
-
-    def can_open(self, path):
-        return False
-
-    def open(self, path, api):
-        raise NotImplementedError
-
-
 class TextEditorHandler(FileOpenHandler):
-    """Обработчик по умолчанию: текстовый редактор."""
+    """Обработчик по умолчанию: текстовый редактор (сырой файл)."""
 
     priority = 0
 
@@ -56,12 +47,16 @@ class FileOpenRouter:
             except Exception:
                 log.exception("Обработчик открытия файла упал: %r", h)
 
-        if self.default is not None:
-            self.default.open(p, api)
-            self._notify(p)
-            return True
+        return self.open_default(p, api)
 
-        return False
+    def open_default(self, path, api):
+        """Открыть в обработчике по умолчанию, минуя зарегистрированные."""
+        p = Path(path)
+        if self.default is None:
+            return False
+        self.default.open(p, api)
+        self._notify(p)
+        return True
 
     def _notify(self, p):
         if self.events is not None:

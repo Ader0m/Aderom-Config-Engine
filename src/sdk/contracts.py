@@ -55,3 +55,18 @@ class ModuleContext:
 
     def log(self, msg):
         self.ui.log(msg)
+
+class FileOpenHandler:
+    """
+    Контракт обработчика открытия файла.
+    Регистрируется через ctx.ui.register_open_handler(...).
+    Чем выше priority, тем раньше обработчик претендует на файл.
+    """
+
+    priority = 100
+
+    def can_open(self, path):
+        return False
+
+    def open(self, path, api):
+        raise NotImplementedError

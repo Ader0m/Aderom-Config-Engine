@@ -15,7 +15,32 @@ RESOLVER_CANDIDATES = ("Resolver4.py", "resolver4.py")
 # ------------------------------------------------------------ пути и маски
 
 def normalize_path(p) -> Path:
-    return Path(os.path.normpath(str(p))).resolve()
+    """
+    Нормализация пути БЕЗ разыменования ссылок/junction.
+
+    ВАЖНО: resolve() здесь запрещён. VFS MO2 может быть собрана
+    ссылками/джанкшенами в каталоге игры; resolve() подменит игровой путь
+    на реальный путь мода (MO2\mods\...), и мы потеряем вид "как в игре".
+    """
+    return Path(os.path.normpath(os.path.abspath(str(p))))
+
+
+def detect_config_dir(candidates):
+    """
+    Ищет каталог конфигов игровой VFS среди кандидатов.
+    Проверяет: <base>/system.ltx, <base>/gamedata/configs/system.ltx,
+    <base>/configs/system.ltx.
+    """
+    for c in candidates:
+        base = Path(c)
+        for sub in (Path(), Path("gamedata") / "configs", Path("configs")):
+            d = base / sub
+            try:
+                if (d / "system.ltx").is_file():
+                    return normalize_path(d)
+            except OSError:
+                continue
+    return None
 
 
 def rel_path(p, base) -> str:

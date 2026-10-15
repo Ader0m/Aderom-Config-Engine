@@ -28,6 +28,7 @@ class PlatformApi:
         self._log_buffer = []
 
         commands.register("ui.open_file", self.request_open_file)
+        commands.register("ui.open_file_raw", self.request_open_file_raw)
 
     # -------------------------------------------------- регистрации (SDK)
     def register_menu(self, menu_title, label, callback, shortcut=None):
@@ -85,4 +86,22 @@ class PlatformApi:
         ok = self.router.open(path, self)
         if not ok:
             self.show_error("Не найден обработчик для открытия файла: %s" % path)
+        return ok
+
+    # -------------------------------------------------- регистрации (SDK)
+    def register_open_handler(self, handler):
+        """Модуль регистрирует своего обработчика открытия файла."""
+        self.router.register(handler)
+
+    # -------------------------------------------------- ui-сервисы
+    def show_text(self, text, label, readonly=True):
+        if self.window is not None:
+            self.window.editor.show_text(text, label, readonly=readonly)
+        else:
+            self._log_buffer.append("[show_text до окна] %s" % label)
+
+    def request_open_file_raw(self, path):
+        ok = self.router.open_default(path, self)
+        if not ok:
+            self.show_error("Нет обработчика по умолчанию для: %s" % path)
         return ok
