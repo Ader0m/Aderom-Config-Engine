@@ -112,24 +112,5 @@ class CoreServices:
         adapter = self._ensure_adapter(forest, config_dir)
         if adapter is None:
             raise RuntimeError("Resolver4.py не найден")
-        sm = self.source_map_real(forest)      # было: build_source_map(forest)
+        sm = self.source_map(forest)      # было: build_source_map(forest)
         return adapter.assemble_text(root_path, sm)
-
-    def source_map_real(self, forest) -> dict:
-        """
-        Карта источников для резолвера: те же ключи, что и в source_map,
-        но значения — фактическое расположение файла (MO2 mod / GAME).
-        """
-        mp = {}
-
-        for f in forest.files:
-            disp = forest.real_paths.get(f, str(f))
-
-            key = os.path.splitext(str(f).lower())[0]
-            mp[key] = disp
-
-            base_key = os.path.splitext(f.name.lower())[0]
-            if base_key not in mp:
-                mp[base_key] = disp
-
-        return mp

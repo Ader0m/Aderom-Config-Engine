@@ -222,7 +222,7 @@ class BaseModule(ModuleBase):
         self.ctx.ui.set_status("Сборка: %s…" % Path(path).name)
 
         def work(log):
-            sm = self.ctx.services.source_map_real(self.forest)
+            sm = self.ctx.services.source_map(self.forest)
             out = self.ctx.services.assemble_to_file(path, sm)
             ok, msg = self.ctx.services.open_notepad(out)
             if not ok:

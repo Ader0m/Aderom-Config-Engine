@@ -14,8 +14,7 @@ from .fs import (
     scan_ltx_files,
     find_system_ltx,
     get_dltx_mods_for_root,
-    real_path_of,
-    describe_real_path
+    describe_real_path,
 )
 from .models import LtxForest
 
@@ -82,16 +81,15 @@ class TreeBuilder:
         files = scan_ltx_files(scan_dir)
         file_set = set(files)
 
-        rel_paths = {f: rel_path(f, scan_dir) for f in files}
-
-        # Фактическое расположение каждого файла (MO2 / игра).
-        # resolve() вызывается точечно и только здесь: дерево остаётся
-        # в виде игровой VFS, а реальные пути нужны для атрибуции источников.
+        # Обе трактовки пути фиксируются ОДИН раз в момент сканирования:
+        #   rel_paths  — игровой вид (VFS): идентичность, дерево, поиск;
+        #   real_paths — физическое расположение (MO2-мод / GAME): атрибуция источников.
         game_root_real = scan_dir.resolve()
-        real_paths = {
-            f: describe_real_path(real_path_of(f), game_root_real)
-            for f in files
-        }
+        rel_paths = {}
+        real_paths = {}
+        for f in files:
+            rel_paths[f] = rel_path(f, scan_dir)
+            real_paths[f] = describe_real_path(f.resolve(), game_root_real)
 
         by_folder = defaultdict(list)
         for f in files:
@@ -242,6 +240,7 @@ class TreeBuilder:
             total_files=len(files),
             files=files,
             rel_paths=rel_paths,
+            real_paths=real_paths,
             roots=actual_roots,
             roots_set=set(actual_roots),
             display_children=dict(display_children),
@@ -253,7 +252,6 @@ class TreeBuilder:
             include_children={k: set(v) for k, v in raw_children.items()},
             include_parents={k: set(v) for k, v in raw_parents.items()},
             dltx_attachments={k: set(v) for k, v in dltx_children.items()},
-            real_paths=real_paths,
         )
 
 

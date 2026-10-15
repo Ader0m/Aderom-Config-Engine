@@ -405,21 +405,27 @@ def get_dltx_mods_for_root(root_path, folder_files):
 
 # ------------------------------------------------------------ source map
 
-def build_source_map(forest) -> dict:
+def build_source_map(forest, field="real_paths") -> dict:
     """
-    Строит карту источников для красивого отображения путей.
+    Карта источников для резолвера.
+
+    Ключи — нижнерегистровые stem'ы файлов (как ожидает pretty_source).
+    Значения — человекочитаемая подпись из запрошенной таблицы леса:
+        field="real_paths" (по умолчанию) — физическое расположение (MO2/GAME);
+        field="rel_paths"                 — игровой VFS-вид.
     """
+    table = getattr(forest, field, None) or {}
     mp = {}
 
     for f in forest.files:
-        rel = forest.rel_paths.get(f, str(f))
+        disp = table.get(f) or forest.rel_paths.get(f, str(f))
 
         key = os.path.splitext(str(f).lower())[0]
-        mp[key] = rel
+        mp[key] = disp
 
         base_key = os.path.splitext(f.name.lower())[0]
         if base_key not in mp:
-            mp[base_key] = rel
+            mp[base_key] = disp
 
     return mp
 
@@ -442,14 +448,6 @@ def pretty_source(source, source_map) -> str:
 
     b = os.path.basename(s2)
     return source_map.get(b, source)
-
-def real_path_of(p) -> Path:
-    """
-    Фактический путь на диске: разыменовывает ссылки/junction VFS.
-    Используется ТОЛЬКО для атрибуции источников, не для дерева.
-    """
-    return Path(os.path.normpath(str(p))).resolve()
-
 
 def describe_real_path(real: Path, game_root_real: Path) -> str:
     """
