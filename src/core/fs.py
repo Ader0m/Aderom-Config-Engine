@@ -442,3 +442,40 @@ def pretty_source(source, source_map) -> str:
 
     b = os.path.basename(s2)
     return source_map.get(b, source)
+
+def real_path_of(p) -> Path:
+    """
+    Фактический путь на диске: разыменовывает ссылки/junction VFS.
+    Используется ТОЛЬКО для атрибуции источников, не для дерева.
+    """
+    return Path(os.path.normpath(str(p))).resolve()
+
+
+def describe_real_path(real: Path, game_root_real: Path) -> str:
+    """
+    Человекочитаемое описание фактического расположения файла:
+
+        MO2\<имя мода>\<путь внутри мода>   — если файл лежит в моде MO2;
+        GAME\<путь от configs игры>        — если файл оригинальный (в игре);
+        абсолютный путь                    — во всех остальных случаях.
+    """
+    parts = real.parts
+    low = [x.lower() for x in parts]
+
+    if "mods" in low:
+        idx = low.index("mods")
+        if idx + 1 < len(parts):
+            mod = parts[idx + 1]
+            rel = parts[idx + 2:]
+            if rel:
+                return "MO2\\%s\\%s" % (mod, "\\".join(rel))
+            return "MO2\\%s" % mod
+
+    try:
+        rel = os.path.relpath(str(real), str(game_root_real))
+        if not rel.startswith(".."):
+            return "GAME\\%s" % rel
+    except ValueError:
+        pass
+
+    return str(real)

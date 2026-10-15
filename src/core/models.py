@@ -37,3 +37,4 @@ class LtxForest:
     include_children: Dict[object, Set[object]] = field(default_factory=dict)
     include_parents: Dict[object, Set[object]] = field(default_factory=dict)
     dltx_attachments: Dict[object, Set[object]] = field(default_factory=dict)
+    real_paths: Dict[object, str] = field(default_factory=dict)

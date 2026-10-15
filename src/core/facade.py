@@ -8,7 +8,7 @@ CoreServices — дозированный фасад над сервисами �
 
 Модули и UI не импортируют внутренние модули ядра напрямую.
 """
-
+import os
 from pathlib import Path
 
 from .external import open_in_notepad_pp
@@ -109,12 +109,27 @@ class CoreServices:
         return detect_config_dir(candidates)
 
     def assemble_text(self, root_path, forest, config_dir, log=None):
-        """
-        Финальное состояние файла "как в игре":
-        проход через внешний Resolver4 и сборка текста.
-        """
         adapter = self._ensure_adapter(forest, config_dir)
         if adapter is None:
             raise RuntimeError("Resolver4.py не найден")
-        sm = build_source_map(forest)
+        sm = self.source_map_real(forest)      # было: build_source_map(forest)
         return adapter.assemble_text(root_path, sm)
+
+    def source_map_real(self, forest) -> dict:
+        """
+        Карта источников для резолвера: те же ключи, что и в source_map,
+        но значения — фактическое расположение файла (MO2 mod / GAME).
+        """
+        mp = {}
+
+        for f in forest.files:
+            disp = forest.real_paths.get(f, str(f))
+
+            key = os.path.splitext(str(f).lower())[0]
+            mp[key] = disp
+
+            base_key = os.path.splitext(f.name.lower())[0]
+            if base_key not in mp:
+                mp[base_key] = disp
+
+        return mp
