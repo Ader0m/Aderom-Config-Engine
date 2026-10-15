@@ -82,8 +82,20 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(self.splitter)
 
-        # Ctrl+F — показать/фокус поиска
-        QShortcut(QKeySequence("Ctrl+F"), self, activated=self._toggle_search)
+        # Ctrl+F — поиск по дереву, но ТОЛЬКО когда фокус в дереве.
+        QShortcut(
+            QKeySequence("Ctrl+F"),
+            self.file_tree,
+            context=Qt.WidgetWithChildrenShortcut,
+            activated=self._toggle_search,
+        )
+
+        # Ctrl+Shift+F — поиск по дереву из любого места окна.
+        QShortcut(
+            QKeySequence("Ctrl+Shift+F"),
+            self,
+            activated=self._toggle_search,
+        )
 
         # Док диагностики
         self.log_dock = QDockWidget("Диагностика", self)

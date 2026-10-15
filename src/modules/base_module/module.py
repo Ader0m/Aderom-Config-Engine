@@ -71,7 +71,9 @@ class BaseModule(ModuleBase):
         ctx.commands.register("base.assemble_open", self.assemble_open)
         ctx.commands.register("base.copy_rel_path", self.copy_rel_path)
         ctx.commands.register("base.open_raw", self.open_raw)
-
+        ctx.commands.register("base.edit_undo", self.edit_undo)
+        ctx.commands.register("base.edit_redo", self.edit_redo)
+        ctx.commands.register("base.edit_find", self.edit_find)
         # Обработчик открытия .ltx: резолв через Resolver4
         ctx.ui.register_open_handler(ResolvedLtxHandler(self))
 
@@ -80,6 +82,9 @@ class BaseModule(ModuleBase):
         ctx.ui.register_tree_context_action("Открыть в Notepad++", self.open_notepad)
         ctx.ui.register_tree_context_action("Собрать и открыть в Notepad++", self.assemble_open)
         ctx.ui.register_tree_context_action("Копировать относительный путь", self.copy_rel_path)
+        ctx.ui.register_menu("Правка", "Отменить", self.edit_undo)
+        ctx.ui.register_menu("Правка", "Повторить", self.edit_redo)
+        ctx.ui.register_menu("Правка", "Найти в файле", self.edit_find)
 
     def activate(self, ctx):
         ctx.log("Базовый модуль активирован.")
@@ -245,5 +250,13 @@ class BaseModule(ModuleBase):
             text = self.ctx.services.rel_path(self.forest, Path(path))
         self.ctx.ui.clipboard_set(text)
 
+    def edit_undo(self):
+        self.ctx.commands.execute("ui.editor_undo")
+
+    def edit_redo(self):
+        self.ctx.commands.execute("ui.editor_redo")
+
+    def edit_find(self):
+        self.ctx.commands.execute("ui.editor_find")
 
 MODULE = BaseModule()

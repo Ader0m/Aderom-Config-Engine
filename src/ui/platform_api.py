@@ -29,6 +29,9 @@ class PlatformApi:
 
         commands.register("ui.open_file", self.request_open_file)
         commands.register("ui.open_file_raw", self.request_open_file_raw)
+        commands.register("ui.editor_undo", self.request_editor_undo)
+        commands.register("ui.editor_redo", self.request_editor_redo)
+        commands.register("ui.editor_find", self.request_editor_find)
 
     # -------------------------------------------------- регистрации (SDK)
     def register_menu(self, menu_title, label, callback, shortcut=None):
@@ -105,3 +108,15 @@ class PlatformApi:
         if not ok:
             self.show_error("Нет обработчика по умолчанию для: %s" % path)
         return ok
+
+    def request_editor_undo(self):
+        if self.window is not None:
+            self.window.editor.undo()
+
+    def request_editor_redo(self):
+        if self.window is not None:
+            self.window.editor.redo()
+
+    def request_editor_find(self):
+        if self.window is not None:
+            self.window.editor.show_find()
