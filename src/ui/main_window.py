@@ -19,6 +19,9 @@ from PyQt5.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QLineEdit,
+    QPushButton,
+    QHBoxLayout,
 )
 
 from sdk.events import Events
@@ -27,7 +30,9 @@ from .editor import CodeEditor
 from .file_open_router import TextEditorHandler
 from .file_tree import FileTreeWidget
 from .search_bar import SearchBar
+from .reference_graph_widget import ReferenceGraphWidget
 
+from .tasks import TaskService
 
 class MainWindow(QMainWindow):
     def __init__(self, api):
@@ -37,6 +42,9 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("LTX Explorer")
         self.resize(1400, 900)
+
+        self.tasks = TaskService()
+        self._graph_task = None
 
         self._init_ui()
         self._init_menu()
@@ -104,6 +112,39 @@ class MainWindow(QMainWindow):
         self.log_dock.setWidget(self.log_text)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
 
+        # Док графа связей
+        self._init_reference_graph_dock()
+
+    def _init_reference_graph_dock(self):
+        """Инициализирует dock widget с графом связей."""
+        self.graph_dock = QDockWidget("Граф связей", self)
+
+        # Панель ввода секции
+        graph_widget = QWidget()
+        graph_layout = QVBoxLayout(graph_widget)
+
+        # Ввод имени секции
+        input_layout = QHBoxLayout()
+        self.section_input = QLineEdit()
+        self.section_input.setPlaceholderText("Введите имя секции...")
+        self.section_input.returnPressed.connect(self._build_graph)
+
+        self.build_graph_btn = QPushButton("Построить")
+        self.build_graph_btn.clicked.connect(self._build_graph)
+
+        input_layout.addWidget(self.section_input)
+        input_layout.addWidget(self.build_graph_btn)
+        graph_layout.addLayout(input_layout)
+
+        # Виджет графа
+        self.reference_graph = ReferenceGraphWidget()
+        self.reference_graph.file_open_requested.connect(self._on_graph_file_open)
+        self.reference_graph.section_selected.connect(self._on_graph_section_selected)
+        graph_layout.addWidget(self.reference_graph, 1)
+
+        self.graph_dock.setWidget(graph_widget)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.graph_dock)
+
     def _init_menu(self):
         menubar = self.menuBar()
         menus = {}
@@ -144,6 +185,52 @@ class MainWindow(QMainWindow):
         if forest is None:
             return []
         return self.api.services.search_nodes(forest, query)
+
+    # -------------------------------------------------- граф связей
+    def _build_graph(self):
+        """Строит граф в фоновом потоке, не блокируя интерфейс."""
+        section_name = self.section_input.text().strip()
+        if not section_name:
+            return
+
+        forest = self.file_tree.forest
+        if forest is None:
+            self.log("Ошибка: дерево не загружено")
+            return
+
+        self.build_graph_btn.setEnabled(False)
+        self.log(f"Построение графа для секции [{section_name}]...")
+
+        def work(log):
+            return self.api.services.build_reference_graph(forest, section_name)
+
+        def done(result, error):
+            self.build_graph_btn.setEnabled(True)
+
+            if error is not None:
+                self.log(f"Ошибка построения графа: {error}")
+                return
+
+            self.reference_graph.display_graph(section_name, result)
+
+            if hasattr(result, "node_count"):
+                self.log(
+                    f"Граф построен: {result.node_count} узлов, "
+                    f"{result.edge_count} рёбер"
+                )
+            else:
+                self.log(f"Граф не построен: {result.message}")
+
+        self._graph_task = self.tasks.run(work, on_done=done, on_log=self.log)
+        
+    def _on_graph_file_open(self, file_path):
+        """Открытие файла из графа связей."""
+        self.api.commands.execute("ui.open_file", file_path)
+
+    def _on_graph_section_selected(self, section_name):
+        """Навигация к секции из графа связей."""
+        self.section_input.setText(section_name)
+        self._build_graph()
 
     # -------------------------------------------------- события
     def _on_tree_ready(self, forest):

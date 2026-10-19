@@ -24,6 +24,12 @@ from .tree_builder import TreeBuilder
 from .tree_query_service import TreeQueryService, search_nodes, sort_nodes
 from .fs import detect_config_dir
 
+from .reference_graph import (
+    ReferenceGraphBuilder,
+    GraphDiagnostic,
+    GraphSnapshot,
+    create_graph_input,
+)
 
 class CoreServices:
     def __init__(self, generated_dir):
@@ -32,11 +38,15 @@ class CoreServices:
         self.tree_query = TreeQueryService()
         self.generated_dir = Path(generated_dir)
         self._adapter = None
+        self._graph_builder = None
+        self._current_resolver = None
+        self._graph_forest = None
 
     # -------------------------------------------------- кэш
     def invalidate_cache(self):
         self.cache.clear()
-
+        self._graph_builder = None
+        self._current_resolver = None
     # -------------------------------------------------- дерево
     def find_system_ltx(self, sel):
         return find_system_ltx(sel)
@@ -91,6 +101,50 @@ class CoreServices:
             log("Resolver4 pass: секций %s" % count)
 
         return count
+
+    # -------------------------------------------------- граф связей
+    def _resolver_instance(self, forest, config_dir=None):
+        if self._ensure_adapter(forest, config_dir) is None:
+            return None
+
+        if self._current_resolver is None:
+            r = self._adapter._make(forest.system_root)
+            r.load()
+            self._current_resolver = r
+
+        return self._current_resolver
+
+    def _make_graph_input(self):
+        from .reference_graph import create_graph_input
+
+        return create_graph_input(
+            forest=self._graph_forest,
+            resolver=self._current_resolver,
+        )
+
+    def build_reference_graph(self, forest, section_name, config_dir=None):
+        from .reference_graph import GraphDiagnostic, ReferenceGraphBuilder
+
+        resolver = self._resolver_instance(forest, config_dir)
+        if resolver is None:
+            return GraphDiagnostic(
+                section=section_name,
+                message="Resolver4 не загружен — граф недоступен",
+            )
+
+        self._graph_forest = forest
+
+        if self._graph_builder is None:
+            self._graph_builder = ReferenceGraphBuilder(
+                input_factory=self._make_graph_input,
+                cache=self.cache,
+            )
+
+        return self._graph_builder.get_section_graph(section_name)
+
+    def invalidate_reference_graph(self):
+        if self._graph_builder is not None:
+            self._graph_builder.invalidate()
 
     # -------------------------------------------------- сборка и внешние инструменты
     def source_map(self, forest):
