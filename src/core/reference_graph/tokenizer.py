@@ -22,7 +22,7 @@ COMMENT_CHAR = ";"
 INCLUDE_SUFFIX_FORM = False
 
 RESOURCE_KEYS = frozenset({"icon", "inv_icon", "visual", "texture"})
-RESOURCE_EXTENSIONS = (".dds", ".ogf", ".tga", ".png", ".bmp")
+RESOURCE_EXTENSIONS = (".dds")
 
 
 class MatchKind(Enum):

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """reference_graph — сервис ядра Aderom Config Engine.
 
 Публичный контракт (только чтение, через SDK):
@@ -5,26 +6,8 @@
 - события graph_updated / graph_index_rebuilt через шину (10.8);
 - все возвращаемые структуры неизменяемы (frozen dataclass).
 """
-from .adapters import (
-    ForestStructureAdapter,
-    ParsedRawAdapter,
-    ResolverTreeAdapter,
-    create_graph_input,
-)
-from .builder import ReferenceGraphBuilder, assemble_graph, RULES_VERSION
-from .graph_input import (
-    GraphInputSnapshot,
-    Line,
-    RawComment,
-    ResolvedSection,
-    ScriptFile,
-    TreeFile,
-    TreeSection,
-    VersionSkewError,
-    XmlFile,
-    assemble_graph_input,
-)
 from .models import (
+    RULES_VERSION,
     ChainLink,
     DiagnosticKind,
     EdgeLabel,
@@ -40,23 +23,38 @@ from .models import (
     Strength,
     Versions,
 )
-from .resolved_index import ResolvedMentionIndex, build_index
-from .tokenizer import MatchKind, match_token, normalize_name, tokenize
+from .tokenizer import (
+    MatchKind,
+    looks_like_resource_path,
+    match_token,
+    normalize_name,
+    split_comment,
+    tokenize,
+)
+from .classifier import aggregate_edge, classify
+from .resolved_index import ResolvedMentionIndex, build_index, resolve_target
+from .graph_input import (
+    GraphInputSnapshot,
+    Line,
+    RawComment,
+    ResolvedSection,
+    ScriptFile,
+    TreeFile,
+    TreeSection,
+    VersionSkewError,
+    XmlFile,
+    assemble_graph_input,
+)
+from .builder import ReferenceGraphBuilder, assemble_graph
+from .adapters import (
+    ForestStructureAdapter,
+    ParsedRawAdapter,
+    ResolverTreeAdapter,
+    create_graph_input,
+)
 
 __all__ = [
-    # Builder
-    "ReferenceGraphBuilder",
-    "assemble_graph",
     "RULES_VERSION",
-    # Index
-    "ResolvedMentionIndex",
-    "build_index",
-    # Tokenizer
-    "MatchKind",
-    "match_token",
-    "normalize_name",
-    "tokenize",
-    # Models
     "ChainLink",
     "DiagnosticKind",
     "EdgeLabel",
@@ -71,7 +69,17 @@ __all__ = [
     "SourceMeta",
     "Strength",
     "Versions",
-    # GraphInput
+    "MatchKind",
+    "looks_like_resource_path",
+    "match_token",
+    "normalize_name",
+    "split_comment",
+    "tokenize",
+    "aggregate_edge",
+    "classify",
+    "ResolvedMentionIndex",
+    "build_index",
+    "resolve_target",
     "GraphInputSnapshot",
     "Line",
     "RawComment",
@@ -82,7 +90,8 @@ __all__ = [
     "VersionSkewError",
     "XmlFile",
     "assemble_graph_input",
-    # Adapters
+    "ReferenceGraphBuilder",
+    "assemble_graph",
     "ForestStructureAdapter",
     "ParsedRawAdapter",
     "ResolverTreeAdapter",

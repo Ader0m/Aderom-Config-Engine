@@ -168,3 +168,58 @@ class CoreServices:
             raise RuntimeError("Resolver4.py не найден")
         sm = self.source_map(forest)      # было: build_source_map(forest)
         return adapter.assemble_text(root_path, sm)
+
+        # -------------------------------------------------- граф связей
+    def _graph_state(self):
+        st = getattr(self, "_refgraph_state", None)
+        if st is None:
+            st = {"builder": None, "resolvers": None, "forest": None}
+            self._refgraph_state = st
+        return st
+
+    def _resolvers_for_forest(self, forest, config_dir=None, log=None):
+        """По одному загруженному LtxResolver на каждый корень дерева."""
+        st = self._graph_state()
+        if self._ensure_adapter(forest, config_dir) is None:
+            return None
+        if st["resolvers"] is None:
+            resolvers = []
+            for root in forest.roots:
+                try:
+                    r = self._adapter._make(root)
+                    r.load()
+                    resolvers.append(r)
+                except Exception as e:
+                    if log:
+                        log("Resolver: корень %s пропущен: %s" % (root, e))
+            st["resolvers"] = resolvers
+        return st["resolvers"]
+
+    def _make_graph_input(self):
+        from .reference_graph import create_graph_input
+        st = self._graph_state()
+        return create_graph_input(forest=st["forest"], resolvers=st["resolvers"])
+
+    def build_reference_graph(self, forest, section_name, config_dir=None):
+        from .reference_graph import GraphDiagnostic, ReferenceGraphBuilder
+        st = self._graph_state()
+        resolvers = self._resolvers_for_forest(forest, config_dir)
+        if not resolvers:
+            return GraphDiagnostic(
+                section=section_name,
+                message="Resolver4 не загружен — граф недоступен",
+            )
+        st["forest"] = forest
+        if st["builder"] is None:
+            st["builder"] = ReferenceGraphBuilder(
+                input_factory=self._make_graph_input,
+                cache=self.cache,
+            )
+        return st["builder"].get_section_graph(section_name)
+
+    def invalidate_reference_graph(self):
+        st = getattr(self, "_refgraph_state", None)
+        if st:
+            st["builder"] = None
+            st["resolvers"] = None
+            st["forest"] = None
