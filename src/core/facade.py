@@ -117,6 +117,7 @@ class CoreServices:
         sm = self.source_map(forest)      # было: build_source_map(forest)
         return adapter.assemble_text(root_path, sm)
 
-    def build_graph(self, forest, section_name: str):
+    # -------------------------------------------------- граф связей
+    def build_section_graph(self, forest, section_name: str):
         """Построить граф связей для секции."""
         return self.graph_builder.build_for_section(forest, section_name)

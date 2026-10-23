@@ -6,14 +6,25 @@
 - «Чистый запуск» (построение дерева + проход Resolver4);
 - автоопределение каталога конфигов игровой VFS (./, ../Anomaly 1.5.3 up, ...);
 - открытие .ltx через Resolver4 (финальное состояние как в игре);
-- контекстные действия дерева.
+- контекстные действия дерева;
+- граф связей секций.
 """
 
 from pathlib import Path
 
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import (
+    QDialog,
+    QVBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QPushButton,
+    QHBoxLayout,
+)
+
 from sdk import FileOpenHandler, ModuleBase, ModuleManifest
 from sdk.events import Events
-
 
 DEFAULT_CONFIG_DIR = r"H:\GRA2.5\Anomaly 1.5.3 up\gamedata\configs"
 
@@ -50,6 +61,7 @@ class BaseModule(ModuleBase):
 
         self.forest = None
         self._running = False
+        self._graph_dialog = None
 
         self.config_dir = self._detect_config_dir(ctx)
         if self.config_dir:
@@ -63,6 +75,7 @@ class BaseModule(ModuleBase):
         # Меню
         ctx.ui.register_menu("Файл", "Открыть папку...", self.choose_dir, "Ctrl+O")
         ctx.ui.register_menu("Файл", "Чистый запуск", self.clean_run, "Ctrl+Shift+R")
+        ctx.ui.register_menu("Инструменты", "Граф связей секции", self.show_section_graph, "Ctrl+G")  # ← новое
 
         # Команды
         ctx.commands.register("base.choose_dir", self.choose_dir)
@@ -74,6 +87,8 @@ class BaseModule(ModuleBase):
         ctx.commands.register("base.edit_undo", self.edit_undo)
         ctx.commands.register("base.edit_redo", self.edit_redo)
         ctx.commands.register("base.edit_find", self.edit_find)
+        ctx.commands.register("base.section_graph", self.show_section_graph)  # ← новое
+        
         # Обработчик открытия .ltx: резолв через Resolver4
         ctx.ui.register_open_handler(ResolvedLtxHandler(self))
 
@@ -174,6 +189,47 @@ class BaseModule(ModuleBase):
         self.ctx.ui.log("Дерево построено. Корней: %d; файлов: %d"
                         % (len(forest.roots), forest.total_files))
 
+    # -------------------------------------------------- граф связей секций
+    def show_section_graph(self):
+        """Запросить имя секции и построить граф связей."""
+        if self.forest is None:
+            self.ctx.ui.show_error("Дерево не построено: сначала «Чистый запуск».")
+            return
+
+        section_name = self.ctx.ui.ask_text("Имя секции:", "raid_material_1")
+        if not section_name:
+            return
+
+        self.ctx.ui.set_status("Построение графа: %s…" % section_name)
+
+        def work(log):
+            return self.ctx.services.build_section_graph(self.forest, section_name)
+
+        self.ctx.tasks.run(
+            work,
+            on_done=lambda graph, err: self._on_graph_done(graph, err, section_name),
+            on_log=self.ctx.ui.log,
+        )
+
+    def _on_graph_done(self, graph, err, section_name):
+        """Показать результаты построения графа (немодально)."""
+        if err is not None:
+            self.ctx.ui.set_status("Ошибка")
+            self.ctx.ui.show_error(f"Не удалось построить граф для '{section_name}':\n{err}")
+            return
+
+        self.ctx.ui.set_status(f"Граф построен: {len(graph.children)} узлов", 5000)
+
+        if self._graph_dialog is None:
+            self._graph_dialog = SectionGraphDialog(self.ctx.ui, graph)
+        else:
+            self._graph_dialog.update_graph(graph)
+
+        # Немодальный показ: окно не блокирует приложение
+        self._graph_dialog.show()
+        self._graph_dialog.raise_()
+        self._graph_dialog.activateWindow()
+
     # -------------------------------------------------- открытие файлов
     def open_resolved(self, path):
         """Открыть .ltx через Resolver4: финальное состояние как в игре."""
@@ -259,4 +315,104 @@ class BaseModule(ModuleBase):
     def edit_find(self):
         self.ctx.commands.execute("ui.editor_find")
 
+class SectionGraphDialog(QDialog):
+    """Немодальное окно результатов графа связей секции."""
+
+    def __init__(self, ui, graph, parent=None):
+        super().__init__(parent)
+        self.ui = ui
+        self.graph = None
+
+        self.setWindowTitle("Граф связей")
+        self.resize(800, 600)
+
+        layout = QVBoxLayout(self)
+
+        self.info_label = QLabel()
+        layout.addWidget(self.info_label)
+
+        self.list_widget = QListWidget()
+        self.list_widget.itemDoubleClicked.connect(self._on_item_double_clicked)
+        layout.addWidget(self.list_widget)
+
+        button_layout = QHBoxLayout()
+
+        open_btn = QPushButton("Открыть файл")
+        open_btn.clicked.connect(self._on_open_clicked)
+        button_layout.addWidget(open_btn)
+
+        close_btn = QPushButton("Закрыть")
+        close_btn.clicked.connect(self.hide)     # hide, не accept/reject
+        button_layout.addWidget(close_btn)
+
+        layout.addLayout(button_layout)
+
+        self.update_graph(graph)
+
+    # -------------------------------------------------- наполнение
+    def update_graph(self, graph):
+        """Полностью пересобрать содержимое окна под новый граф."""
+        self.graph = graph
+
+        self.setWindowTitle(f"Граф связей: {graph.section_name}")
+        self.info_label.setText(
+            f"Секция: {graph.section_name}\n"
+            f"Объявлена в: {graph.root.file_path}\n"
+            f"Строка: {graph.root.first_match_line}\n"
+            f"Найдено файлов: {len(graph.children)}"
+        )
+
+        self.list_widget.clear()
+
+        # Корневой узел (объявление)
+        root_item = QListWidgetItem(
+            f"[ОБЪЯВЛЕНИЕ] {graph.root.file_path.name} "
+            f"(строка {graph.root.first_match_line})"
+        )
+        root_item.setData(Qt.UserRole, graph.root)
+        self.list_widget.addItem(root_item)
+
+        # Дочерние узлы
+        for node in graph.children:
+            if node.raw_ref is not None:
+                # Узел текстуры: в графе виден путь из icons_texture = *
+                item_text = f"[TEXTURE] {node.raw_ref}"
+                tooltip = (
+                    f"icons_texture объявлена в {node.file_path.name}, "
+                    f"строка {node.first_match_line}"
+                )
+            else:
+                match_types = sorted({m.edge_type.value for m in node.matches})
+                item_text = (
+                    f"{node.display_name}  "
+                    f"[совпадений: {len(node.matches)}, "
+                    f"типы: {', '.join(match_types)}, "
+                    f"первая строка: {node.first_match_line}]"
+                )
+                tooltip = str(node.file_path)
+
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.UserRole, node)
+            item.setToolTip(tooltip)
+            self.list_widget.addItem(item)
+
+    # -------------------------------------------------- действия
+    def _node_at(self, item):
+        if item is None:
+            return None
+        return item.data(Qt.UserRole)
+
+    def _on_item_double_clicked(self, item):
+        """Двойной клик — открыть файл на первой строке совпадения."""
+        node = self._node_at(item)
+        if node is not None and node.file_path is not None:
+            self.ui.commands.execute(
+                "ui.open_file_at_line",
+                str(node.file_path),
+                node.first_match_line,
+            )
+
+    def _on_open_clicked(self):
+        self._on_item_double_clicked(self.list_widget.currentItem())
+        
 MODULE = BaseModule()

@@ -32,6 +32,8 @@ class PlatformApi:
         commands.register("ui.editor_undo", self.request_editor_undo)
         commands.register("ui.editor_redo", self.request_editor_redo)
         commands.register("ui.editor_find", self.request_editor_find)
+        commands.register("ui.open_file_at_line", self.request_open_file_at_line)  # ← новое
+
 
     # -------------------------------------------------- регистрации (SDK)
     def register_menu(self, menu_title, label, callback, shortcut=None):
@@ -120,3 +122,28 @@ class PlatformApi:
     def request_editor_find(self):
         if self.window is not None:
             self.window.editor.show_find()
+
+    def ask_text(self, prompt: str, initial: str = "") -> str:
+        """Запросить текст у пользователя через диалог."""
+        from PyQt5.QtWidgets import QInputDialog
+        
+        text, ok = QInputDialog.getText(
+            self.window,
+            "Ввод",
+            prompt,
+            text=initial,
+        )
+        return text if ok and text else ""
+
+    def request_open_file_at_line(self, path, line_number: int):
+        """Открыть файл и перейти к указанной строке."""
+        ok = self.router.open(path, self)
+        if not ok:
+            self.show_error("Не найден обработчик для открытия файла: %s" % path)
+            return ok
+        
+        # Переходим к строке если окно — редактор
+        if self.window is not None and self.window.editor.current_file == str(path):
+            self.window.editor.goto_line(line_number)
+        
+        return ok

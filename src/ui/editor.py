@@ -226,6 +226,16 @@ class CodeEditor(QWidget):
         # (undo/redo/копирование/поиск) "не работает" для пользователя.
         self.editor.setFocus(Qt.OtherFocusReason)
 
+    def goto_line(self, line_number):
+        """Перейти к указанной строке (1-based)."""
+        if line_number < 1:
+            return
+        
+        line_index = line_number - 1
+        self.editor.setCursorPosition(line_index, 0)
+        self.editor.ensureLineVisible(line_index)
+        self.editor.setFocus(Qt.OtherFocusReason)
+    
     def show_text(self, text, label, readonly=True):
         self.editor.setReadOnly(readonly)
         self.editor.setText(text)

@@ -15,6 +15,7 @@ class EdgeType(Enum):
     LTX_REFERENCE = "ltx_reference"
     SCRIPT_REFERENCE = "script_reference"
     XML_REFERENCE = "xml_reference"
+    TEXTURE_REFERENCE = "texture_reference"
 
 
 @dataclass
@@ -30,7 +31,7 @@ class GraphNode:
     file_path: Optional[Path]
     first_match_line: int
     matches: list[MatchInfo] = field(default_factory=list)
-
+    raw_ref: Optional[str] = None
 
 @dataclass
 class SectionGraph:
@@ -70,24 +71,25 @@ class ReferenceGraphBuilder:
         self.cache = cache or DisabledCache()
 
     def build_for_section(self, forest, section_name: str) -> SectionGraph:
-        """
-        Построить граф связей для секции.
-
-        Параметры:
-            forest: LtxForest от TreeBuilder
-            section_name: имя секции (например, "raid_material_1")
-
-        Возвращает:
-            SectionGraph с корневым узлом (объявление) и дочерними узлами (файлы с упоминаниями)
-        """
         section = section_name.lower().strip()
 
-        # 1. Ищем объявление секции
-        root_node = self._find_declaration(forest, section)
+        # 1. Ищем объявление секции + icons_texture в теле секции
+        root_node, texture = self._find_declaration(forest, section)
         if root_node is None:
             raise ValueError(f"Секция '{section}' не найдена в дереве")
 
         children = []
+
+        # 1.1. Узел текстуры: путь из icons_texture = *
+        if texture is not None:
+            raw_ref, tex_match = texture
+            children.append(GraphNode(
+                display_name=self._texture_display_name(raw_ref),
+                file_path=root_node.file_path,   # открывать файл объявления на строке icons_texture
+                first_match_line=tex_match.line_number,
+                matches=[tex_match],
+                raw_ref=raw_ref,
+            ))
 
         # 2. Сканируем .ltx файлы из леса (кроме файла объявления)
         for file_path in forest.files:
@@ -116,7 +118,7 @@ class ReferenceGraphBuilder:
                         matches=matches,
                     ))
 
-        # 4. XML — заглушка (пока не реализуем)
+        # 4. XML — заглушка
 
         return SectionGraph(
             section_name=section,
@@ -126,31 +128,73 @@ class ReferenceGraphBuilder:
 
     # ------------------------------------------------------------ поиск объявления
 
-    def _find_declaration(self, forest, section: str) -> Optional[GraphNode]:
-        """Ищем объявление секции [секция] или [секция]:... в .ltx файлах."""
+    def _find_declaration(self, forest, section: str):
+        """
+        Ищем объявление секции [секция] или [секция]:... в .ltx файлах.
+        Возвращает (root_node, texture), где texture = (raw_path, MatchInfo) или (None, None).
+        """
         for file_path in forest.files:
             text = self._read_file(file_path)
             if not text:
                 continue
 
-            for line_num, line in enumerate(text.splitlines(), 1):
+            lines = text.splitlines()
+            for idx, line in enumerate(lines):
                 if self._is_declaration(line, section):
-                    return GraphNode(
+                    line_num = idx + 1
+                    root = GraphNode(
                         display_name=section,
                         file_path=file_path,
                         first_match_line=line_num,
                         matches=[MatchInfo(
                             edge_type=EdgeType.DECLARATION,
+                            
                             line_number=line_num,
                             line_text=line,
                         )],
                     )
-        return None
+                    raw_ref, tex_match = self._find_icons_texture(lines, idx + 1)
+                    return root, (raw_ref, tex_match) if tex_match else (None, None)
 
+        return None, (None, None)
+
+    def _find_icons_texture(self, lines, start_idx):
+        """
+        Читает тело секции от строки объявления до следующего заголовка [...]
+        и ищет ключ icons_texture = *.
+        Возвращает (raw_path, MatchInfo) или (None, None).
+        """
+        for i in range(start_idx, len(lines)):
+            s = lines[i].strip()
+
+            if not s or s.startswith(";"):
+                continue
+
+            # начало следующей секции — тело закончилось
+            if s.startswith("[") or s.startswith("![") or s.startswith("@[") or s.startswith("!!["):
+                break
+
+            low = s.lower()
+            if low.startswith("icons_texture") and "=" in s:
+                raw = s.split("=", 1)[1].strip()
+                if raw:
+                    return raw, MatchInfo(
+                        edge_type=EdgeType.TEXTURE_REFERENCE,
+                        line_number=i + 1,
+                        line_text=lines[i],
+                    )
+
+        return None, None
+
+    @staticmethod
+    def _texture_display_name(raw_ref: str) -> str:
+        """Имя файла dds из пути: ui\\ui_icon.dds -> ui_icon.dds"""
+        normalized = raw_ref.replace("\\", "/")
+        return normalized.rsplit("/", 1)[-1] or raw_ref
+        
     def _is_declaration(self, line: str, section: str) -> bool:
         """Проверяет, является ли строка объявлением секции."""
         stripped = line.strip()
-        # [секция] или [секция]:...
         if stripped.startswith(f"[{section}]"):
             return True
         if stripped.startswith(f"[{section}]:"):
@@ -167,7 +211,6 @@ class ReferenceGraphBuilder:
 
         matches = []
         for line_num, line in enumerate(text.splitlines(), 1):
-            # Быстрая проверка: есть ли секция в строке?
             if section not in line.lower():
                 continue
 
@@ -184,21 +227,17 @@ class ReferenceGraphBuilder:
         """Классифицирует строку .ltx файла."""
         stripped = line.strip()
 
-        # 1. Объявление: [секция] или [секция]:...
         if self._is_declaration(line, section):
             return EdgeType.DECLARATION
 
-        # 2. Наследование: [ребенок]:...,секция,...
         if self._is_inheritance(stripped, section):
             return EdgeType.INHERITANCE
 
-        # 3. Всё остальное — LTX_REFERENCE
         return EdgeType.LTX_REFERENCE
 
     def _is_inheritance(self, line: str, section: str) -> bool:
         """
         Проверяет наследование: [ребенок]:родитель1,секция,родитель2
-        Секция должна быть в списке родителей после ]:
         """
         if not line.startswith("["):
             return False
@@ -243,5 +282,36 @@ class ReferenceGraphBuilder:
         except Exception:
             text = ""
 
-        # Не кэшируем (заглушка)
         return text
+
+
+# ------------------------------------------------------------ совместимость
+
+def build_file_dependency_graph(forest):
+    """
+    Совместимость со старым API.
+    """
+    children = {}
+
+    for p in forest.files:
+        children[p] = list(forest.display_children.get(p, []))
+
+    return {
+        "roots": list(forest.roots),
+        "files": list(forest.files),
+        "children": children,
+        "parent": dict(forest.node_parent),
+        "subtree_counts": dict(forest.subtree_counts),
+        "include_children": {
+            k: set(v)
+            for k, v in getattr(forest, "include_children", {}).items()
+        },
+        "include_parents": {
+            k: set(v)
+            for k, v in getattr(forest, "include_parents", {}).items()
+        },
+        "dltx_attachments": {
+            k: set(v)
+            for k, v in getattr(forest, "dltx_attachments", {}).items()
+        },
+    }
