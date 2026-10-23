@@ -22,6 +22,7 @@ from .fs import (
 from .resolver_adapter import LtxResolverAdapter
 from .tree_builder import TreeBuilder
 from .tree_query_service import TreeQueryService, search_nodes, sort_nodes
+from .reference_graph import ReferenceGraphBuilder, DisabledCache
 from .fs import detect_config_dir
 
 
@@ -30,6 +31,7 @@ class CoreServices:
         self.cache = FileCacheSystem()
         self.tree_builder = TreeBuilder(cache=self.cache)
         self.tree_query = TreeQueryService()
+        self.graph_builder = ReferenceGraphBuilder(cache=DisabledCache())  # кэш отключён
         self.generated_dir = Path(generated_dir)
         self._adapter = None
 
@@ -114,3 +116,7 @@ class CoreServices:
             raise RuntimeError("Resolver4.py не найден")
         sm = self.source_map(forest)      # было: build_source_map(forest)
         return adapter.assemble_text(root_path, sm)
+
+    def build_graph(self, forest, section_name: str):
+        """Построить граф связей для секции."""
+        return self.graph_builder.build_for_section(forest, section_name)
