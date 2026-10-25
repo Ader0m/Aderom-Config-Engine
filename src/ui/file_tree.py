@@ -18,7 +18,6 @@ from PyQt5.QtWidgets import QStyle, QTreeWidget, QTreeWidgetItem
 
 DRIVE_KEY = "::drive::"
 FOLDER_PREFIX = "::folder::"
-SORT_ROLE = Qt.UserRole + 1
 
 def _segments(forest, path):
     """Сегменты относительного пути узла (нормализовано к '/')."""
@@ -61,25 +60,20 @@ def patch_sort_name(name, parent_path):
 
 class SortableTreeWidgetItem(QTreeWidgetItem):
     def _sort_key(self):
-        v = self.data(0, SORT_ROLE)
-        if v is None:
-            v = self.text(0).lower()
-        return v
+        return self.text(0).lower()
 
     def _is_leaf(self):
-        """Лист = нет прямых детей (колонка 2 == 0)."""
         try:
             return int(self.text(2)) == 0
         except ValueError:
             return False
 
     @staticmethod
-    def _alpha_lt(tree, key_self, key_other):
-        """Алфавит ВСЕГДА по возрастанию: компенсируем инверсию Descending,
-        направление берём из заголовка (sortOrder() в PyQt5 может не быть)."""
+    def _alpha_lt(tree, a, b):
+        # алфавит всегда по возрастанию: компенсируем инверсию Descending
         if tree.header().sortIndicatorOrder() == Qt.DescendingOrder:
-            return key_self > key_other
-        return key_self < key_other
+            return a > b
+        return a < b
 
     def __lt__(self, other):
         tree = self.treeWidget()
@@ -87,28 +81,22 @@ class SortableTreeWidgetItem(QTreeWidgetItem):
             col = tree.sortColumn()
 
             if col in (1, 2):
-                # Оба листа: числовой фильтр их не тасует (у обоих 1/0),
-                # порядок всегда алфавитный по ключу сортировки.
+                # оба листа: числовой фильтр их не тасует, порядок алфавитный
                 if self._is_leaf() and other._is_leaf():
                     return self._alpha_lt(tree, self._sort_key(), other._sort_key())
-
                 try:
                     a, b = int(self.text(col)), int(other.text(col))
                     if a != b:
                         return a < b
                 except ValueError:
                     pass
-
-                # Равные числа у не-листов: алфавит как вторичный ключ
                 return self._alpha_lt(tree, self._sort_key(), other._sort_key())
 
             if col == 0:
-                # Сортировка по имени: направление задаёт клик по заголовку
                 return self._sort_key() < other._sort_key()
 
         return super().__lt__(other)
-
-
+    
 class FileTreeWidget(QTreeWidget):
     file_opened = pyqtSignal(str)
 
@@ -230,7 +218,6 @@ class FileTreeWidget(QTreeWidget):
                     _, name, fkey, total, direct = e
                     item = SortableTreeWidgetItem([name, str(total), str(direct)])
                     item.setData(0, Qt.UserRole, fkey)
-                    item.setData(0, SORT_ROLE, name.lower())
                     item.setIcon(0, dir_icon)
                     self._folder_items[fkey] = item
                     self._child_index[(parent_key, name)] = item
@@ -273,10 +260,6 @@ class FileTreeWidget(QTreeWidget):
             [name, str(f.subtree_counts.get(path, 1)), str(direct)],
         )
         item.setData(0, Qt.UserRole, key)
-
-        parent_path = f.node_parent.get(path)
-        item.setData(0, SORT_ROLE, patch_sort_name(name, parent_path))
-
         item.setIcon(0, self.style().standardIcon(QStyle.SP_FileIcon))
         self._path_to_item[key] = item
         if parent_key is not None:
