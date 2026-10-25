@@ -77,6 +77,9 @@ class BaseModule(ModuleBase):
         ctx.ui.register_menu("Файл", "Чистый запуск", self.clean_run, "Ctrl+Shift+R")
         ctx.ui.register_menu("Инструменты", "Граф связей секции", self.show_section_graph, "Ctrl+G")  # ← новое
 
+        # Пункт меню для сортировки
+        ctx.ui.register_menu("Вид", "Сортировать по убыванию (Файлов в дереве)", self.sort_tree_files_desc)
+
         # Команды
         ctx.commands.register("base.choose_dir", self.choose_dir)
         ctx.commands.register("base.clean_run", self.clean_run)
@@ -87,8 +90,9 @@ class BaseModule(ModuleBase):
         ctx.commands.register("base.edit_undo", self.edit_undo)
         ctx.commands.register("base.edit_redo", self.edit_redo)
         ctx.commands.register("base.edit_find", self.edit_find)
-        ctx.commands.register("base.section_graph", self.show_section_graph)  # ← новое
-        
+        ctx.commands.register("base.section_graph", self.show_section_graph)
+        ctx.commands.register("base.sort_tree_files_desc", self.sort_tree_files_desc)
+
         # Обработчик открытия .ltx: резолв через Resolver4
         ctx.ui.register_open_handler(ResolvedLtxHandler(self))
 
@@ -315,6 +319,21 @@ class BaseModule(ModuleBase):
     def edit_find(self):
         self.ctx.commands.execute("ui.editor_find")
 
+    def sort_tree_files_desc(self, path=None):
+        """
+        Команда для явной сортировки дерева по убыванию количества файлов.
+        Использует Duck Typing, чтобы не нарушать контракт SDK и не импортировать UI-виджеты напрямую.
+        """
+        if self.ctx.ui.window and hasattr(self.ctx.ui.window, "file_tree"):
+            tree = self.ctx.ui.window.file_tree
+            if hasattr(tree, "sort_by_files_desc"):
+                tree.sort_by_files_desc()
+            else:
+                # Fallback, если метод еще не реализован в UI
+                from PyQt5.QtCore import Qt
+                tree.setSortingEnabled(True)
+                tree.sortByColumn(1, Qt.DescendingOrder)
+
 class SectionGraphDialog(QDialog):
     """Немодальное окно результатов графа связей секции."""
 
@@ -414,5 +433,5 @@ class SectionGraphDialog(QDialog):
 
     def _on_open_clicked(self):
         self._on_item_double_clicked(self.list_widget.currentItem())
-        
+
 MODULE = BaseModule()

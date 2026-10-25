@@ -84,7 +84,7 @@ class ReferenceGraphBuilder:
         if texture is not None:
             raw_ref, tex_match = texture
             children.append(GraphNode(
-                display_name=self._texture_display_name(raw_ref),
+                display_name= self._texture_display_name(raw_ref),
                 file_path=root_node.file_path,   # открывать файл объявления на строке icons_texture
                 first_match_line=tex_match.line_number,
                 matches=[tex_match],

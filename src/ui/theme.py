@@ -234,9 +234,17 @@ QTreeWidget::item:selected:active, QTreeView::item:selected:active {
     color: #FFFFFF;
 }
 
-QTreeWidget::branch {
+/* ============ Ветки дерева (стрелки раскрытия) ============ */
+QTreeWidget::branch, QTreeView::branch {
     background: transparent;
-    border-image: none;
+}
+
+QTreeWidget::branch:has-children:closed, QTreeView::branch:has-children:closed {
+    image: url("@BRANCH_CLOSED@");
+}
+
+QTreeWidget::branch:has-children:open, QTreeView::branch:has-children:open {
+    image: url("@BRANCH_OPEN@");
 }
 
 /* ============ Редактор кода ============ */
@@ -705,3 +713,47 @@ QMainWindow::separator:hover {
 def apply_theme(app):
     """Применяет тёмную тему V2.1 ко всему приложению PyQt5."""
     app.setStyleSheet(DARK_THEME)
+
+import os
+import tempfile
+
+from PyQt5.QtCore import Qt, QPoint
+from PyQt5.QtGui import QColor, QImage, QPainter, QPolygon
+
+_BRANCH_DIR = os.path.join(tempfile.gettempdir(), "ace_theme_icons")
+
+
+def _draw_triangle(path, points):
+    img = QImage(12, 12, QImage.Format_ARGB32)
+    img.fill(Qt.transparent)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor("#BCBFBC"))          # основной цвет текста темы
+    p.drawPolygon(QPolygon([QPoint(*pt) for pt in points]))
+    p.end()
+    img.save(path)
+    return path.replace("\\", "/")         # QSS url() любит прямые слеши
+
+
+def ensure_branch_icons():
+    os.makedirs(_BRANCH_DIR, exist_ok=True)
+    closed = _draw_triangle(
+        os.path.join(_BRANCH_DIR, "branch_closed.png"),
+        [(4, 2), (4, 10), (10, 6)],        # ▶
+    )
+    opened = _draw_triangle(
+        os.path.join(_BRANCH_DIR, "branch_open.png"),
+        [(2, 4), (10, 4), (6, 10)],        # ▼
+    )
+    return closed, opened
+
+
+def apply_theme(app):
+    """Применяет тёмную тему V2.1 ко всему приложению PyQt5."""
+    closed, opened = ensure_branch_icons()
+    app.setStyleSheet(
+        DARK_THEME
+        .replace("@BRANCH_CLOSED@", closed)
+        .replace("@BRANCH_OPEN@", opened)
+    )
