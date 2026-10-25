@@ -1,5 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Редактор кода на QScintilla + поиск внутри файла."""
+"""Редактор кода на QScintilla + поиск внутри файла.
+
+Все цвета и шрифты берутся из ui.theme.PALETTE — единственного источника
+темы. QSS не управляет стилями лексера Scintilla, поэтому палитра
+применяется программно: setFont/setColor/setPaper на ВСЕ стили лексера
+(иначе просвечивают штатные дефолты QsciLexerProperties: бирюза #007F7F
+у Comment, светлая полоса #E0F0F0 у Section, Comic Sans MS у Comment),
+плюс точечные акценты syn_* по стилям.
+"""
 
 from pathlib import Path
 
@@ -20,6 +28,11 @@ from PyQt5.Qsci import (
     QsciLexerProperties,
     QsciLexerXML,
 )
+
+try:  # запуск с корня проекта (src в sys.path)
+    from ui.theme import PALETTE
+except ImportError:  # запуск как пакета
+    from .theme import PALETTE
 
 
 class EditorFindBar(QWidget):
@@ -72,8 +85,11 @@ class EditorFindBar(QWidget):
     def eventFilter(self, obj, ev):
         if obj is self.entry and ev.type() == QEvent.KeyPress:
             if ev.key() in (Qt.Key_Return, Qt.Key_Enter):
-                if ev.modifiers() & Qt.ShiftModifier:
-                    self.find_prev()
+                if ev.key() == Qt.Key_Enter or ev.modifiers() & Qt.ShiftModifier:
+                    if ev.modifiers() & Qt.ShiftModifier:
+                        self.find_prev()
+                    else:
+                        self.find_next()
                 else:
                     self.find_next()
                 return True
@@ -136,8 +152,11 @@ class CodeEditor(QWidget):
         layout.setSpacing(0)
 
         self.file_label = QLabel("Файл не открыт")
+        # Цвета — из палитры, без hex-литералов в UI-коде.
         self.file_label.setStyleSheet(
-            "padding: 4px; background-color: #2D2D30; color: #D4D4D4;"
+            "padding: 4px; background-color: {bg}; color: {fg};".format(
+                bg=PALETTE.bg_titlebar, fg=PALETTE.text
+            )
         )
         layout.addWidget(self.file_label)
 
@@ -173,25 +192,83 @@ class CodeEditor(QWidget):
             activated=self.find_bar.find_prev,
         )
 
+    # -------------------------------------------------- оформление
+    def _editor_font(self) -> QFont:
+        """Только явный point-based шрифт из палитры.
+
+        НЕ использовать self.editor.font(): шрифт виджета может быть
+        переопределён QSS, а пиксельный размер даёт pointSizeF() == -1,
+        который Scintilla превращает в микроскопический текст
+        (SCI_STYLESETSIZEFRACTIONAL).
+        """
+        return QFont(PALETTE.editor_font_family, PALETTE.editor_font_size_pt)
+
     def _setup_editor(self):
-        font = QFont("Cascadia Code", 10)
+        font = self._editor_font()
         self.editor.setFont(font)
 
         self.editor.setMarginType(0, QsciScintilla.NumberMargin)
         self.editor.setMarginWidth(0, "00000")
-        self.editor.setMarginsBackgroundColor(QColor("#2D2D30"))
-        self.editor.setMarginsForegroundColor(QColor("#9D9D9D"))
+        self.editor.setMarginsFont(font)
+        self.editor.setMarginsBackgroundColor(QColor(PALETTE.ed_margin_bg))
+        self.editor.setMarginsForegroundColor(QColor(PALETTE.ed_margin_fg))
 
-        self.editor.setColor(QColor("#D4D4D4"))
-        self.editor.setPaper(QColor("#1E1E1E"))
+        self.editor.setColor(QColor(PALETTE.syn_default))
+        self.editor.setPaper(QColor(PALETTE.bg_main))
 
-        self.editor.setCaretForegroundColor(QColor("#D4D4D4"))
-        self.editor.setCaretLineBackgroundColor(QColor("#2A2D2E"))
+        self.editor.setCaretForegroundColor(QColor(PALETTE.ed_caret))
+        self.editor.setCaretLineBackgroundColor(QColor(PALETTE.ed_caret_line))
         self.editor.setCaretLineVisible(True)
 
         self.editor.setIndentationWidth(4)
         self.editor.setIndentationsUseTabs(False)
         self.editor.setWrapMode(QsciScintilla.WrapNone)
+
+    def _apply_lexer(self, path: Path):
+        suffix = path.suffix.lower()
+
+        if suffix == ".xml":
+            lexer = QsciLexerXML()
+        elif suffix == ".ltx":
+            lexer = QsciLexerProperties()
+        else:
+            lexer = None
+
+        if lexer is None:
+            self.editor.setLexer(None)
+            return
+
+        font = self._editor_font()
+        paper = QColor(PALETTE.bg_main)
+        fg = QColor(PALETTE.syn_default)
+
+        # Дефолты лексера.
+        lexer.setDefaultFont(font)
+        lexer.setDefaultColor(fg)
+        lexer.setDefaultPaper(paper)
+
+        # Переопределения ШТАТНЫХ per-style дефолтов лексера
+        # (Comment=Comic Sans/#007F7F, Section=#E0F0F0 и т.д.).
+        # style == -1 означает "все стили".
+        lexer.setFont(font)
+        lexer.setColor(fg)
+        lexer.setPaper(paper)
+
+        if isinstance(lexer, QsciLexerProperties):
+            lexer.setColor(QColor(PALETTE.syn_comment), QsciLexerProperties.Comment)
+            lexer.setColor(QColor(PALETTE.syn_section), QsciLexerProperties.Section)
+            lexer.setColor(QColor(PALETTE.syn_key), QsciLexerProperties.Key)
+            lexer.setColor(QColor(PALETTE.syn_assign), QsciLexerProperties.Assignment)
+            lexer.setColor(QColor(PALETTE.syn_value), QsciLexerProperties.DefaultValue)
+        elif isinstance(lexer, QsciLexerXML):
+            lexer.setColor(QColor(PALETTE.syn_section), QsciLexerXML.Tag)
+            lexer.setColor(QColor(PALETTE.syn_section), QsciLexerXML.TagEnd)
+            lexer.setColor(QColor(PALETTE.syn_key), QsciLexerXML.Attribute)
+            lexer.setColor(QColor(PALETTE.syn_value), QsciLexerXML.DoubleQuotedString)
+            lexer.setColor(QColor(PALETTE.syn_value), QsciLexerXML.SingleQuotedString)
+            lexer.setColor(QColor(PALETTE.syn_comment), QsciLexerXML.Comment)
+
+        self.editor.setLexer(lexer)
 
     # -------------------------------------------------- публичные действия
     def show_find(self):
@@ -230,12 +307,12 @@ class CodeEditor(QWidget):
         """Перейти к указанной строке (1-based)."""
         if line_number < 1:
             return
-        
+
         line_index = line_number - 1
         self.editor.setCursorPosition(line_index, 0)
         self.editor.ensureLineVisible(line_index)
         self.editor.setFocus(Qt.OtherFocusReason)
-    
+
     def show_text(self, text, label, readonly=True):
         self.editor.setReadOnly(readonly)
         self.editor.setText(text)
@@ -243,21 +320,3 @@ class CodeEditor(QWidget):
         self.file_label.setText(label)
 
         self.editor.setFocus(Qt.OtherFocusReason)
-
-    def _apply_lexer(self, path: Path):
-        suffix = path.suffix.lower()
-
-        if suffix == ".xml":
-            lexer = QsciLexerXML()
-        elif suffix == ".ltx":
-            lexer = QsciLexerProperties()
-        else:
-            lexer = None
-
-        if lexer is not None:
-            lexer.setDefaultFont(self.editor.font())
-            lexer.setDefaultColor(QColor("#D4D4D4"))
-            lexer.setDefaultPaper(QColor("#1E1E1E"))
-            self.editor.setLexer(lexer)
-        else:
-            self.editor.setLexer(None)
