@@ -259,7 +259,7 @@ class BaseModule(ModuleBase):
     def _on_resolved(self, path, text, err):
         if err is not None:
             self.ctx.ui.set_status("Ошибка")
-            self.ctx.ui.show_error("Не удалось разрешить %s:\n%s" % (path.name, err))
+            self.ctx.ui.show_error("Не удалось разрешить %s:\n%s\n\nИсправьте файл через ПКМ -> Открыть исходный файл" % (path.name, err))
             return
 
         rel = self.ctx.services.rel_path(self.forest, path)
