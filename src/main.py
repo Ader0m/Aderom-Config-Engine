@@ -32,6 +32,13 @@ def main():
     from PyQt5.QtWidgets import QApplication
 
     from core.facade import CoreServices
+    from core.file_cache import FileCacheSystem
+    from core.tree_builder import TreeBuilder
+    from core.tree_query_service import TreeQueryService
+    from core.reference_graph import ReferenceGraphBuilder, DisabledCache
+    from core.resolver_service import ResolverService
+    from core.assembly_service import AssemblyService
+
     from sdk import SDK_VERSION, ModuleContext, ModuleLoader
     from sdk.events import Events
     from ui.bus import CommandBus, EventBus
@@ -48,7 +55,37 @@ def main():
     app_dir = Path(__file__).resolve().parent
 
     # 1) Сервисы ядра.
-    services = CoreServices(generated_dir=app_dir / "generated")
+     # --------------------------------------------------
+    # 1) Сервисы ядра (Композиционный корень создаёт их здесь)
+    # --------------------------------------------------
+
+    # Общий кэш
+    cache = FileCacheSystem()
+
+    # Дерево
+    tree_builder = TreeBuilder(cache=cache)
+    tree_query = TreeQueryService()
+
+    # Граф связей
+    graph_builder = ReferenceGraphBuilder(cache=DisabledCache())
+
+    # Резолвер и сборка
+    resolver_service = ResolverService(cache=cache)
+    assembly_service = AssemblyService(
+        resolver_service=resolver_service,
+        generated_dir=app_dir / "generated",
+    )
+
+    # Фасад (тонкий, только агрегирует сервисы)
+    services = CoreServices(
+        cache=cache,
+        tree_builder=tree_builder,
+        tree_query=tree_query,
+        graph_builder=graph_builder,
+        resolver_service=resolver_service,
+        assembly_service=assembly_service,
+        generated_dir=app_dir / "generated",
+    )
 
     # 2) Сервисы платформы.
     events = EventBus()

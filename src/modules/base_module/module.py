@@ -163,7 +163,8 @@ class BaseModule(ModuleBase):
         log("Сканирую: %s" % scan_dir)
 
         forest = self.ctx.services.build_tree(scan_dir, system, log=log, clean=True)
-        self.ctx.services.resolver_pass(forest, self.config_dir, log=log)
+
+        self.ctx.services.resolver.run_pass(forest, self.config_dir, log=log)
 
         return forest
 
@@ -244,8 +245,8 @@ class BaseModule(ModuleBase):
         path = Path(path)
         self.ctx.ui.set_status("Резолв: %s…" % path.name)
 
-        def work(log):
-            return self.ctx.services.assemble_text(
+        def work(log):           
+            return self.ctx.services.resolver.assemble_text(
                 path, self.forest, self.config_dir, log=log
             )
 
@@ -279,6 +280,7 @@ class BaseModule(ModuleBase):
         if not ok:
             self.ctx.ui.show_error(msg)
 
+    # В методе assemble_open:
     def assemble_open(self, path):
         if self.forest is None:
             self.ctx.ui.show_error("Нет дерева: сначала выполните «Чистый запуск».")
@@ -287,8 +289,8 @@ class BaseModule(ModuleBase):
         self.ctx.ui.set_status("Сборка: %s…" % Path(path).name)
 
         def work(log):
-            sm = self.ctx.services.source_map(self.forest)
-            out = self.ctx.services.assemble_to_file(path, sm)
+            out = self.ctx.services.assembly.assemble_to_file(path, self.forest)
+
             ok, msg = self.ctx.services.open_notepad(out)
             if not ok:
                 raise RuntimeError(msg)
