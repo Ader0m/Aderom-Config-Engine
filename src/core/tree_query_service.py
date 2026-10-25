@@ -26,17 +26,30 @@ class TreeQueryService:
 
 
 # ------------------------------------------------------------ функции
+def _patch_sort_name(forest, path, name_lower):
+    parent = forest.node_parent.get(path)
+    if parent is None:
+        return name_lower
+    stem = parent.stem
+    for base in (stem.replace(".", "_"), stem):
+        prefix = "mod_%s_" % base.lower()
+        if name_lower.startswith(prefix) and len(name_lower) > len(prefix):
+            return name_lower[len(prefix):]
+    return name_lower
 
 def node_sort_key(forest, path, col):
-    rel = forest.rel_paths.get(path, str(path)).lower()
+    rel = forest.rel_paths.get(path, str(path)).lower().replace("\\", "/")
+    dir_part, _, name = rel.rpartition("/")
+    key_name = _patch_sort_name(forest, path, name)
+    keyed_rel = (dir_part + "/" + key_name) if dir_part else key_name
 
     if col == "files":
-        return (forest.subtree_counts.get(path, 1), rel)
+        return (forest.subtree_counts.get(path, 1), keyed_rel)
 
     if col == "children":
-        return (len(forest.display_children.get(path, [])), rel)
+        return (len(forest.display_children.get(path, [])), keyed_rel)
 
-    return (rel, forest.subtree_counts.get(path, 1))
+    return (keyed_rel, forest.subtree_counts.get(path, 1))
 
 
 def sort_nodes(forest, nodes, col="path", reverse=False):
