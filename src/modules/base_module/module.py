@@ -237,16 +237,79 @@ class BaseModule(ModuleBase):
 
     # -------------------------------------------------- открытие файлов
     def open_resolved(self, path):
-        """Открыть .ltx через Resolver4: финальное состояние как в игре."""
+        """Открыть .ltx: резолв для базовых, сырой вид для патчей."""
         if self.forest is None:
             self.ctx.ui.show_error("Дерево не построено: сначала «Чистый запуск».")
             return False
 
         path = Path(path)
+
+        if path.name.lower().startswith("mod_"):
+            return self._open_as_patch(path)
+
+        return self._open_as_resolved(path)
+
+    def _open_as_patch(self, path):
+        """Открыть DLTX-патч: сырое содержимое + информация о корне."""
+        self.ctx.ui.set_status("Патч: %s…" % path.name)
+
+        try:
+            raw_content = path.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            self.ctx.ui.show_error(f"Не удалось прочитать: {e}")
+            return False
+
+        # Корень уже посчитан TreeBuilder'ом — просто читаем
+        parents = self.forest.include_parents.get(path) or ()
+        root = sorted(parents, key=lambda x: str(x).lower())[0] if parents else None
+        
+        # Формируем заголовок
+        header = [
+            "; ═══════════════════════════════════════════════════════════",
+            ";                    DLTX-ПАТЧ",
+            "; ═══════════════════════════════════════════════════════════",
+            f"; Файл: {path.name}",
+            f"; Тип: Патч (не загружается отдельно движком)",
+        ]
+        
+        if root:
+            rel_root = self.ctx.services.rel_path(self.forest, root)
+            header += [
+                f"; Применяется к: {rel_root}",
+                "; ",
+                "; Чтобы увидеть итоговое состояние с применённым патчем,",
+                f"   откройте корневой файл: {root.name}",
+            ]
+        else:
+            header += [
+                "; ",
+                "; ⚠️ Патч не подключился ни к одному базовому файлу!",
+                "; Проверьте имя (должно быть mod_<имя_базы>_<что-то>.ltx)",
+            ]
+        
+        header += [
+            "; ═══════════════════════════════════════════════════════════",
+            "",
+        ]
+        
+        full_text = "\n".join(header) + raw_content
+        
+        rel = self.ctx.services.rel_path(self.forest, path)
+        title = "DLTX PATCH: %s" % rel
+        if not root:
+            title = "⚠️ " + title
+        
+        self.ctx.ui.show_text(full_text, title, readonly=True)
+        self.ctx.ui.set_status("Открыт патч: %s" % rel, 5000)
+        
+        return True
+
+    def _open_as_resolved(self, path):
+        """Открыть базовый .ltx через Resolver4."""
         self.ctx.ui.set_status("Резолв: %s…" % path.name)
 
-        def work(log):           
-            return self.ctx.services.resolver.assemble_text(
+        def work(log):
+            return self.ctx.services.assemble_text(
                 path, self.forest, self.config_dir, log=log
             )
 
