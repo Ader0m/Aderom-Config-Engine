@@ -50,7 +50,7 @@ class BaseModule(ModuleBase):
         else:
             ctx.log("Каталог конфигов не найден — будет запрошен при запуске.")
 
-        ctx.events.subscribe(
+        self._app_started_sub = ctx.events.subscribe(
             Events.APP_STARTED,
             lambda payload: self._clean_run.run(),
         )
@@ -65,6 +65,10 @@ class BaseModule(ModuleBase):
         ctx.log("Базовый модуль активирован.")
 
     def deactivate(self, ctx):
+        sub = getattr(self, "_app_started_sub", None)
+        if sub is not None and hasattr(sub, "unsubscribe"):
+            sub.unsubscribe()
+        self._app_started_sub = None
         self._section_graph.close()
         ctx.log("Базовый модуль деактивирован.")
 

@@ -10,6 +10,7 @@ from PyQt5.QtWidgets import QApplication, QFileDialog, QMessageBox
 from sdk.events import Events
 
 from .file_open_router import FileOpenRouter
+from .input_bindings import MouseBindingManager, ShortcutManager
 from .module_windows import ModuleWindowManager
 
 
@@ -23,9 +24,11 @@ class PlatformApi:
 
         self.router = FileOpenRouter(events=events)
         self._window_manager = ModuleWindowManager()
+        self._shortcut_manager = ShortcutManager(self.trigger_action)
+        self._mouse_manager = MouseBindingManager(self.trigger_action)
 
         self.window = None
-        self._menu_reg = []      # (menu_title, label, callback, shortcut)
+        self._menu_reg = []      # (menu_title, label, callback, shortcut, action)
         self._ctx_actions = []   # (label, handler(path))
         self._log_buffer = []
 
@@ -38,11 +41,52 @@ class PlatformApi:
 
 
     # -------------------------------------------------- регистрации (SDK)
-    def register_menu(self, menu_title, label, callback, shortcut=None):
-        self._menu_reg.append((menu_title, label, callback, shortcut))
+    def register_menu(self, menu_title, label, callback, shortcut=None, action=None):
+        self._menu_reg.append((menu_title, label, callback, shortcut, action))
 
     def register_tree_context_action(self, label, handler):
         self._ctx_actions.append((label, handler))
+
+    def register_shortcut(self, key, callback, scope="global", action=None):
+        self._shortcut_manager.register(key, callback, scope=scope, action=action)
+
+    def register_mouse_binding(
+        self,
+        button,
+        modifiers,
+        callback,
+        scope="global",
+        event="press",
+        action=None,
+    ):
+        self._mouse_manager.register(
+            button,
+            modifiers,
+            callback,
+            scope=scope,
+            event=event,
+            action=action,
+        )
+
+    def register_action_handler(self, action, handler, priority=0):
+        return self.events.subscribe(action, handler, priority)
+
+    def dispatch_action(self, action, payload=None):
+        return self.events.dispatch(action, payload)
+
+    def trigger_action(self, action, callback, payload=None, fallback=None):
+        """Выполнить UI-действие с возможностью перехвата.
+
+        Сначала рассылается конкретное ``action``, затем общее действие
+        ``fallback`` (например, ``ui.shortcut``). Если любое из них
+        перехвачено, ``callback`` не вызывается.
+        """
+        if action and self.events.dispatch(action, payload):
+            return True
+        if fallback and self.events.dispatch(fallback, payload):
+            return True
+        result = callback()
+        return bool(result)
 
     @property
     def menu_registrations(self):
@@ -56,6 +100,8 @@ class PlatformApi:
     def bind_window(self, window):
         self.window = window
         self._window_manager.bind_main_window(window)
+        self._shortcut_manager.attach(window)
+        self._mouse_manager.attach(window)
         buf, self._log_buffer = self._log_buffer, []
         for m in buf:
             window.log(m)
@@ -105,10 +151,26 @@ class PlatformApi:
     def show_module_window(self, key, window):
         """Показать окно, созданное модулем."""
         self._window_manager.show(key, window)
+        self.events.publish(Events.UI_WINDOW_SHOWN, key)
 
     def close_module_window(self, key):
         """Закрыть окно модуля по ключу."""
         self._window_manager.close(key)
+        self.events.publish(Events.UI_WINDOW_CLOSED, key)
+
+    # -------------------------------------------------- вкладки редактора
+    def open_editor_tab(self, tab_id, title, widget):
+        """Открыть вкладку, созданную модулем."""
+        if self.window is None:
+            self.log("[open_editor_tab до окна] %s" % tab_id)
+            return
+        self.window.editor.open_tab(tab_id, title, widget)
+
+    def close_editor_tab(self, tab_id):
+        """Закрыть вкладку модуля."""
+        if self.window is None:
+            return
+        self.window.editor.close_tab(tab_id)
 
     # -------------------------------------------------- ui-сервисы
     def show_text(self, text, label, readonly=True):

@@ -23,7 +23,7 @@ from PyQt5.QtWidgets import (
 
 from sdk.events import Events
 
-from .editor import CodeEditor
+from .editor_tabs import EditorTabs
 from .file_open_router import TextEditorHandler
 from .file_tree import FileTreeWidget
 from .search_bar import SearchBar
@@ -42,7 +42,10 @@ class MainWindow(QMainWindow):
         self._init_menu()
         self._init_statusbar()
 
-        self.api.events.subscribe(Events.TREE_READY, self._on_tree_ready)
+        self._tree_ready_sub = self.api.events.subscribe(
+            Events.TREE_READY,
+            self._on_tree_ready,
+        )
 
         self.api.bind_window(self)
 
@@ -72,7 +75,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.file_tree, 1)
 
         # Редактор
-        self.editor = CodeEditor()
+        self.editor = EditorTabs(events=self.api.events)
         self.api.router.set_default(TextEditorHandler(self.editor))
 
         self.splitter.addWidget(left)
@@ -108,7 +111,7 @@ class MainWindow(QMainWindow):
         menubar = self.menuBar()
         menus = {}
 
-        for title, label, callback, shortcut in self.api.menu_registrations:
+        for title, label, callback, shortcut, action in self.api.menu_registrations:
             m = menus.get(title)
             if m is None:
                 m = menubar.addMenu(title)
@@ -117,7 +120,12 @@ class MainWindow(QMainWindow):
             a = QAction(label, self)
             if shortcut:
                 a.setShortcut(shortcut)
-            a.triggered.connect(lambda _=False, cb=callback: cb())
+            a.triggered.connect(
+                lambda _=False, cb=callback, act=action: self.api.trigger_action(
+                    act,
+                    cb,
+                )
+            )
             m.addAction(a)
 
         file_menu = menus.get("Файл") or menubar.addMenu("Файл")
@@ -171,3 +179,8 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------- журнал
     def log(self, msg):
         self.log_text.append(str(msg))
+
+    # -------------------------------------------------- завершение
+    def closeEvent(self, event):
+        self._tree_ready_sub.unsubscribe()
+        super().closeEvent(event)

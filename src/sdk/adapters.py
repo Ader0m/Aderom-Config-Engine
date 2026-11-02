@@ -179,14 +179,56 @@ class UiApiAdapter:
 
     # --- регистрация возможностей модуля ---------------------------------
 
-    def register_menu(self, menu_title, label, callback, shortcut=None):
-        self._platform.register_menu(menu_title, label, callback, shortcut)
+    def register_menu(self, menu_title, label, callback, shortcut=None, action=None):
+        self._platform.register_menu(
+            menu_title,
+            label,
+            callback,
+            shortcut,
+            action,
+        )
 
     def register_tree_context_action(self, label, handler):
         self._platform.register_tree_context_action(label, handler)
 
     def register_open_handler(self, handler):
         self._platform.register_open_handler(handler)
+
+    def register_shortcut(self, key, callback, scope="global", action=None):
+        self._platform.register_shortcut(
+            key,
+            callback,
+            scope=scope,
+            action=action,
+        )
+
+    def register_mouse_binding(
+        self,
+        button,
+        modifiers,
+        callback,
+        scope="global",
+        event="press",
+        action=None,
+    ):
+        self._platform.register_mouse_binding(
+            button,
+            modifiers,
+            callback,
+            scope=scope,
+            event=event,
+            action=action,
+        )
+
+    def register_action_handler(self, action, handler, priority=0):
+        return self._platform.register_action_handler(
+            action,
+            handler,
+            priority,
+        )
+
+    def dispatch_action(self, action, payload=None):
+        return self._platform.dispatch_action(action, payload)
 
     # --- уведомления и запросы --------------------------------------------
 
@@ -213,6 +255,12 @@ class UiApiAdapter:
 
     def close_module_window(self, key):
         self._platform.close_module_window(key)
+
+    def open_editor_tab(self, tab_id, title, widget):
+        self._platform.open_editor_tab(tab_id, title, widget)
+
+    def close_editor_tab(self, tab_id):
+        self._platform.close_editor_tab(tab_id)
 
     def copy_to_clipboard(self, text):
         self._platform.clipboard_set(text)

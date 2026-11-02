@@ -33,8 +33,8 @@
 | `ctx.services` | `CoreApi`: дерево, резолвер, сборка, граф, чтение файлов |
 | `ctx.ui` | `UiApi`: меню, статус, диалоги, редактор, окна модулей |
 | `ctx.tasks` | `TaskApi`: фоновые задачи |
-| `ctx.events` | Шина событий: «что уже произошло» |
-| `ctx.commands` | Шина команд: «что нужно сделать» |
+| `ctx.events` | Шина событий: факты (`publish`) и перехватываемые UI-действия (`dispatch`) |
+| `ctx.commands` | Шина команд: намерения с одним обработчиком |
 | `ctx.paths` | Пути приложения |
 
 Правила:
@@ -94,8 +94,13 @@ deactivate  — закрыть окна, остановить свою акти�
 - прекратить фоновую активность;
 - не удалять чужие данные и не менять состояние других модулей.
 
-> Сейчас `EventBus` не поддерживает отписку. Модуль должен подписываться один раз
-> в `init` и учитывать, что подписка живёт до завершения процесса.
+`ctx.events.subscribe(...)` возвращает подписку с методом `unsubscribe()`.
+Модуль обязан хранить подписки и отписываться в `deactivate`, иначе после
+выгрузки модуля его обработчики продолжат получать события.
+
+`publish` можно вызывать из фонового потока: подписчики получат событие в
+потоке UI. `ctx.tasks.run(...)` также гарантирует, что `on_done` и `on_log`
+вызываются в потоке UI.
 
 ## 4. Параллельная работа модулей
 
@@ -120,12 +125,17 @@ deactivate  — закрыть окна, остановить свою акти�
 
 | Возможность | SDK |
 |---|---|
-| Пункт меню и shortcut | `ctx.ui.register_menu(...)` |
+| Пункт меню | `ctx.ui.register_menu(..., action=None)` |
+| Горячая клавиша | `ctx.ui.register_shortcut(key, fn, scope=..., action=None)` |
+| Мышиная привязка | `ctx.ui.register_mouse_binding(button, modifiers, fn, scope=..., event=..., action=None)` |
+| Перехват UI-действия | `ctx.ui.register_action_handler(action, fn, priority=0)` |
 | Команда | `ctx.commands.register("mod.action", fn)` |
 | Действие в дереве | `ctx.ui.register_tree_context_action(...)` |
 | Перехват открытия файла | `FileOpenHandler` + `ctx.ui.register_open_handler(...)` |
 | Собственное окно | `ctx.ui.show_module_window(key, window)` |
 | Закрытие окна | `ctx.ui.close_module_window(key)` |
+| Вкладка редактора | `ctx.ui.open_editor_tab(tab_id, title, widget)` |
+| Закрытие вкладки | `ctx.ui.close_editor_tab(tab_id)` |
 | Уведомления | `ctx.ui.log`, `set_status`, `show_error` |
 | Диалоги | `ctx.ui.ask_text`, `ask_directory` |
 | Фоновая работа | `ctx.tasks.run(...)` |
@@ -135,9 +145,18 @@ deactivate  — закрыть окна, остановить свою акти�
 показывает его, поднимает, активирует и хранит по ключу. `src/ui` не должен
 знать, что именно показывает модуль.
 
-Новые типы UI-возможностей — вкладки редактора, глобальные hotkeys, мышь,
-перехват UI-событий — должны добавляться в `UiApi` и реализовываться
-платформой. Модуль не устанавливает глобальные хуки и не обходит SDK.
+Вкладку редактора тоже создаёт модуль: он передаёт свой `QWidget` в
+`open_editor_tab`. Платформа владеет контейнером вкладок, их показом и
+закрытием, а базовый редактор — зарезервированная вкладка `ui.editor`.
+Повторное открытие с тем же `tab_id` заменяет содержимое вкладки.
+
+`register_menu`, `register_shortcut` и `register_mouse_binding` принимают
+необязательный `action`. Если он задан, перед вызовом callback платформа
+рассылает это действие через `dispatch`: другой модуль может перехватить его
+и отменить стандартное поведение. Без `action` всё равно рассылаются общие
+действия `ui.shortcut` и `ui.mouse`.
+
+Модуль не устанавливает глобальные Qt-хуки и не обходит SDK.
 
 ## 6. События и команды
 
@@ -150,31 +169,67 @@ deactivate  — закрыть окна, остановить свою акти�
 - Если нужен именно перехват с отменой или приоритетом, используется
   `FileOpenHandler` или команда, а не событие.
 
-Примеры контрактов на будущее:
+- **UI-действие** — запрос, который можно перехватить: «нажата клавиша»,
+  «пользователь выбрал пункт меню», «клик в дереве». Рассылается через
+  `EventBus.dispatch`; первый обработчик, вернувший truthy, отменяет
+  стандартное поведение.
+
+`ctx.events.subscribe(name, handler, priority=0)` возвращает подписку.
+Чем выше `priority`, тем раньше вызывается обработчик; при равном приоритете
+сохраняется порядок регистрации. Также доступны `ctx.events.unsubscribe(...)`
+и `ctx.events.has(name)`.
+
+```python
+sub = ctx.events.subscribe(Events.UI_TAB_OPENED, self._on_tab, priority=10)
+...
+sub.unsubscribe()
+```
+
+`ctx.events.publish(name, payload)` — факт, вызываются все подписчики.
+`ctx.events.dispatch(name, payload) -> bool` — перехватываемое действие.
+
+События платформы:
 
 ```text
-ui.window.requested      (window_id)
-ui.tab.requested         (tab_id)
-ui.file.open_requested   (path)
-editor.tab.opened        (tab_id)
+ui.window.shown          (key)             publish
+ui.window.closed         (key)             publish
+ui.tab.opened            (tab_id)          publish
+ui.tab.closed            (tab_id)          publish
+ui.tab.changed           (tab_id | None)   publish
+ui.shortcut              ({key, scope})    dispatch
+ui.mouse                 ({scope, button, modifiers, event}) dispatch
+```
+
+`ui.window.requested`, `ui.tab.requested` и `ui.file.open_requested` —
+зарезервированные имена для запросов между модулями; платформа их
+автоматически не публикует.
+
+Чтобы перехватить UI-действие, модуль регистрирует обработчик:
+
+```python
+sub = ctx.ui.register_action_handler(
+    "my_module.toggle",
+    self._on_toggle,
+    priority=100,
+)
+
+def _on_toggle(self, payload):
+    ...
+    return True  # действие перехвачено, стандартный callback не вызывается
 ```
 
 Если событие платформы нужно именно **перехватить** с приоритетом или
 возможностью отменить стандартное поведение, используется цепочка
-обработчиков (как `FileOpenHandler` для файлов), а не подписка на событие.
-Для новых UI-событий такая цепочка должна быть добавлена в `UiApi`.
+обработчиков (как `FileOpenHandler` для файлов) или `dispatch`, а не
+подписка на событие.
 
-### Планируемые UI-контракты
+Важно не смешивать роли шин:
 
-Эти возможности должны появиться в `UiApi` до того, как модули начнут их
-использовать:
-
-```text
-ctx.ui.register_shortcut(key, callback, scope="global"|"editor"|"tree")
-ctx.ui.register_mouse_binding(button, modifiers, callback, scope=...)
-ctx.ui.open_editor_tab(tab_id, title, widget)
-ctx.ui.close_editor_tab(tab_id)
-```
+- запрос данных у ядра — `ctx.services`;
+- намерение выполнить действие — `ctx.commands`;
+- уже произошедший факт — `ctx.events.publish`;
+- перехватываемое UI-действие — `ctx.ui.register_action_handler` /
+  `ctx.events.dispatch`.
 
 Модуль не устанавливает глобальные Qt-хуки и не обходит SDK.
 
@@ -195,16 +250,52 @@ class MyModule(ModuleBase):
     def init(self, ctx):
         super().init(ctx)
         self._window = None
-        ctx.events.subscribe("ui.window.requested", self._on_window_requested)
+        self._tab = None
+        self._subs = []
+        self._subs.append(
+            ctx.events.subscribe(
+                "ui.window.requested",
+                self._on_window_requested,
+            )
+        )
 
     def register(self, ctx):
-        ctx.ui.register_menu("Мои окна", "Окно 1", self.show_window, "Ctrl+1")
+        ctx.ui.register_menu(
+            "Мои окна",
+            "Окно 1",
+            self.show_window,
+            "Ctrl+1",
+            action="my_module.show_window",
+        )
+        ctx.ui.register_shortcut(
+            "Ctrl+Alt+T",
+            self.show_tab,
+            scope="global",
+            action="my_module.show_tab",
+        )
         ctx.commands.register("my_module.show_window", self.show_window)
+
+        # Перехват действия: вернуть True — значит отменить стандартный callback.
+        self._subs.append(
+            ctx.ui.register_action_handler(
+                "my_module.show_window",
+                self._on_show_window_action,
+                priority=100,
+            )
+        )
 
     def activate(self, ctx):
         ctx.log("my_module активирован")
 
     def deactivate(self, ctx):
+        for sub in self._subs:
+            sub.unsubscribe()
+        self._subs.clear()
+
+        if self._tab is not None:
+            ctx.ui.close_editor_tab("my_module.tab")
+            self._tab = None
+
         if self._window is not None:
             ctx.ui.close_module_window("my_module.window")
             self._window = None
@@ -213,10 +304,23 @@ class MyModule(ModuleBase):
         if window_id == "my_module.window":
             self.show_window()
 
+    def _on_show_window_action(self, payload):
+        # Условный пример: не перехватываем, пусть сработает стандартный callback.
+        return False
+
     def show_window(self):
         if self._window is None:
             self._window = MyWindow(self.ctx.ui.open_at_line)
         self.ctx.ui.show_module_window("my_module.window", self._window)
+
+    def show_tab(self):
+        if self._tab is None:
+            self._tab = MyTabWidget()
+        self.ctx.ui.open_editor_tab(
+            "my_module.tab",
+            "Моя вкладка",
+            self._tab,
+        )
 
 
 MODULE = MyModule()
@@ -226,9 +330,10 @@ MODULE = MyModule()
 
 - [ ] импортирует только `sdk` (и PyQt для своих окон);
 - [ ] не знает про `MainWindow` и внутренние виджеты UI;
-- [ ] все имена команд/событий/окон namespaced;
+- [ ] все имена команд/событий/действий/окон/вкладок namespaced;
 - [ ] тяжёлая работа — в `ctx.tasks`;
-- [ ] окна создаются в `activate`/по действию, а не в `init`;
-- [ ] при `deactivate` окна закрываются;
+- [ ] окна и вкладки создаются в `activate`/по действию, а не в `init`;
+- [ ] подписки сохраняются и отзываются в `deactivate`;
+- [ ] при `deactivate` окна и вкладки закрываются;
 - [ ] модуль не зависит от порядка загрузки других модулей;
 - [ ] ошибки не выходят наружу и не ломают платформу.

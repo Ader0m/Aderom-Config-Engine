@@ -153,14 +153,68 @@ class UiApi(Protocol):
         label: str,
         callback: Callable,
         shortcut: Optional[str] = None,
+        action: Optional[str] = None,
     ) -> None:
-        """Добавить пункт меню."""
+        """Добавить пункт меню.
+
+        Если задан ``action``, нажатие сначала проходит через ``dispatch``:
+        другой модуль может перехватить действие и не дать вызвать ``callback``.
+        """
 
     def register_tree_context_action(self, label: str, handler: Callable) -> None:
         """Добавить действие в контекстное меню дерева."""
 
     def register_open_handler(self, handler) -> None:
         """Зарегистрировать обработчик открытия файлов."""
+
+    def register_shortcut(
+        self,
+        key: str,
+        callback: Callable,
+        scope: str = "global",
+        action: Optional[str] = None,
+    ) -> None:
+        """Зарегистрировать горячую клавишу.
+
+        ``scope``: ``global``, ``editor`` или ``tree``.
+        ``action`` позволяет перехватить нажатие через ``dispatch_action``.
+        Без ``action`` всё равно рассылается общее действие
+        :attr:`sdk.events.Events.UI_SHORTCUT`.
+        """
+
+    def register_mouse_binding(
+        self,
+        button,
+        modifiers,
+        callback: Callable,
+        scope: str = "global",
+        event: str = "press",
+        action: Optional[str] = None,
+    ) -> None:
+        """Зарегистрировать мышиную привязку.
+
+        ``button``: ``left``/``right``/``middle`` или Qt-кнопка.
+        ``modifiers``: ``Ctrl+Shift``, список или Qt-флаги.
+        ``event``: ``press``/``release``/``double``/``move``.
+        Callback получает QMouseEvent; truthy-результат поглощает событие.
+        Без ``action`` всё равно рассылается общее действие
+        :attr:`sdk.events.Events.UI_MOUSE`.
+        """
+
+    def register_action_handler(
+        self,
+        action: str,
+        handler: Callable,
+        priority: int = 0,
+    ):
+        """Подписаться на перехватываемое UI-действие.
+
+        Чем выше ``priority``, тем раньше вызывается обработчик.
+        Truthy-результат останавливает цепочку.
+        """
+
+    def dispatch_action(self, action: str, payload=None) -> bool:
+        """Разослать UI-действие. Возвращает ``True``, если оно перехвачено."""
 
     # --- уведомления и запросы --------------------------------------------
 
@@ -187,6 +241,12 @@ class UiApi(Protocol):
 
     def close_module_window(self, key: str) -> None:
         """Закрыть окно модуля по ключу."""
+
+    def open_editor_tab(self, tab_id: str, title: str, widget) -> None:
+        """Открыть вкладку редактора, созданную модулем."""
+
+    def close_editor_tab(self, tab_id: str) -> None:
+        """Закрыть вкладку модуля по ключу."""
 
     def copy_to_clipboard(self, text: str) -> None:
         """Поместить текст в буфер обмена."""
@@ -221,4 +281,51 @@ class TaskApi(Protocol):
         on_done: Optional[Callable] = None,
         on_log: Optional[Callable] = None,
     ):
-        """Запустить ``fn(log)`` в фоне."""
+        """Запустить ``fn(log)`` в фоне.
+
+        ``fn`` выполняется в рабочем потоке. ``on_done`` и ``on_log``
+        вызываются в потоке UI — в них можно обращаться к виджетам.
+        """
+
+
+class EventApi(Protocol):
+    """Шина событий, доступная модулю через ``ctx.events``.
+
+    ``publish`` — уведомить о факте. Вызываются все подписчики.
+    ``dispatch`` — разослать перехватываемое UI-действие. Первый обработчик,
+    вернувший truthy, останавливает цепочку.
+
+    ``publish`` можно вызывать из фонового потока: подписчики получат
+    событие в потоке UI. ``dispatch`` предназначен для вызова из UI-потока.
+    """
+
+    def subscribe(self, name: str, handler: Callable, priority: int = 0):
+        """Подписаться. Возвращает объект с методом ``unsubscribe()``."""
+
+    def unsubscribe(self, name: str, handler: Optional[Callable] = None) -> int:
+        """Отписаться от события по функции или от всех подписок события."""
+
+    def publish(self, name: str, payload=None) -> None:
+        """Опубликовать факт."""
+
+    def dispatch(self, name: str, payload=None) -> bool:
+        """Разослать перехватываемое действие."""
+
+    def has(self, name: str) -> bool:
+        """Есть ли подписчики у события."""
+
+
+class CommandApi(Protocol):
+    """Шина команд, доступная модулю через ``ctx.commands``."""
+
+    def register(self, name: str, handler: Callable) -> None:
+        """Зарегистрировать команду."""
+
+    def unregister(self, name: str) -> bool:
+        """Удалить команду."""
+
+    def has(self, name: str) -> bool:
+        """Зарегистрирована ли команда."""
+
+    def execute(self, name: str, *args, **kwargs):
+        """Выполнить команду."""
