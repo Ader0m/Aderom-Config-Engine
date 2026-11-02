@@ -182,6 +182,12 @@ class UiApi(Protocol):
     def show_text(self, text: str, label: str, readonly: bool = True) -> None:
         """Показать текст в редакторе/просмотрщике платформы."""
 
+    def show_module_window(self, key: str, window) -> None:
+        """Показать окно, созданное модулем, и передать его платформе."""
+
+    def close_module_window(self, key: str) -> None:
+        """Закрыть окно модуля по ключу."""
+
     def copy_to_clipboard(self, text: str) -> None:
         """Поместить текст в буфер обмена."""
 

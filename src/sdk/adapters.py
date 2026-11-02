@@ -208,6 +208,12 @@ class UiApiAdapter:
     def show_text(self, text, label, readonly=True):
         self._platform.show_text(text, label, readonly=readonly)
 
+    def show_module_window(self, key, window):
+        self._platform.show_module_window(key, window)
+
+    def close_module_window(self, key):
+        self._platform.close_module_window(key)
+
     def copy_to_clipboard(self, text):
         self._platform.clipboard_set(text)
 

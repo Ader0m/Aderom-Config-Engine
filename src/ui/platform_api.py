@@ -10,6 +10,7 @@ from PyQt5.QtWidgets import QApplication, QFileDialog, QMessageBox
 from sdk.events import Events
 
 from .file_open_router import FileOpenRouter
+from .module_windows import ModuleWindowManager
 
 
 class PlatformApi:
@@ -21,6 +22,7 @@ class PlatformApi:
         self.paths = paths
 
         self.router = FileOpenRouter(events=events)
+        self._window_manager = ModuleWindowManager()
 
         self.window = None
         self._menu_reg = []      # (menu_title, label, callback, shortcut)
@@ -53,6 +55,7 @@ class PlatformApi:
     # -------------------------------------------------- привязка окна
     def bind_window(self, window):
         self.window = window
+        self._window_manager.bind_main_window(window)
         buf, self._log_buffer = self._log_buffer, []
         for m in buf:
             window.log(m)
@@ -97,6 +100,15 @@ class PlatformApi:
     def register_open_handler(self, handler):
         """Модуль регистрирует своего обработчика открытия файла."""
         self.router.register(handler)
+
+    # -------------------------------------------------- окна модулей
+    def show_module_window(self, key, window):
+        """Показать окно, созданное модулем."""
+        self._window_manager.show(key, window)
+
+    def close_module_window(self, key):
+        """Закрыть окно модуля по ключу."""
+        self._window_manager.close(key)
 
     # -------------------------------------------------- ui-сервисы
     def show_text(self, text, label, readonly=True):

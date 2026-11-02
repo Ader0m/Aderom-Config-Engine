@@ -10,7 +10,9 @@
 - :class:`EditorActions` — действия редактора.
 
 Все внешние возможности берутся через SDK-контекст (``ctx.services``,
-``ctx.ui``, ``ctx.tasks``). Модуль не импортирует ``core``, ``ui`` и PyQt.
+``ctx.ui``, ``ctx.tasks``). Модуль не импортирует ``core`` и ``ui``.
+PyQt используется только для собственных окон модуля; платформа
+предоставляет для них хостинг через ``ctx.ui.show_module_window``.
 """
 
 from sdk import ModuleBase, ModuleManifest
@@ -63,6 +65,7 @@ class BaseModule(ModuleBase):
         ctx.log("Базовый модуль активирован.")
 
     def deactivate(self, ctx):
+        self._section_graph.close()
         ctx.log("Базовый модуль деактивирован.")
 
     # -------------------------------------------------- регистрации
