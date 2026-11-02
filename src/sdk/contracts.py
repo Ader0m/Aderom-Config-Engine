@@ -41,16 +41,26 @@ class ModuleContext:
     Единственная точка доступа модуля к системе.
 
     Модуль не импортирует core и не импортирует ui.
-    Всё разрешённое доступно только через этот контекст.
+    Всё разрешённое доступно только через этот контекст:
+
+    - ``ctx.services`` — :class:`sdk.api.CoreApi`;
+    - ``ctx.ui`` — :class:`sdk.api.UiApi`;
+    - ``ctx.tasks`` — :class:`sdk.api.TaskApi`;
+    - ``ctx.events`` / ``ctx.commands`` — шины платформы.
+
+    Композиционный корень передаёт сюда реальные сервисы, а контекст
+    сам оборачивает их в SDK-адаптеры.
     """
 
     def __init__(self, sdk_version, events, commands, ui, tasks, services, paths):
+        from .adapters import CoreApiAdapter, TaskApiAdapter, UiApiAdapter
+
         self.sdk_version = sdk_version
         self.events = events
         self.commands = commands
-        self.ui = ui
-        self.tasks = tasks
-        self.services = services
+        self.ui = UiApiAdapter.wrap(ui)
+        self.tasks = TaskApiAdapter.wrap(tasks)
+        self.services = CoreApiAdapter.wrap(services)
         self.paths = paths
 
     def log(self, msg):

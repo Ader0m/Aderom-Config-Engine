@@ -5,6 +5,16 @@ from .version import SDK_VERSION, parse_version, is_compatible
 from .contracts import ModuleManifest, ModuleBase, ModuleContext, FileOpenHandler
 from .events import Events
 from .loader import ModuleLoader, ModuleLoadError
+from .api import (
+    CoreApi,
+    UiApi,
+    TaskApi,
+    TreeSummary,
+    GraphMatch,
+    GraphNode,
+    SectionGraph,
+)
+from .adapters import CoreApiAdapter, TaskApiAdapter, UiApiAdapter
 
 __all__ = [
     "SDK_VERSION",
@@ -16,5 +26,15 @@ __all__ = [
     "Events",
     "ModuleLoader",
     "ModuleLoadError",
-    "FileOpenHandler"
+    "FileOpenHandler",
+    "CoreApi",
+    "UiApi",
+    "TaskApi",
+    "TreeSummary",
+    "GraphMatch",
+    "GraphNode",
+    "SectionGraph",
+    "CoreApiAdapter",
+    "TaskApiAdapter",
+    "UiApiAdapter",
 ]
