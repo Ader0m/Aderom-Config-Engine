@@ -123,6 +123,92 @@ class LtxResolverAdapter:
 
         return "\n".join(lines)
 
+    def assemble_resolved(self, root_path, source_map=None, abs_map=None):
+        """Чистый резолв + карта владельцев построчно.
+
+        Returns:
+            (text, line_sources): текст и список той же длины, что и число
+            строк в ``text``. Элемент ``line_sources[i]``:
+              - кортеж ``(pretty, полный_путь)`` — владелец из другого файла;
+              - маркер ``"__ORIGINAL__"`` — владелец сам ``root_path``;
+              - ``None`` — владельца нет (преамбула, пустые строки,
+                продолжения многострочных значений).
+        """
+        r = self._make(root_path)
+        r.load()
+
+        sm = source_map or {}
+        abs_map = abs_map or {}
+
+        # Resolver4 хранит в Item.filename stem без расширения в lower-case —
+        # ключ для source_map и abs_map совпадает с ним.
+        root_basename_no_ext = Path(root_path).stem.lower()
+        ORIGINAL = "__ORIGINAL__"
+
+        def src_of(fn):
+            if not fn:
+                return None
+            if fn == root_basename_no_ext:
+                return ORIGINAL
+            pretty = pretty_source(fn, sm)
+            full = abs_map.get(fn)
+            # наверх уходит пара: показывать pretty, открывать full
+            return (pretty, str(full) if full is not None else None)
+
+        lines = []
+        line_sources = []
+
+        for h in (
+            "; Assembled root: %s" % root_path,
+            "; Resolver module: %s" % self.resolver_script,
+            "",
+        ):
+            lines.append(h)
+            line_sources.append(None)
+
+        for sec_name, sect in r.data:
+            sec_src = None
+            for it in sect.data:
+                fn = getattr(it, "filename", "")
+                if fn:
+                    sec_src = src_of(fn)
+                    break
+
+            lines.append("[%s]" % sec_name)
+            line_sources.append(sec_src)
+
+            for it in sect.data:
+                key = str(getattr(it, "first", "") or "")
+                val = getattr(it, "second", "")
+
+                if val is None:
+                    val_s = ""
+                elif hasattr(val, "name") and type(val).__name__ == "DLTXToken":
+                    val_s = "<%s>" % val.name
+                else:
+                    val_s = str(val)
+
+                src = src_of(getattr(it, "filename", ""))
+
+                if "\n" in val_s or "\r" in val_s:
+                    sub_lines = val_s.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+                    lines.append("%s = %s" % (key, sub_lines[0]))
+                    line_sources.append(src)
+                    for sub in sub_lines[1:]:
+                        lines.append(sub)
+                        line_sources.append(None)
+                elif val_s == "":
+                    lines.append("%s =" % key)
+                    line_sources.append(src)
+                else:
+                    lines.append("%s = %s" % (key, val_s))
+                    line_sources.append(src)
+
+            lines.append("")
+            line_sources.append(None)
+
+        return "\n".join(lines), line_sources
+
     def assemble_to_file(self, root_path, out_dir, source_map=None) -> Path:
         """
         Собирает текст и записывает его во временный/служебный файл.

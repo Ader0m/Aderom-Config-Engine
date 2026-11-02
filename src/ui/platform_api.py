@@ -37,7 +37,8 @@ class PlatformApi:
         commands.register("ui.editor_undo", self.request_editor_undo)
         commands.register("ui.editor_redo", self.request_editor_redo)
         commands.register("ui.editor_find", self.request_editor_find)
-        commands.register("ui.open_file_at_line", self.request_open_file_at_line)  # ← новое
+        commands.register("ui.open_file_at_line", self.request_open_file_at_line)
+        commands.register("ui.open_file_with_search", self.request_open_file_with_search)
 
 
     # -------------------------------------------------- регистрации (SDK)
@@ -221,3 +222,40 @@ class PlatformApi:
             self.window.editor.goto_line(line_number)
         
         return ok
+
+    def request_open_file_with_search(self, path, search_text):
+        """Открыть файл через роутер и перейти к первому вхождению search_text."""
+        ok = self.router.open(path, self)
+        if not ok:
+            self.show_error("Не найден обработчик для: %s" % path)
+            return ok
+
+        if self.window is None:
+            return ok
+        widget = self.window.editor.currentWidget()
+        if widget is not None and hasattr(widget, "find_first"):
+            if search_text and not widget.find_first(search_text):
+                self.set_status(
+                    "Владелец открыт, но строка не найдена: %s" % search_text, 8000
+                )
+        else:
+            self.log(
+                "[open_file_with_search] активная вкладка не поддерживает поиск: %s"
+                % type(widget).__name__
+            )
+        return ok
+
+    def open_resolved_tab(self, tab_id, title, text, line_sources, root_path):
+        """Создать ResolvedView и открыть его как вкладку."""
+        if self.window is None:
+            return
+        from .editor import ResolvedView  # локальный импорт, чтобы не цеплять PyQt до окна
+
+        view = ResolvedView()
+        view.set_content(text, line_sources, root_path)
+        view.source_activated.connect(
+            lambda path, search: self.request_open_file_with_search(path, search)
+        )
+        view.diagnostic.connect(lambda msg: self.log("[resolved] %s" % msg))
+        view.diagnostic.connect(lambda msg: self.set_status(msg, 8000))
+        self.window.editor.open_tab(tab_id, title, view)

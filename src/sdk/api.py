@@ -133,6 +133,15 @@ class CoreApi(Protocol):
     def assemble_to_file(self, root_path: Path, forest) -> Path:
         """Собрать файл в каталог сгенерированных конфигов."""
 
+    def assemble_resolved(
+        self,
+        root_path: Path,
+        forest,
+        config_dir: Path,
+        log: Optional[Callable[[str], None]] = None,
+    ) -> tuple[str, list[Optional[str]]]:
+         """Собрать чистый резолв + маппинг (source_per_line)."""
+
     # --- граф связей и внешние инструменты -------------------------------
 
     def build_section_graph(self, forest, section_name: str) -> SectionGraph:
@@ -215,6 +224,19 @@ class UiApi(Protocol):
 
     def dispatch_action(self, action: str, payload=None) -> bool:
         """Разослать UI-действие. Возвращает ``True``, если оно перехвачено."""
+
+    def open_resolved_tab(
+        self,
+        tab_id: str,
+        title: str,
+        text: str,
+        line_sources: list[Optional[str]],
+        root_path: Path,
+    ) -> None:
+        """Открыть вкладку резолв-вида с панелью источников."""
+
+    def open_file_with_search(self, path: Path, search_text: str) -> None:
+        """Открыть файл и перейти к первому вхождению ``search_text``."""
 
     # --- уведомления и запросы --------------------------------------------
 

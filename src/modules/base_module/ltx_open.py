@@ -88,7 +88,9 @@ class LtxFileOpener:
         config_dir = self.session.config_dir
 
         def work(log):
-            return self.ctx.services.assemble_text(
+            # ВАЖНО: именно assemble_resolved, а не assemble_text —
+            # он возвращает кортеж (text, line_sources)
+            return self.ctx.services.assemble_resolved(
                 path,
                 forest,
                 config_dir,
@@ -97,12 +99,12 @@ class LtxFileOpener:
 
         self.ctx.tasks.run(
             work,
-            on_done=lambda text, err: self._on_resolved(path, text, err),
+            on_done=lambda result, err: self._on_resolved(path, result, err),
             on_log=self.ctx.ui.log,
         )
         return True
 
-    def _on_resolved(self, path: Path, text, err):
+    def _on_resolved(self, path: Path, result, err):
         if err is not None:
             self.ctx.ui.set_status("Ошибка")
             self.ctx.ui.show_error(
@@ -112,11 +114,17 @@ class LtxFileOpener:
             )
             return
 
+        text, line_sources = result
         rel = self.ctx.services.relative_path(self.session.forest, path)
-        self.ctx.ui.show_text(
+
+        # Уникальный tab_id — чтобы можно было держать несколько резолвов открытыми
+        tab_id = "base.resolved:%s" % rel
+        self.ctx.ui.open_resolved_tab(
+            tab_id,
+            "RESOLVED: %s" % rel,
             text,
-            "RESOLVED (как в игре): %s" % rel,
-            readonly=True,
+            line_sources,
+            str(path),
         )
         self.ctx.ui.set_status("Открыт резолв: %s" % rel, 5000)
 

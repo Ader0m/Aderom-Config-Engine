@@ -126,6 +126,14 @@ class CoreApiAdapter:
 
         return self._provider.assembly.assemble_to_file(root_path, forest)
 
+    def assemble_resolved(self, root_path, forest, config_dir, log=None):
+        fn = getattr(self._provider, "assemble_resolved", None)
+        if callable(fn):
+            return fn(root_path, forest, config_dir, log=log)
+        return self._provider.resolver.assemble_resolved(
+            root_path, forest, config_dir, log=log,
+        )
+
     # --- граф связей и внешние инструменты -------------------------------
 
     def build_section_graph(self, forest, section_name):
@@ -230,6 +238,12 @@ class UiApiAdapter:
     def dispatch_action(self, action, payload=None):
         return self._platform.dispatch_action(action, payload)
 
+    def open_resolved_tab(self, tab_id, title, text, line_sources, root_path):
+        self._platform.open_resolved_tab(tab_id, title, text, line_sources, root_path)
+
+    def open_file_with_search(self, path, search_text):
+        self._platform.commands.execute("ui.open_file_with_search", path, search_text)
+        
     # --- уведомления и запросы --------------------------------------------
 
     def log(self, message):

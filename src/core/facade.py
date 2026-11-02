@@ -141,3 +141,7 @@ class CoreServices:
     def detect_config_dir(self, candidates):
         """Определить каталог конфигов."""
         return detect_config_dir(candidates)
+
+    def assemble_resolved(self, root_path, forest, config_dir, log=None):
+        """Чистый резолв + построчный маппинг владельцев."""
+        return self.resolver.assemble_resolved(root_path, forest, config_dir, log=log)

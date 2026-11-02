@@ -20,6 +20,7 @@ import logging
 
 from .fs import build_search_bases, find_resolver_script, build_source_map
 from .resolver_adapter import LtxResolverAdapter
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -116,3 +117,25 @@ class ResolverService:
 
         sm = build_source_map(forest)
         return adapter.assemble_text(root_path, sm)
+
+    def assemble_resolved(self, root_path, forest, config_dir, log=None):
+        adapter = self._ensure_adapter(forest, config_dir)
+        if adapter is None:
+            raise RuntimeError("Resolver4.py не найден")
+
+        sm = build_source_map(forest)
+
+        # Resolver4 хранит в Item.filename либо stem базового имени
+        # (корень и mod_*-файлы), либо stem ПОЛНОГО пути (файлы, загруженные
+        # через #include). Обратная карта в абсолютные пути строится по обеим
+        # формам ключа, иначе include-файлы теряются.
+        abs_map = {}
+        for p in (getattr(forest, "rel_paths", {}) or {}):
+            node = Path(p)
+            low = str(node).lower()
+            suffix_low = node.suffix.lower()
+            full_stem = low[: -len(suffix_low)] if suffix_low else low
+            for key in (node.stem.lower(), full_stem):
+                abs_map.setdefault(key, node)
+
+        return adapter.assemble_resolved(root_path, sm, abs_map)
