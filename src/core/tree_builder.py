@@ -11,7 +11,7 @@ from .fs import (
     read_text_safe,
     extract_includes,
     resolve_include_targets,
-    scan_ltx_files,
+    scan_files,
     find_system_ltx,
     get_dltx_mods_for_root,
     describe_real_path,
@@ -78,7 +78,11 @@ class TreeBuilder:
         scan_dir = normalize_path(scan_dir)
         system_root = normalize_path(system_root) if system_root else None
 
-        files = scan_ltx_files(scan_dir)
+        # Один обход ФС на оба типа: LTX — дерево зависимостей,
+        # XML — независимые файлы для просмотра без резолва.
+        tree_files = scan_files(scan_dir, {".ltx", ".xml"})
+        files = [f for f in tree_files if f.suffix.lower() == ".ltx"]
+        xml_files = [f for f in tree_files if f.suffix.lower() == ".xml"]
         file_set = set(files)
 
         # Обе трактовки пути фиксируются ОДИН раз в момент сканирования:
@@ -87,7 +91,7 @@ class TreeBuilder:
         game_root_real = scan_dir.resolve()
         rel_paths = {}
         real_paths = {}
-        for f in files:
+        for f in files + xml_files:
             rel_paths[f] = rel_path(f, scan_dir)
             real_paths[f] = describe_real_path(f.resolve(), game_root_real)
 
@@ -96,6 +100,7 @@ class TreeBuilder:
             by_folder[f.parent].append(f)
 
         log("Найдено .ltx файлов: %d" % len(files))
+        log("Найдено .xml файлов: %d" % len(xml_files))
 
         raw_children = defaultdict(set)
         raw_parents = defaultdict(set)
@@ -152,6 +157,10 @@ class TreeBuilder:
 
         if system_root and system_root in file_set and system_root not in final_roots:
             final_roots.append(system_root)
+
+        # XML — независимые корни. У них нет #include и DLTX-патчей,
+        # они не проходят через резолвер: каждый файл сам себе корень.
+        final_roots.extend(xml_files)
 
         final_roots.sort(
             key=lambda p: (
@@ -252,6 +261,8 @@ class TreeBuilder:
             include_children={k: set(v) for k, v in raw_children.items()},
             include_parents={k: set(v) for k, v in raw_parents.items()},
             dltx_attachments={k: set(v) for k, v in dltx_children.items()},
+            xml_files=xml_files,
+            total_xml_files=len(xml_files),
         )
 
 

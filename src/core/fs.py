@@ -256,6 +256,17 @@ def scan_ltx_files(root_dir):
     return scan_files(root_dir, {".ltx"})
 
 
+def scan_xml_files(root_dir):
+    """
+    Рекурсивно находит все .xml файлы.
+
+    XML — отдельный, независимый от LTX набор: у него нет #include и он
+    не участвует в проходе резолвера. Ядро лишь показывает его в дереве,
+    чтобы файл можно было открыть сырым текстом.
+    """
+    return scan_files(root_dir, {".xml"})
+
+
 def find_system_ltx(selected_dir) -> Optional[Path]:
     """
     Ищет system.ltx в типичных местах.

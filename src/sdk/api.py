@@ -30,6 +30,7 @@ class TreeSummary:
     total_files: int
     system_tree_files: int
     resolver_sections: Optional[int] = None
+    xml_files: int = 0
 
 
 @dataclass(frozen=True)
@@ -182,8 +183,17 @@ class UiApi(Protocol):
         другой модуль может перехватить действие и не дать вызвать ``callback``.
         """
 
-    def register_tree_context_action(self, label: str, handler: Callable) -> None:
-        """Добавить действие в контекстное меню дерева."""
+    def register_tree_context_action(
+        self,
+        label: str,
+        handler: Callable,
+        predicate: Optional[Callable[[Path], bool]] = None,
+    ) -> None:
+        """Добавить действие в контекстное меню дерева.
+
+        ``predicate(path)`` — необязательный фильтр видимости действия
+        для конкретного файла (например, только для ``.xml``).
+        """
 
     def register_open_handler(self, handler) -> None:
         """Зарегистрировать обработчик открытия файлов."""

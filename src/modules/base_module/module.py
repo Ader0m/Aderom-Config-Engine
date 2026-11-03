@@ -5,6 +5,7 @@
 
 - :class:`CleanRunFeature` — сценарий построения дерева;
 - :class:`LtxFileOpener` — открытие .ltx (резолв/DLTX-патч);
+- :class:`XmlFileOpener` — открытие .xml без резолва;
 - :class:`SectionGraphFeature` — граф связей секции;
 - :class:`TreeActions` — действия дерева;
 - :class:`EditorActions` — действия редактора.
@@ -18,11 +19,12 @@ PyQt используется только для собственных око�
 from sdk import ModuleBase, ModuleManifest
 from sdk.events import Events
 
-from .actions import EditorActions, TreeActions
+from .actions import EditorActions, TreeActions, is_ltx_path, is_xml_path
 from .clean_run import CleanRunFeature
 from .ltx_open import LtxFileOpener, ResolvedLtxHandler
 from .section_graph import SectionGraphFeature
 from .session import ModuleSession
+from .xml_open import RawXmlHandler, XmlFileOpener
 
 
 class BaseModule(ModuleBase):
@@ -30,7 +32,7 @@ class BaseModule(ModuleBase):
         name="base",
         version="0.3.0",
         sdk_min="0.1.0",
-        description="Базовый сценарий: чистый запуск, VFS-вид, резолв-открытие.",
+        description="Базовый сценарий: чистый запуск, VFS-вид, резолв .ltx и сырое открытие .xml.",
     )
 
     # -------------------------------------------------- жизненный цикл
@@ -40,6 +42,7 @@ class BaseModule(ModuleBase):
         self.session = ModuleSession()
         self._clean_run = CleanRunFeature(ctx, self.session)
         self._ltx_opener = LtxFileOpener(ctx, self.session)
+        self._xml_opener = XmlFileOpener(ctx)
         self._section_graph = SectionGraphFeature(ctx, self.session)
         self._tree_actions = TreeActions(ctx, self.session)
         self._editor_actions = EditorActions(ctx)
@@ -113,15 +116,46 @@ class BaseModule(ModuleBase):
 
     def _register_open_handler(self, ctx):
         ctx.ui.register_open_handler(ResolvedLtxHandler(self._ltx_opener))
+        ctx.ui.register_open_handler(RawXmlHandler(self._xml_opener))
 
     def _register_tree_actions(self, ctx):
         ui = ctx.ui
         actions = self._tree_actions
 
-        ui.register_tree_context_action("Открыть исходный файл (без резолва)", actions.open_raw)
-        ui.register_tree_context_action("Открыть в Notepad++", actions.open_in_external_editor)
-        ui.register_tree_context_action("Собрать и открыть в Notepad++", actions.assemble_and_open)
-        ui.register_tree_context_action("Копировать относительный путь", actions.copy_relative_path)
+        # LTX-путь: резолв доступен, поэтому действия показываются для
+        # всех файлов, кроме XML.
+        ui.register_tree_context_action(
+            "Открыть исходный файл (без резолва)",
+            actions.open_raw,
+            predicate=is_ltx_path,
+        )
+        ui.register_tree_context_action(
+            "Открыть в Notepad++",
+            actions.open_in_external_editor,
+            predicate=is_ltx_path,
+        )
+        ui.register_tree_context_action(
+            "Собрать и открыть в Notepad++",
+            actions.assemble_and_open,
+            predicate=is_ltx_path,
+        )
+
+        # XML-путь: резолва нет, доступно только сырое открытие.
+        ui.register_tree_context_action(
+            "Открыть исходный XML",
+            actions.open_raw,
+            predicate=is_xml_path,
+        )
+        ui.register_tree_context_action(
+            "Открыть XML в Notepad++",
+            actions.open_in_external_editor,
+            predicate=is_xml_path,
+        )
+
+        ui.register_tree_context_action(
+            "Копировать относительный путь",
+            actions.copy_relative_path,
+        )
 
 
 MODULE = BaseModule()

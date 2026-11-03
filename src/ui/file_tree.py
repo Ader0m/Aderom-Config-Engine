@@ -185,11 +185,14 @@ class FileTreeWidget(QTreeWidget):
         self._group_children.clear()
         self._populated.clear()
 
+        xml_count = int(getattr(forest, "total_xml_files", 0) or 0)
+        total_count = int(forest.total_files or 0) + xml_count
+
         self._drive_item = SortableTreeWidgetItem(
             self,
             [
-                "%s (LTX VFS)" % Path(forest.scan_dir).name,
-                str(forest.total_files),
+                "%s (LTX+XML VFS)" % Path(forest.scan_dir).name,
+                str(total_count),
                 "",
             ],
         )

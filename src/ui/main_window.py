@@ -169,12 +169,18 @@ class MainWindow(QMainWindow):
             return
 
         menu = QMenu(self)
-        for label, handler in actions:
+        for entry in actions:
+            label, handler = entry[0], entry[1]
+            predicate = entry[2] if len(entry) > 2 else None
+            if predicate is not None and not predicate(path):
+                continue
+
             a = QAction(label, self)
             a.triggered.connect(lambda _=False, h=handler, p=path: h(p))
             menu.addAction(a)
 
-        menu.exec_(self.file_tree.viewport().mapToGlobal(pos))
+        if not menu.isEmpty():
+            menu.exec_(self.file_tree.viewport().mapToGlobal(pos))
 
     # -------------------------------------------------- журнал
     def log(self, msg):

@@ -38,3 +38,13 @@ class LtxForest:
     include_parents: Dict[object, Set[object]] = field(default_factory=dict)
     dltx_attachments: Dict[object, Set[object]] = field(default_factory=dict)
     real_paths: Dict[object, str] = field(default_factory=dict)
+
+    # XML-файлы VFS. Они есть в дереве для просмотра, но не участвуют
+    # в include-связях, DLTX-патчах и проходе резолвера.
+    xml_files: list = field(default_factory=list)
+    total_xml_files: int = 0
+
+    @property
+    def all_files(self) -> list:
+        """Все файлы дерева: LTX + XML (для поиска и обхода UI)."""
+        return list(self.files) + list(self.xml_files)

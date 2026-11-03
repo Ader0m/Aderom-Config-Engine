@@ -36,7 +36,7 @@ class PlatformApi:
 
         self.window = None
         self._menu_reg = []      # (menu_title, label, callback, shortcut, action)
-        self._ctx_actions = []   # (label, handler(path))
+        self._ctx_actions = []   # (label, handler(path), predicate(path)|None)
         self._log_buffer = []
 
         # Отложенная навигация: ключ — нормализованный путь файла.
@@ -65,8 +65,13 @@ class PlatformApi:
     def register_menu(self, menu_title, label, callback, shortcut=None, action=None):
         self._menu_reg.append((menu_title, label, callback, shortcut, action))
 
-    def register_tree_context_action(self, label, handler):
-        self._ctx_actions.append((label, handler))
+    def register_tree_context_action(self, label, handler, predicate=None):
+        """Добавить действие в контекстное меню дерева.
+
+        ``predicate(path)`` — необязательный фильтр: действие показывается
+        только для путей, для которых он вернул truthy.
+        """
+        self._ctx_actions.append((label, handler, predicate))
 
     def register_shortcut(self, key, callback, scope="global", action=None):
         self._shortcut_manager.register(key, callback, scope=scope, action=action)

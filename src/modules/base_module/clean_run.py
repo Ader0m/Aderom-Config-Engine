@@ -94,16 +94,17 @@ class CleanRunFeature:
 
         summary = self.ctx.services.tree_summary(forest)
         self.ctx.ui.set_status(
-            "Корней: %d; файлов: %d; в дереве system: %d; секций: %s"
+            "Корней: %d; файлов LTX: %d; XML: %d; в дереве system: %d; секций: %s"
             % (
                 summary.roots,
                 summary.total_files,
+                summary.xml_files,
                 summary.system_tree_files,
                 summary.resolver_sections,
             ),
             7000,
         )
         self.ctx.ui.log(
-            "Дерево построено. Корней: %d; файлов: %d"
-            % (summary.roots, summary.total_files)
+            "Дерево построено. Корней: %d; LTX: %d; XML: %d"
+            % (summary.roots, summary.total_files, summary.xml_files)
         )

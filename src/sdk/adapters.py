@@ -74,6 +74,7 @@ class CoreApiAdapter:
             total_files=int(getattr(forest, "total_files", 0) or 0),
             system_tree_files=int(getattr(forest, "system_tree_files", 0) or 0),
             resolver_sections=resolver_sections,
+            xml_files=int(getattr(forest, "total_xml_files", 0) or 0),
         )
 
     def relative_path(self, forest, path):
@@ -200,8 +201,8 @@ class UiApiAdapter:
             action,
         )
 
-    def register_tree_context_action(self, label, handler):
-        self._platform.register_tree_context_action(label, handler)
+    def register_tree_context_action(self, label, handler, predicate=None):
+        self._platform.register_tree_context_action(label, handler, predicate)
 
     def register_open_handler(self, handler):
         self._platform.register_open_handler(handler)

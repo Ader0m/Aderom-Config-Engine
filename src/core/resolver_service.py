@@ -129,9 +129,17 @@ class ResolverService:
         # (корень и mod_*-файлы), либо stem ПОЛНОГО пути (файлы, загруженные
         # через #include). Обратная карта в абсолютные пути строится по обеим
         # формам ключа, иначе include-файлы теряются.
+        # abs_map строится только по LTX: XML не участвует в резолве.
         abs_map = {}
-        for p in (getattr(forest, "rel_paths", {}) or {}):
-            node = Path(p)
+        ltx_files = getattr(forest, "files", None)
+        if ltx_files is None:
+            ltx_files = [
+                Path(p)
+                for p in (getattr(forest, "rel_paths", {}) or {})
+                if Path(p).suffix.lower() == ".ltx"
+            ]
+        for node in ltx_files:
+            node = Path(node)
             low = str(node).lower()
             suffix_low = node.suffix.lower()
             full_stem = low[: -len(suffix_low)] if suffix_low else low

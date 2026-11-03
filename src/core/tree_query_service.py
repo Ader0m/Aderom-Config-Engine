@@ -52,9 +52,14 @@ def search_nodes(forest, text):
     if not text:
         return []
 
+    candidates = getattr(forest, "all_files", None)
+    if candidates is None:
+        candidates = list(getattr(forest, "files", ()) or ())
+        candidates += list(getattr(forest, "xml_files", ()) or ())
+
     out = [
         p
-        for p in forest.files
+        for p in candidates
         if text in p.name.lower()
         or text in forest.rel_paths.get(p, "").lower()
     ]
@@ -68,6 +73,7 @@ def generate_report(forest, col="path", reverse=False) -> str:
         "System.ltx: %s" % forest.system_root,
         "Resolver sections: %s" % forest.resolver_sections,
         "Total .ltx files: %d" % forest.total_files,
+        "Total .xml files: %d" % getattr(forest, "total_xml_files", 0),
         "Files in system.ltx tree: %d" % forest.system_tree_files,
         "Top-level roots: %d" % len(forest.roots),
         "",
