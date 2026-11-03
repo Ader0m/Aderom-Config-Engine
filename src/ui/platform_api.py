@@ -140,6 +140,13 @@ class PlatformApi:
         else:
             self._log_buffer.append(str(msg))
 
+    def log_status(self, key, msg):
+        """Обновить статусную строку диагностики (прогресс, кэш и т.п.)."""
+        if self.window is not None:
+            self.window.log_status(str(key), str(msg))
+        else:
+            self._log_buffer.append(str(msg))
+
     def set_status(self, msg, timeout=0):
         if self.window is not None:
             self.window.statusBar().showMessage(str(msg), timeout)

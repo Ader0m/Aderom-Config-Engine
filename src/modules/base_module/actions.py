@@ -22,11 +22,14 @@ class TreeActions:
         self.session = session
 
     def open_raw(self, path):
+        self.ctx.ui.log("Открытие исходного файла: %s" % Path(path).name)
         self.ctx.ui.open_raw(path)
 
     def open_in_external_editor(self, path):
+        self.ctx.ui.log("Открытие в Notepad++: %s" % Path(path).name)
         ok, message = self.ctx.services.open_external_editor(path)
         if not ok:
+            self.ctx.ui.log("Ошибка Notepad++: %s" % message)
             self.ctx.ui.show_error(message)
 
     def assemble_and_open(self, path):
@@ -38,6 +41,7 @@ class TreeActions:
 
         path = Path(path)
         self.ctx.ui.set_status("Сборка: %s…" % path.name)
+        self.ctx.ui.log("Сборка: %s" % path.name)
 
         forest = self.session.forest
 
@@ -57,10 +61,12 @@ class TreeActions:
     def _on_assemble_done(self, out, err):
         if err is not None:
             self.ctx.ui.set_status("Ошибка")
+            self.ctx.ui.log("Ошибка сборки: %s" % err)
             self.ctx.ui.show_error(str(err))
             return
 
         self.ctx.ui.set_status("Открыт: %s" % Path(out).name, 5000)
+        self.ctx.ui.log("Сборка открыта: %s" % Path(out).name)
 
     def copy_relative_path(self, path):
         if self.session.has_tree:

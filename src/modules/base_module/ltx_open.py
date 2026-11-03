@@ -35,6 +35,7 @@ class LtxFileOpener:
     # -------------------------------------------------- DLTX-патч
     def _open_patch(self, path: Path) -> bool:
         self.ctx.ui.set_status("Патч: %s…" % path.name)
+        self.ctx.ui.log("DLTX-патч: %s" % path.name)
 
         try:
             raw_content = self.ctx.services.read_text(path)
@@ -99,6 +100,7 @@ class LtxFileOpener:
 
     def _open_resolved(self, path: Path, line_number=None) -> bool:
         self.ctx.ui.set_status("Резолв: %s…" % path.name)
+        self.ctx.ui.log("Резолв файла: %s" % path.name)
 
         forest = self.session.forest
         config_dir = self.session.config_dir
@@ -136,6 +138,9 @@ class LtxFileOpener:
         if err is not None:
             self._open_failed(path)
             self.ctx.ui.set_status("Ошибка")
+            self.ctx.ui.log(
+                "Ошибка резолва %s: %s" % (path.name, err)
+            )
             self.ctx.ui.show_error(
                 "Не удалось разрешить %s:\n%s\n\n"
                 "Исправьте файл через ПКМ -> Открыть исходный файл"
@@ -157,6 +162,7 @@ class LtxFileOpener:
             line_number=line_number,
         )
         self.ctx.ui.set_status("Открыт резолв: %s" % rel, 5000)
+        self.ctx.ui.log("Резолв готов: %s" % rel)
 
 
 class ResolvedLtxHandler(FileOpenHandler):

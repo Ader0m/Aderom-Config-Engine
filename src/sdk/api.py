@@ -325,6 +325,9 @@ class UiApi(Protocol):
     def log(self, message: str) -> None:
         """Записать сообщение в журнал."""
 
+    def log_status(self, key: str, message: str) -> None:
+        """Обновить одну статусную строку журнала по ключу."""
+
     def set_status(self, message: str, timeout: int = 0) -> None:
         """Показать сообщение в статусной строке."""
 

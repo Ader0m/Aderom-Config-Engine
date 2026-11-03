@@ -18,6 +18,7 @@ class TextEditorHandler(FileOpenHandler):
         self.editor = editor
 
     def open(self, path, api):
+        api.log("Открытие файла: %s" % Path(path).name)
         self.editor.open_file(str(path))
         return True
 

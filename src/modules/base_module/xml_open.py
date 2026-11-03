@@ -30,6 +30,7 @@ class XmlFileOpener:
         path = Path(path)
 
         self.ctx.ui.set_status("XML (без резолва): %s…" % path.name)
+        self.ctx.ui.log("XML (без резолва): %s" % path.name)
         self.ctx.ui.open_raw(path)
         self.ctx.ui.set_status("Открыт XML: %s" % path.name, 5000)
         return True
@@ -42,6 +43,7 @@ class XmlFileOpener:
             return False
 
         self.ctx.ui.set_status("XML-резолв: %s…" % path.name)
+        self.ctx.ui.log("XML-резолв: %s" % path.name)
 
         config_dir = self.session.config_dir
 
@@ -76,6 +78,7 @@ class XmlFileOpener:
             return False
 
         self.ctx.ui.set_status("XML-резолв: %s…" % path.name)
+        self.ctx.ui.log("XML-резолв: %s" % path.name)
         config_dir = self.session.config_dir
 
         def work(log):
@@ -133,6 +136,7 @@ class XmlFileOpener:
     def _on_resolved(self, path, result, err):
         if err is not None:
             self.ctx.ui.set_status("Ошибка")
+            self.ctx.ui.log("Ошибка XML-резолва %s: %s" % (Path(path).name, err))
             self.ctx.ui.show_error(
                 "Не удалось разрешить XML %s:\n%s" % (Path(path).name, err)
             )
@@ -155,13 +159,16 @@ class XmlFileOpener:
             "Открыт XML-резолв%s: %s" % (mode, rel),
             5000,
         )
+        self.ctx.ui.log("XML-резолв готов%s: %s" % (mode, rel))
 
     def _on_resolved_external(self, out, err):
         if err is not None:
             self.ctx.ui.set_status("Ошибка")
+            self.ctx.ui.log("Ошибка XML-резолва: %s" % err)
             self.ctx.ui.show_error(str(err))
             return
         self.ctx.ui.set_status("Открыт: %s" % Path(out).name, 5000)
+        self.ctx.ui.log("XML-резолв открыт в редакторе: %s" % Path(out).name)
 
 
 class XmlOpenHandler(FileOpenHandler):

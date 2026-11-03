@@ -16,13 +16,13 @@ from PyQt5.QtWidgets import (
     QMenu,
     QShortcut,
     QSplitter,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from sdk.events import Events
 
+from .diagnostics import DiagnosticsLog
 from .editor_tabs import EditorTabs
 from .file_open_router import TextEditorHandler
 from .file_tree import FileTreeWidget
@@ -103,8 +103,7 @@ class MainWindow(QMainWindow):
 
         # Док диагностики
         self.log_dock = QDockWidget("Диагностика", self)
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
+        self.log_text = DiagnosticsLog()
         self.log_dock.setWidget(self.log_text)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
 
@@ -212,7 +211,11 @@ class MainWindow(QMainWindow):
 
     # -------------------------------------------------- журнал
     def log(self, msg):
-        self.log_text.append(str(msg))
+        self.log_text.append_message(str(msg))
+
+    def log_status(self, key, msg):
+        """Обновить одну и ту же строку прогресса по ключу."""
+        self.log_text.update_message(str(key), msg)
 
     # -------------------------------------------------- завершение
     def closeEvent(self, event):

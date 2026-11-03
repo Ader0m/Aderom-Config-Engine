@@ -313,6 +313,9 @@ class UiApiAdapter:
     def log(self, message):
         self._platform.log(message)
 
+    def log_status(self, key, message):
+        self._platform.log_status(key, message)
+
     def set_status(self, message, timeout=0):
         self._platform.set_status(message, timeout)
 

@@ -61,11 +61,15 @@ class SectionGraphFeature:
     def _request_graph(self, section_name, vfs_mode):
         self._request_seq += 1
         token = self._request_seq
+        progress_key = "base.section_graph.progress.%d" % token
         forest = self.session.forest
 
         suffix = " (VFS)" if vfs_mode else ""
         self.ctx.ui.set_status(
             "Построение графа%s: %s…" % (suffix, section_name)
+        )
+        self.ctx.ui.log(
+            "Граф связей%s: поиск '%s'…" % (suffix, section_name)
         )
 
         def work(log):
@@ -79,6 +83,9 @@ class SectionGraphFeature:
                 log=log,
             )
 
+        def on_log(message, key=progress_key):
+            self._on_graph_log(message, key)
+
         self.ctx.tasks.run(
             work,
             on_done=lambda graph, err: self._on_done(
@@ -88,8 +95,24 @@ class SectionGraphFeature:
                 vfs_mode,
                 token,
             ),
-            on_log=self.ctx.ui.log,
+            on_log=on_log,
         )
+
+    def _on_graph_log(self, message, progress_key):
+        """Прогресс/кэш графа — одной обновляемой строкой, не потоком строк."""
+        message = str(message)
+        if (
+            message.startswith("resolved graph")
+            or message.startswith("resolve cache:")
+            or message.startswith("Ожидание фоновой сборки")
+            or message.startswith("Фоновая сборка завершена")
+        ):
+            self.ctx.ui.log_status(
+                progress_key,
+                message,
+            )
+        else:
+            self.ctx.ui.log(message)
 
     def _on_vfs_toggled(self, checked):
         """Переключение режима: повторяем запрос для текущей секции."""
@@ -103,6 +126,10 @@ class SectionGraphFeature:
 
         if err is not None:
             self.ctx.ui.set_status("Ошибка")
+            self.ctx.ui.log(
+                "Ошибка графа связей '%s': %s"
+                % (section_name, err)
+            )
             self.ctx.ui.show_error(
                 "Не удалось построить граф для '%s':\n%s"
                 % (section_name, err)
@@ -114,6 +141,15 @@ class SectionGraphFeature:
         if vfs_mode:
             status += "; потерянных: %d" % len(lost)
         self.ctx.ui.set_status(status, 5000)
+        self.ctx.ui.log(
+            "Граф связей '%s'%s: узлов %d%s"
+            % (
+                section_name,
+                " (VFS)" if vfs_mode else "",
+                len(main),
+                "; потерянных: %d" % len(lost) if vfs_mode else "",
+            )
+        )
 
         if self._window is None:
             self._window = SectionGraphWindow(
