@@ -150,6 +150,9 @@ class CodeEditor(QWidget):
         super().__init__(parent)
 
         self.current_file = None
+        # QScintilla не забирает владение Python-объектом лексера,
+        # поэтому сильную ссылку нужно держать здесь.
+        self._lexer = None
 
         self._init_ui()
         self._init_shortcuts()
@@ -232,7 +235,23 @@ class CodeEditor(QWidget):
         self.editor.setIndentationsUseTabs(False)
         self.editor.setWrapMode(QsciScintilla.WrapNone)
 
-    def _apply_lexer(self, path: Path):
+    def _set_lexer(self, lexer):
+        """Установить лексер, удержав его Python-ссылку.
+
+        QsciScintilla хранит только C++-указатель и не становится
+        владельцем Python-обёртки. Без ``self._lexer`` сборщик мусора
+        удаляет лексер сразу после выхода из метода, и подсветка пропадает.
+        """
+        self._lexer = lexer
+        self.editor.setLexer(lexer)
+        self.editor.setTabWidth(4)
+
+    def _apply_lexer(self, path):
+        if path is None:
+            self._set_lexer(None)
+            return
+
+        path = Path(path)
         suffix = path.suffix.lower()
 
         if suffix == ".xml":
@@ -243,7 +262,7 @@ class CodeEditor(QWidget):
             lexer = None
 
         if lexer is None:
-            self.editor.setLexer(None)
+            self._set_lexer(None)
             return
 
         font = self._editor_font()
@@ -270,13 +289,13 @@ class CodeEditor(QWidget):
             lexer.setColor(QColor(PALETTE.syn_value), QsciLexerProperties.DefaultValue)
         elif isinstance(lexer, QsciLexerXML):
             lexer.setColor(QColor(PALETTE.syn_section), QsciLexerXML.Tag)
-            lexer.setColor(QColor(PALETTE.syn_section), QsciLexerXML.TagEnd)
+            lexer.setColor(QColor(PALETTE.syn_section), QsciLexerXML.XMLTagEnd)
             lexer.setColor(QColor(PALETTE.syn_key), QsciLexerXML.Attribute)
-            lexer.setColor(QColor(PALETTE.syn_value), QsciLexerXML.DoubleQuotedString)
-            lexer.setColor(QColor(PALETTE.syn_value), QsciLexerXML.SingleQuotedString)
-            lexer.setColor(QColor(PALETTE.syn_comment), QsciLexerXML.Comment)
+            lexer.setColor(QColor(PALETTE.syn_value), QsciLexerXML.HTMLDoubleQuotedString)
+            lexer.setColor(QColor(PALETTE.syn_value), QsciLexerXML.HTMLSingleQuotedString)
+            lexer.setColor(QColor(PALETTE.syn_comment), QsciLexerXML.HTMLComment)
 
-        self.editor.setLexer(lexer)
+        self._set_lexer(lexer)
 
     # -------------------------------------------------- публичные действия
     def show_find(self):
@@ -289,27 +308,45 @@ class CodeEditor(QWidget):
         self.editor.redo()
 
     # -------------------------------------------------- содержимое
+    @staticmethod
+    def _read_text(path: Path) -> str:
+        try:
+            return path.read_text(encoding="utf-8", errors="replace")
+        except UnicodeDecodeError:
+            return path.read_text(encoding="windows-1251", errors="replace")
+
+    def _show_content(self, text, label, source_path=None, readonly=False):
+        """Единая точка отображения содержимого в редакторе.
+
+        ``source_path`` задаёт файл, из которого взято содержимое: по нему
+        выбирается лексер, и он же становится ``current_file``. И
+        ``open_file``, и ``show_text`` делегируют сюда, поэтому оба пути
+        получают одинаковую подсветку синтаксиса.
+        """
+        self.editor.setReadOnly(False)
+        self.editor.setText(text)
+        self.editor.setReadOnly(bool(readonly))
+
+        self.current_file = str(source_path) if source_path is not None else None
+        self.file_label.setText(str(label))
+        self._apply_lexer(source_path)
+
+        # Фокус в редактор: без этого внутренняя карта клавиш Scintilla
+        # (undo/redo/копирование/поиск) "не работает" для пользователя.
+        self.editor.setFocus(Qt.OtherFocusReason)
+
     def open_file(self, file_path):
         path = Path(file_path)
 
         if not path.is_file():
             return
 
-        try:
-            content = path.read_text(encoding="utf-8", errors="replace")
-        except UnicodeDecodeError:
-            content = path.read_text(encoding="windows-1251", errors="replace")
-
-        self.editor.setReadOnly(False)
-        self.editor.setText(content)
-        self.current_file = str(path)
-        self.file_label.setText(str(path))
-
-        self._apply_lexer(path)
-
-        # Фокус в редактор: без этого внутренняя карта клавиш Scintilla
-        # (undo/redo/копирование/поиск) "не работает" для пользователя.
-        self.editor.setFocus(Qt.OtherFocusReason)
+        self._show_content(
+            self._read_text(path),
+            str(path),
+            source_path=path,
+            readonly=False,
+        )
 
     def goto_line(self, line_number):
         """Перейти к указанной строке (1-based)."""
@@ -331,13 +368,9 @@ class CodeEditor(QWidget):
             self.editor.setFocus(Qt.OtherFocusReason)
         return found
 
-    def show_text(self, text, label, readonly=True):
-        self.editor.setReadOnly(readonly)
-        self.editor.setText(text)
-        self.current_file = None
-        self.file_label.setText(label)
-
-        self.editor.setFocus(Qt.OtherFocusReason)
+    def show_text(self, text, label, readonly=True, source_path=None):
+        path = Path(source_path) if source_path is not None else None
+        self._show_content(text, label, source_path=path, readonly=readonly)
 
 
 class ResolvedFindBar(QWidget):
@@ -669,6 +702,9 @@ class ResolvedView(QWidget):
         lexer.setColor(QColor(PALETTE.syn_key), QsciLexerProperties.Key)
         lexer.setColor(QColor(PALETTE.syn_assign), QsciLexerProperties.Assignment)
         lexer.setColor(QColor(PALETTE.syn_value), QsciLexerProperties.DefaultValue)
+        # Ссылка обязательна: иначе лексер удаляется сборщиком мусора
+        # сразу после выхода из _setup_editor.
+        self._lexer = lexer
         self.editor.setLexer(lexer)
 
     # -------------------------------------------------- публичные API

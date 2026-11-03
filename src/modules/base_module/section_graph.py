@@ -105,10 +105,10 @@ class SectionGraphFeature:
             )
             return
 
-        lost = len(getattr(graph, "lost_children", ()) or ())
-        status = "Граф построен: %d узлов" % len(graph.children)
+        main, lost = _split_children(graph)
+        status = "Граф построен: %d узлов" % len(main)
         if vfs_mode:
-            status += "; потерянных: %d" % lost
+            status += "; потерянных: %d" % len(lost)
         self.ctx.ui.set_status(status, 5000)
 
         if self._window is None:
@@ -138,7 +138,7 @@ class SectionGraphWindow(QDialog):
         layout = QVBoxLayout(self)
 
         # Информационный блок слева, чекбокс режима — справа от него,
-        # прижат к правому краю и отцентрован по вертикали (точка 2).
+        # прижат к правому краю и отцентрован по вертикали.
         self.info_label = QLabel()
 
         self.vfs_check_box = QCheckBox("Поиск перезаписанных связей")
@@ -220,7 +220,10 @@ class SectionGraphWindow(QDialog):
             title += " (VFS)"
         self.setWindowTitle("%s: %s" % (title, graph.section_name))
 
-        lost = list(getattr(graph, "lost_children", ()) or ())
+        # Найденные и потерянные связи не пересекаются: потерянные
+        # показываются только в правой панели, в левый список не попадают.
+        main, lost = _split_children(graph)
+
         info = (
             "Секция: %s\n"
             "Объявлена в: %s\n"
@@ -230,7 +233,7 @@ class SectionGraphWindow(QDialog):
                 graph.section_name,
                 _path_text(graph.root.file_path),
                 graph.root.first_match_line,
-                len(graph.children),
+                len(main),
             )
         )
         if self._vfs_mode:
@@ -238,13 +241,11 @@ class SectionGraphWindow(QDialog):
                 "\nРежим: вся VFS без фильтра LtxForest"
                 "\nПотерянных связей: %d" % len(lost)
             )
-            self.main_title.setText("Вся VFS")
         else:
             info += "\nРежим: итоговое дерево"
-            self.main_title.setText("Итоговое дерево")
         self.info_label.setText(info)
 
-        self._populate_list(self.list_widget, graph.children, include_root=True)
+        self._populate_list(self.list_widget, main, include_root=True)
         self.lost_list_widget.clear()
 
         if self._vfs_mode:
@@ -318,6 +319,31 @@ class SectionGraphWindow(QDialog):
 
     def _on_open_clicked(self):
         self._on_item_double_clicked(self._active_list.currentItem())
+
+
+def _node_key(node):
+    """Ключ узла: файл + строка + ссылка, для сравнения узлов между собой."""
+    return (
+        str(node.file_path) if node.file_path is not None else None,
+        getattr(node, "first_match_line", None),
+        getattr(node, "raw_ref", None),
+        getattr(node, "display_name", None),
+    )
+
+
+def _split_children(graph):
+    """Разделить детей графа на (найденные, потерянные) без пересечений.
+
+    Потерянные (перезаписанные) связи исключаются из общего списка,
+    чтобы не дублироваться в левой колонке окна.
+    """
+    lost = list(getattr(graph, "lost_children", ()) or ())
+    lost_keys = {_node_key(node) for node in lost}
+    main = [
+        node for node in graph.children
+        if _node_key(node) not in lost_keys
+    ]
+    return main, lost
 
 
 def _path_text(path) -> str:

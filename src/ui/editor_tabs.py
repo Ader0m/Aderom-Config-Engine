@@ -106,29 +106,40 @@ class EditorTabs(QTabWidget):
         return editor.current_file if editor is not None else None
 
     def open_file(self, file_path):
+        path = Path(file_path)
         editor = self._ensure_default_tab()
         self.setCurrentWidget(editor)
         editor.open_file(file_path)
 
-        path = Path(file_path)
         if path.is_file():
-            index = self.indexOf(editor)
-            self.setTabText(index, path.name)
-            self.setTabToolTip(index, str(path))
-            self._publish(Events.UI_TAB_OPENED, DEFAULT_TAB_ID)
-            self._publish_file_opened(path)
+            self._present_default_tab(path.name, str(path), path)
 
     def show_text(self, text, label, readonly=True, source_path=None):
         editor = self._ensure_default_tab()
         self.setCurrentWidget(editor)
-        editor.show_text(text, label, readonly=readonly)
+        editor.show_text(
+            text,
+            label,
+            readonly=readonly,
+            source_path=source_path,
+        )
 
-        index = self.indexOf(editor)
         title = str(label)
-        self.setTabText(index, _short_title(title))
-        self.setTabToolTip(index, title)
+        self._present_default_tab(
+            _short_title(title),
+            title,
+            source_path,
+        )
+
+    def _present_default_tab(self, tab_text, tooltip, source_path):
+        """Обновить заголовок дефолтной вкладки и опубликовать открытие."""
+        index = self.indexOf(self._default_editor)
+        self.setTabText(index, tab_text)
+        self.setTabToolTip(index, tooltip)
         self._publish(Events.UI_TAB_OPENED, DEFAULT_TAB_ID)
-        self._publish_file_opened(source_path if source_path is not None else label)
+        self._publish_file_opened(
+            source_path if source_path is not None else tooltip
+        )
 
     def goto_line(self, line_number):
         editor = self._active_editor()
