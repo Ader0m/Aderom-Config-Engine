@@ -255,8 +255,18 @@ class UiApi(Protocol):
     def ask_text(self, prompt: str, initial: str = "") -> str:
         """Запросить строку у пользователя."""
 
-    def show_text(self, text: str, label: str, readonly: bool = True) -> None:
-        """Показать текст в редакторе/просмотрщике платформы."""
+    def show_text(
+        self,
+        text: str,
+        label: str,
+        readonly: bool = True,
+        source_path: Optional[Path] = None,
+    ) -> None:
+        """Показать текст в редакторе/просмотрщике платформы.
+
+        ``source_path`` — файл, содержимое которого показано. Нужен, чтобы
+        событие открытия можно было сопоставить с отложенной навигацией.
+        """
 
     def show_module_window(self, key: str, window) -> None:
         """Показать окно, созданное модулем, и передать его платформе."""

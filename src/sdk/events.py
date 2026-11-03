@@ -5,7 +5,10 @@ class Events:
     # -------------------------------------------------- жизненный цикл
     APP_STARTED = "app_started"
     TREE_READY = "tree_ready"
+    # Файл действительно открыт: виджет размещён и стал текущим (payload — путь).
     FILE_OPENED = "file_opened"
+    # Открытие не состоялось (payload — путь): отложенная навигация сбрасывается.
+    FILE_OPEN_FAILED = "file_open_failed"
     CLEAN_RUN_STARTED = "clean_run_started"
     CLEAN_RUN_FINISHED = "clean_run_finished"
     ERROR = "error"

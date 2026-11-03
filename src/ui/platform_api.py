@@ -5,6 +5,8 @@ PlatformApi — сервисы UI-платформы и точка регист�
 Именно этот объект модуль видит как ctx.ui.
 """
 
+import os
+
 from PyQt5.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from sdk.events import Events
@@ -12,6 +14,11 @@ from sdk.events import Events
 from .file_open_router import FileOpenRouter
 from .input_bindings import MouseBindingManager, ShortcutManager
 from .module_windows import ModuleWindowManager
+
+
+def _path_key(path):
+    """Нормализовать путь для сопоставления запроса открытия и события."""
+    return os.path.normcase(os.path.abspath(os.fspath(path)))
 
 
 class PlatformApi:
@@ -22,7 +29,7 @@ class PlatformApi:
         self.services = services
         self.paths = paths
 
-        self.router = FileOpenRouter(events=events)
+        self.router = FileOpenRouter()
         self._window_manager = ModuleWindowManager()
         self._shortcut_manager = ShortcutManager(self.trigger_action)
         self._mouse_manager = MouseBindingManager(self.trigger_action)
@@ -31,6 +38,19 @@ class PlatformApi:
         self._menu_reg = []      # (menu_title, label, callback, shortcut, action)
         self._ctx_actions = []   # (label, handler(path))
         self._log_buffer = []
+
+        # Отложенная навигация: ключ — нормализованный путь файла.
+        # Запрос живёт до события FILE_OPENED ровно для этого пути.
+        self._pending_file_actions = {}
+
+        self._file_opened_sub = events.subscribe(
+            Events.FILE_OPENED,
+            self._on_file_opened,
+        )
+        self._file_open_failed_sub = events.subscribe(
+            Events.FILE_OPEN_FAILED,
+            self._on_file_open_failed,
+        )
 
         commands.register("ui.open_file", self.request_open_file)
         commands.register("ui.open_file_raw", self.request_open_file_raw)
@@ -174,9 +194,14 @@ class PlatformApi:
         self.window.editor.close_tab(tab_id)
 
     # -------------------------------------------------- ui-сервисы
-    def show_text(self, text, label, readonly=True):
+    def show_text(self, text, label, readonly=True, source_path=None):
         if self.window is not None:
-            self.window.editor.show_text(text, label, readonly=readonly)
+            self.window.editor.show_text(
+                text,
+                label,
+                readonly=readonly,
+                source_path=source_path,
+            )
         else:
             self._log_buffer.append("[show_text до окна] %s" % label)
 
@@ -211,39 +236,71 @@ class PlatformApi:
         return text if ok and text else ""
 
     def request_open_file_at_line(self, path, line_number: int):
-        """Открыть файл и перейти к указанной строке."""
+        """Открыть файл и перейти к указанной строке.
+
+        Навигация применяется не сразу: файл может открываться асинхронно
+        (резолв .ltx). Запрос ждёт события :attr:`Events.FILE_OPENED` для
+        этого же пути.
+        """
+        key = _path_key(path)
+        self._pending_file_actions[key] = ("line", int(line_number))
+
         ok = self.router.open(path, self)
         if not ok:
+            self._pending_file_actions.pop(key, None)
             self.show_error("Не найден обработчик для открытия файла: %s" % path)
-            return ok
-        
-        # Переходим к строке если окно — редактор
-        if self.window is not None and self.window.editor.current_file == str(path):
-            self.window.editor.goto_line(line_number)
-        
         return ok
 
     def request_open_file_with_search(self, path, search_text):
-        """Открыть файл через роутер и перейти к первому вхождению search_text."""
+        """Открыть файл и перейти к первому вхождению ``search_text``.
+
+        Навигация откладывается до факта открытия именно этого пути:
+        для резолва .ltx виджет создаётся позже, после фоновой сборки.
+        """
+        key = _path_key(path)
+        self._pending_file_actions[key] = ("search", search_text)
+
         ok = self.router.open(path, self)
         if not ok:
+            self._pending_file_actions.pop(key, None)
             self.show_error("Не найден обработчик для: %s" % path)
-            return ok
-
-        if self.window is None:
-            return ok
-        widget = self.window.editor.currentWidget()
-        if widget is not None and hasattr(widget, "find_first"):
-            if search_text and not widget.find_first(search_text):
-                self.set_status(
-                    "Владелец открыт, но строка не найдена: %s" % search_text, 8000
-                )
-        else:
-            self.log(
-                "[open_file_with_search] активная вкладка не поддерживает поиск: %s"
-                % type(widget).__name__
-            )
         return ok
+
+    # -------------------------------------------------- факты открытия
+    def _on_file_opened(self, path):
+        """Событие FILE_OPENED: применить навигацию ровно для этого пути."""
+        pending = self._pending_file_actions.pop(_path_key(path), None)
+        if pending is None or self.window is None:
+            return
+
+        kind, value = pending
+        widget = self.window.editor.currentWidget()
+
+        if kind == "search":
+            if widget is not None and hasattr(widget, "find_first"):
+                if value and not widget.find_first(value):
+                    self.set_status(
+                        "Владелец открыт, но строка не найдена: %s" % value,
+                        8000,
+                    )
+            else:
+                self.log(
+                    "[open_file_with_search] активная вкладка не поддерживает "
+                    "поиск: %s" % type(widget).__name__
+                )
+        elif kind == "line":
+            if widget is not None and hasattr(widget, "goto_line"):
+                widget.goto_line(value)
+            else:
+                self.log(
+                    "[open_file_at_line] активная вкладка не поддерживает "
+                    "переход к строке: %s" % type(widget).__name__
+                )
+
+    def _on_file_open_failed(self, path):
+        """Файл не открылся: отложенная навигация больше не нужна."""
+        if self._pending_file_actions.pop(_path_key(path), None) is not None:
+            self.log("[open] навигация отменена, файл не открыт: %s" % path)
 
     def open_resolved_tab(self, tab_id, title, text, line_sources, root_path):
         """Создать ResolvedView и открыть его как вкладку."""
@@ -258,4 +315,9 @@ class PlatformApi:
         )
         view.diagnostic.connect(lambda msg: self.log("[resolved] %s" % msg))
         view.diagnostic.connect(lambda msg: self.set_status(msg, 8000))
-        self.window.editor.open_tab(tab_id, title, view)
+        self.window.editor.open_tab(
+            tab_id,
+            title,
+            view,
+            source_path=root_path,
+        )

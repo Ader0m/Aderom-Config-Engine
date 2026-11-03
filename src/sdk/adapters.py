@@ -261,8 +261,13 @@ class UiApiAdapter:
     def ask_text(self, prompt, initial=""):
         return self._platform.ask_text(prompt, initial)
 
-    def show_text(self, text, label, readonly=True):
-        self._platform.show_text(text, label, readonly=readonly)
+    def show_text(self, text, label, readonly=True, source_path=None):
+        self._platform.show_text(
+            text,
+            label,
+            readonly=readonly,
+            source_path=source_path,
+        )
 
     def show_module_window(self, key, window):
         self._platform.show_module_window(key, window)

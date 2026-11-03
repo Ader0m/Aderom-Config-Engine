@@ -191,6 +191,8 @@ sub.unsubscribe()
 События платформы:
 
 ```text
+file_opened              (path)            publish
+file_open_failed         (path)            publish
 ui.window.shown          (key)             publish
 ui.window.closed         (key)             publish
 ui.tab.opened            (tab_id)          publish
@@ -199,6 +201,20 @@ ui.tab.changed           (tab_id | None)   publish
 ui.shortcut              ({key, scope})    dispatch
 ui.mouse                 ({scope, button, modifiers, event}) dispatch
 ```
+
+`file_opened` публикуется UI-слоем **после** размещения виджета и
+переключения на него, а не маршрутизатором в момент выбора обработчика.
+Событие приходит из всех путей открытия: модульная вкладка (`open_tab`,
+включая повторное использование виджета), сырой файл (`open_file`) и
+дефолтная вкладка (`show_text`). Payload — путь файла (или label, если
+путь неизвестен). `file_open_failed` публикуется, если открытие не
+состоялось (например, ошибка фоновой сборки резолва).
+
+Платформа хранит отложенную навигацию (поиск/переход к строке) ключом по
+пути и применяет её только к событию `file_opened` с этим же путём. Не
+следует привязывать навигацию к `ui.tab.changed` или читать
+`currentWidget()` сразу после запроса открытия: для асинхронного резолва
+`.ltx` вкладка создаётся заметно позже.
 
 `ui.window.requested`, `ui.tab.requested` и `ui.file.open_requested` —
 зарезервированные имена для запросов между модулями; платформа их

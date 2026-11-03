@@ -45,7 +45,13 @@ class EditorTabs(QTabWidget):
         return editor
 
     # -------------------------------------------------- вкладки модулей
-    def open_tab(self, tab_id, title, widget):
+    def open_tab(self, tab_id, title, widget, source_path=None):
+        """Открыть вкладку модуля и опубликовать факт её размещения.
+
+        ``source_path`` — файл, который показывает вкладка. Он попадает в
+        событие :attr:`Events.FILE_OPENED`; по нему платформа понимает,
+        к какому именно открытию относится отложенная навигация.
+        """
         if not tab_id:
             raise ValueError("tab_id не может быть пустым")
         if tab_id == DEFAULT_TAB_ID:
@@ -55,9 +61,13 @@ class EditorTabs(QTabWidget):
 
         existing = self._tab_ids.get(tab_id)
         if existing is widget:
+            # Виджет переиспользуется, но вкладка всё равно становится
+            # текущей — это тоже состоявшееся открытие.
             index = self.indexOf(widget)
             self.setTabText(index, title)
             self.setCurrentIndex(index)
+            self._publish(Events.UI_TAB_OPENED, tab_id)
+            self._publish_file_opened(source_path)
             return
 
         if existing is not None:
@@ -65,6 +75,7 @@ class EditorTabs(QTabWidget):
 
         self._add_tab(tab_id, title, widget, closable=True)
         self._publish(Events.UI_TAB_OPENED, tab_id)
+        self._publish_file_opened(source_path)
 
     def close_tab(self, tab_id):
         if tab_id == DEFAULT_TAB_ID:
@@ -104,8 +115,10 @@ class EditorTabs(QTabWidget):
             index = self.indexOf(editor)
             self.setTabText(index, path.name)
             self.setTabToolTip(index, str(path))
+            self._publish(Events.UI_TAB_OPENED, DEFAULT_TAB_ID)
+            self._publish_file_opened(path)
 
-    def show_text(self, text, label, readonly=True):
+    def show_text(self, text, label, readonly=True, source_path=None):
         editor = self._ensure_default_tab()
         self.setCurrentWidget(editor)
         editor.show_text(text, label, readonly=readonly)
@@ -114,6 +127,8 @@ class EditorTabs(QTabWidget):
         title = str(label)
         self.setTabText(index, _short_title(title))
         self.setTabToolTip(index, title)
+        self._publish(Events.UI_TAB_OPENED, DEFAULT_TAB_ID)
+        self._publish_file_opened(source_path if source_path is not None else label)
 
     def goto_line(self, line_number):
         editor = self._active_editor()
@@ -168,6 +183,10 @@ class EditorTabs(QTabWidget):
     def _publish(self, name, payload):
         if self._events is not None:
             self._events.publish(name, payload)
+
+    def _publish_file_opened(self, path):
+        if path is not None:
+            self._publish(Events.FILE_OPENED, str(path))
 
 
 def _short_title(text, limit=40):

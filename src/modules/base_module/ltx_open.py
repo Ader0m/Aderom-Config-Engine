@@ -4,6 +4,7 @@
 from pathlib import Path
 
 from sdk import FileOpenHandler
+from sdk.events import Events
 
 
 class LtxFileOpener:
@@ -14,17 +15,22 @@ class LtxFileOpener:
         self.session = session
 
     def open(self, path) -> bool:
+        path = Path(path)
         if not self.session.has_tree:
+            self._open_failed(path)
             self.ctx.ui.show_error(
                 "Дерево не построено: сначала «Чистый запуск»."
             )
             return False
 
-        path = Path(path)
         if path.name.lower().startswith("mod_"):
             return self._open_patch(path)
 
         return self._open_resolved(path)
+
+    def _open_failed(self, path):
+        """Сообщить платформе, что открытие этого пути не состоится."""
+        self.ctx.events.publish(Events.FILE_OPEN_FAILED, path)
 
     # -------------------------------------------------- DLTX-патч
     def _open_patch(self, path: Path) -> bool:
@@ -33,6 +39,7 @@ class LtxFileOpener:
         try:
             raw_content = self.ctx.services.read_text(path)
         except Exception as exc:
+            self._open_failed(path)
             self.ctx.ui.show_error("Не удалось прочитать: %s" % exc)
             return False
 
@@ -76,6 +83,7 @@ class LtxFileOpener:
             "\n".join(header) + raw_content,
             title,
             readonly=True,
+            source_path=path,
         )
         self.ctx.ui.set_status("Открыт патч: %s" % rel, 5000)
         return True
@@ -97,15 +105,23 @@ class LtxFileOpener:
                 log=log,
             )
 
-        self.ctx.tasks.run(
-            work,
-            on_done=lambda result, err: self._on_resolved(path, result, err),
-            on_log=self.ctx.ui.log,
-        )
+        try:
+            self.ctx.tasks.run(
+                work,
+                on_done=lambda result, err: self._on_resolved(path, result, err),
+                on_log=self.ctx.ui.log,
+            )
+        except Exception as exc:
+            self._open_failed(path)
+            self.ctx.ui.show_error(
+                "Не удалось запустить сборку %s:\n%s" % (path.name, exc)
+            )
+            return False
         return True
 
     def _on_resolved(self, path: Path, result, err):
         if err is not None:
+            self._open_failed(path)
             self.ctx.ui.set_status("Ошибка")
             self.ctx.ui.show_error(
                 "Не удалось разрешить %s:\n%s\n\n"

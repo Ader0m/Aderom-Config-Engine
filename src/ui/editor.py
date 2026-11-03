@@ -321,6 +321,16 @@ class CodeEditor(QWidget):
         self.editor.ensureLineVisible(line_index)
         self.editor.setFocus(Qt.OtherFocusReason)
 
+    def find_first(self, text):
+        """Перейти к первому вхождению ``text`` и выделить его."""
+        if not text:
+            return False
+        self.editor.setCursorPosition(0, 0)
+        found = self.editor.findFirst(text, False, False, False, True)
+        if found:
+            self.editor.setFocus(Qt.OtherFocusReason)
+        return found
+
     def show_text(self, text, label, readonly=True):
         self.editor.setReadOnly(readonly)
         self.editor.setText(text)

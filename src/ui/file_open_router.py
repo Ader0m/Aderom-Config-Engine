@@ -5,7 +5,6 @@ import logging
 from pathlib import Path
 
 from sdk.contracts import FileOpenHandler
-from sdk.events import Events
 
 log = logging.getLogger(__name__)
 
@@ -24,10 +23,15 @@ class TextEditorHandler(FileOpenHandler):
 
 
 class FileOpenRouter:
-    def __init__(self, events=None):
+    """Выбирает обработчик открытия файла.
+
+    Маршрутизатор только принимает запрос. Факт открытия публикует UI-слой
+    (``EditorTabs``) после того, как виджет размещён и стал текущим.
+    """
+
+    def __init__(self):
         self._handlers = []
         self.default = None
-        self.events = events
 
     def register(self, handler):
         self._handlers.append(handler)
@@ -42,7 +46,6 @@ class FileOpenRouter:
             try:
                 if h.can_open(p):
                     h.open(p, api)
-                    self._notify(p)
                     return True
             except Exception:
                 log.exception("Обработчик открытия файла упал: %r", h)
@@ -55,9 +58,4 @@ class FileOpenRouter:
         if self.default is None:
             return False
         self.default.open(p, api)
-        self._notify(p)
         return True
-
-    def _notify(self, p):
-        if self.events is not None:
-            self.events.publish(Events.FILE_OPENED, p)
