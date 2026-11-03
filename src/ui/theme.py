@@ -31,7 +31,7 @@ from string import Template
 from typing import Optional
 
 from PyQt5.QtCore import QPoint, Qt
-from PyQt5.QtGui import QColor, QImage, QPainter, QPolygon
+from PyQt5.QtGui import QColor, QImage, QPainter, QPolygon, QPen
 
 
 # ======================================================================
@@ -119,6 +119,25 @@ def _draw_triangle(path, points, color):
     img.save(path)
     return path.replace("\\", "/")         # QSS url() любит прямые слеши
 
+def _draw_cross(path, color, size=16, thickness=2):
+    """Рисует аккуратный крестик (X) со скругленными концами."""
+    img = QImage(size, size, QImage.Format_ARGB32)
+    img.fill(Qt.transparent)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    
+    pen = QPen(QColor(color))
+    pen.setWidth(thickness)
+    pen.setCapStyle(Qt.RoundCap)  # Скругленные углы линий
+    p.setPen(pen)
+    
+    margin = 4
+    p.drawLine(margin, margin, size - margin, size - margin)
+    p.drawLine(margin, size - margin, size - margin, margin)
+    
+    p.end()
+    img.save(path)
+    return path.replace("\\", "/")
 
 def ensure_branch_icons(palette: Optional[Palette] = None):
     """Рисует стрелки ▶/▼ для ветвей дерева во временный каталог.
@@ -141,6 +160,24 @@ def ensure_branch_icons(palette: Optional[Palette] = None):
     )
     return closed, opened
 
+def ensure_tab_close_icons(palette: Optional[Palette] = None):
+    """Рисует крестик закрытия вкладки для состояний: normal, hover, pressed."""
+    p = palette if palette is not None else PALETTE
+    os.makedirs(_BRANCH_DIR, exist_ok=True)
+    
+    normal = _draw_cross(
+        os.path.join(_BRANCH_DIR, "tab_close.png"),
+        p.text_muted,
+    )
+    hover = _draw_cross(
+        os.path.join(_BRANCH_DIR, "tab_close_hover.png"),
+        p.text_bright,
+    )
+    pressed = _draw_cross(
+        os.path.join(_BRANCH_DIR, "tab_close_pressed.png"),
+        p.accent_red,  # Красный крестик при нажатии
+    )
+    return normal, hover, pressed
 
 # ======================================================================
 # QSS-шаблон (все значения — из Palette, все шрифты — в pt)
@@ -451,14 +488,26 @@ QTabBar::tab:!selected {
     margin-top: 0px;
 }
 
+/* ============ Кнопка закрытия вкладки ============ */
 QTabBar::close-button {
     subcontrol-position: right;
+    image: url("$tab_close_url");
     background: transparent;
     border-radius: 3px;
+    width: 16px;
+    height: 16px;
+    margin: 2px;
 }
 
 QTabBar::close-button:hover {
+    image: url("$tab_close_hover_url");
     background-color: $border_hover;
+}
+
+QTabBar::close-button:pressed {
+    image: url("$tab_close_pressed_url");
+    background-color: $accent_red;
+    border-radius: 3px;
 }
 
 /* ============ Нижняя консоль (единая панель во всю ширину) ============ */
@@ -862,14 +911,19 @@ QMainWindow::separator:hover {
 # ======================================================================
 
 def build_stylesheet(palette: Palette = PALETTE) -> str:
-    """Собирает QSS из палитры: цвета, шрифты и url иконок ветвей.
-
-    Вне Palette цветов и ресурсов не существует.
-    """
+    """Собирает QSS из палитры: цвета, шрифты и url иконок."""
     closed, opened = ensure_branch_icons(palette)
+    tab_close, tab_close_hover, tab_close_pressed = ensure_tab_close_icons(palette)
+    
     mapping = asdict(palette)
     mapping["branch_closed_url"] = closed
     mapping["branch_open_url"] = opened
+    
+    # Добавляем иконки крестика
+    mapping["tab_close_url"] = tab_close
+    mapping["tab_close_hover_url"] = tab_close_hover
+    mapping["tab_close_pressed_url"] = tab_close_pressed
+    
     return _QSS.substitute(mapping)
 
 

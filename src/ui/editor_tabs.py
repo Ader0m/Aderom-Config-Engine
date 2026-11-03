@@ -3,7 +3,7 @@
 
 from pathlib import Path
 
-from PyQt5.QtWidgets import QTabBar, QTabWidget, QWidget
+from PyQt5.QtWidgets import QTabWidget, QWidget
 
 from sdk.events import Events
 
@@ -36,12 +36,7 @@ class EditorTabs(QTabWidget):
 
         editor = CodeEditor()
         self._default_editor = editor
-        self._add_tab(
-            DEFAULT_TAB_ID,
-            "Редактор",
-            editor,
-            closable=False,
-        )
+        self._add_tab(DEFAULT_TAB_ID, "Редактор", editor)
         return editor
 
     # -------------------------------------------------- вкладки модулей
@@ -73,17 +68,20 @@ class EditorTabs(QTabWidget):
         if existing is not None:
             self.close_tab(tab_id)
 
-        self._add_tab(tab_id, title, widget, closable=True)
+        self._add_tab(tab_id, title, widget)
         self._publish(Events.UI_TAB_OPENED, tab_id)
         self._publish_file_opened(source_path)
 
     def close_tab(self, tab_id):
-        if tab_id == DEFAULT_TAB_ID:
-            return False
-
         widget = self._tab_ids.pop(tab_id, None)
         if widget is None:
             return False
+
+        if widget is self._default_editor:
+            # Вкладка закрывается как обычная, но при следующем
+            # open_file/show_text _ensure_default_tab создаст свежий
+            # редактор и снова добавит его вкладкой.
+            self._default_editor = None
 
         index = self.indexOf(widget)
         if index != -1:
@@ -162,13 +160,9 @@ class EditorTabs(QTabWidget):
             editor.show_find()
 
     # -------------------------------------------------- служебное
-    def _add_tab(self, tab_id, title, widget, closable):
+    def _add_tab(self, tab_id, title, widget):
         index = self.addTab(widget, title)
         self._tab_ids[tab_id] = widget
-
-        if not closable:
-            self.tabBar().setTabButton(index, QTabBar.RightSide, None)
-
         self.setCurrentIndex(index)
         return widget
 
@@ -185,7 +179,7 @@ class EditorTabs(QTabWidget):
     def _on_close_requested(self, index):
         widget = self.widget(index)
         tab_id = self._tab_id_for_widget(widget)
-        if tab_id is not None and tab_id != DEFAULT_TAB_ID:
+        if tab_id is not None:
             self.close_tab(tab_id)
 
     def _on_current_changed(self, _index):
