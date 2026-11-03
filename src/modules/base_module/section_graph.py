@@ -137,17 +137,19 @@ class SectionGraphWindow(QDialog):
 
         layout = QVBoxLayout(self)
 
-        controls = QHBoxLayout()
-        self.vfs_check_box = QCheckBox(
-            "Поиск во всей VFS (потерянные связи)"
-        )
-        self.vfs_check_box.toggled.connect(self._on_vfs_check_box_toggled)
-        controls.addWidget(self.vfs_check_box)
-        controls.addStretch(1)
-        layout.addLayout(controls)
-
+        # Информационный блок слева, чекбокс режима — справа от него,
+        # прижат к правому краю и отцентрован по вертикали (точка 2).
         self.info_label = QLabel()
-        layout.addWidget(self.info_label)
+
+        self.vfs_check_box = QCheckBox("Поиск перезаписанных связей")
+        self.vfs_check_box.toggled.connect(self._on_vfs_check_box_toggled)
+
+        info_row = QHBoxLayout()
+        info_row.addWidget(self.info_label, 1)
+        info_row.addWidget(
+            self.vfs_check_box, 0, Qt.AlignRight | Qt.AlignVCenter
+        )
+        layout.addLayout(info_row)
 
         self.splitter = QSplitter(Qt.Horizontal)
 
