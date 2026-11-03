@@ -5,7 +5,7 @@
 
 - :class:`CleanRunFeature` — сценарий построения дерева;
 - :class:`LtxFileOpener` — открытие .ltx (резолв/DLTX-патч);
-- :class:`XmlFileOpener` — открытие .xml без резолва;
+- :class:`XmlFileOpener` — открытие .xml (сырое и после XmlResolver);
 - :class:`SectionGraphFeature` — граф связей секции;
 - :class:`TreeActions` — действия дерева;
 - :class:`EditorActions` — действия редактора.
@@ -24,7 +24,7 @@ from .clean_run import CleanRunFeature
 from .ltx_open import LtxFileOpener, ResolvedLtxHandler
 from .section_graph import SectionGraphFeature
 from .session import ModuleSession
-from .xml_open import RawXmlHandler, XmlFileOpener
+from .xml_open import XmlFileOpener, XmlOpenHandler
 
 
 class BaseModule(ModuleBase):
@@ -32,7 +32,7 @@ class BaseModule(ModuleBase):
         name="base",
         version="0.3.0",
         sdk_min="0.1.0",
-        description="Базовый сценарий: чистый запуск, VFS-вид, резолв .ltx и сырое открытие .xml.",
+        description="Базовый сценарий: чистый запуск, VFS-вид, резолв .ltx, XML/DXML.",
     )
 
     # -------------------------------------------------- жизненный цикл
@@ -42,7 +42,7 @@ class BaseModule(ModuleBase):
         self.session = ModuleSession()
         self._clean_run = CleanRunFeature(ctx, self.session)
         self._ltx_opener = LtxFileOpener(ctx, self.session)
-        self._xml_opener = XmlFileOpener(ctx)
+        self._xml_opener = XmlFileOpener(ctx, self.session)
         self._section_graph = SectionGraphFeature(ctx, self.session)
         self._tree_actions = TreeActions(ctx, self.session)
         self._editor_actions = EditorActions(ctx)
@@ -106,6 +106,9 @@ class BaseModule(ModuleBase):
         commands.register("base.clean_run", self._clean_run.run)
         commands.register("base.open_notepad", self._tree_actions.open_in_external_editor)
         commands.register("base.assemble_open", self._tree_actions.assemble_and_open)
+        commands.register("base.open_ltx_resolved_at_line", self._ltx_opener.open_resolved_at_line)
+        commands.register("base.open_xml_resolved", self._xml_opener.open_resolved)
+        commands.register("base.open_xml_resolved_notepad", self._xml_opener.open_resolved_in_external_editor)
         commands.register("base.copy_rel_path", self._tree_actions.copy_relative_path)
         commands.register("base.open_raw", self._tree_actions.open_raw)
         commands.register("base.edit_undo", self._editor_actions.undo)
@@ -116,7 +119,7 @@ class BaseModule(ModuleBase):
 
     def _register_open_handler(self, ctx):
         ctx.ui.register_open_handler(ResolvedLtxHandler(self._ltx_opener))
-        ctx.ui.register_open_handler(RawXmlHandler(self._xml_opener))
+        ctx.ui.register_open_handler(XmlOpenHandler(self._xml_opener))
 
     def _register_tree_actions(self, ctx):
         ui = ctx.ui
@@ -149,6 +152,18 @@ class BaseModule(ModuleBase):
         ui.register_tree_context_action(
             "Открыть XML в Notepad++",
             actions.open_in_external_editor,
+            predicate=is_xml_path,
+        )
+
+        # XML-резолв: include-сборка + DXML.
+        ui.register_tree_context_action(
+            "Открыть обработанный XML",
+            self._xml_opener.open_resolved,
+            predicate=is_xml_path,
+        )
+        ui.register_tree_context_action(
+            "Открыть обработанный XML в Notepad++",
+            self._xml_opener.open_resolved_in_external_editor,
             predicate=is_xml_path,
         )
 

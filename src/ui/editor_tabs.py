@@ -3,7 +3,8 @@
 
 from pathlib import Path
 
-from PyQt5.QtWidgets import QTabWidget, QWidget
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import QMenu, QTabWidget, QWidget
 
 from sdk.events import Events
 
@@ -26,6 +27,10 @@ class EditorTabs(QTabWidget):
         self.setTabsClosable(True)
         self.tabCloseRequested.connect(self._on_close_requested)
         self.currentChanged.connect(self._on_current_changed)
+
+        tab_bar = self.tabBar()
+        tab_bar.setContextMenuPolicy(Qt.CustomContextMenu)
+        tab_bar.customContextMenuRequested.connect(self._on_tab_context_menu)
 
         self._ensure_default_tab()
 
@@ -175,6 +180,53 @@ class EditorTabs(QTabWidget):
             if candidate is widget:
                 return tab_id
         return None
+
+    # -------------------------------------------------- контекстное меню вкладок
+    def _on_tab_context_menu(self, pos):
+        tab_bar = self.tabBar()
+        index = tab_bar.tabAt(pos)
+        if index < 0:
+            return
+
+        # Действия считаются относительно вкладки, по которой кликнули.
+        self.setCurrentIndex(index)
+
+        menu = QMenu(self)
+
+        close_right = menu.addAction("Закрыть все вкладки справа")
+        close_right.setEnabled(index + 1 < self.count())
+
+        close_others = menu.addAction("Закрыть все другие вкладки")
+        close_others.setEnabled(self.count() > 1)
+
+        menu.addSeparator()
+
+        close_all = menu.addAction("Закрыть все вкладки")
+
+        chosen = menu.exec_(tab_bar.mapToGlobal(pos))
+
+        if chosen is close_right:
+            self._close_tabs_by_indices(
+                range(index + 1, self.count())
+            )
+        elif chosen is close_others:
+            self._close_tabs_by_indices(
+                i for i in range(self.count()) if i != index
+            )
+        elif chosen is close_all:
+            self._close_tabs_by_indices(range(self.count()))
+
+    def _close_tabs_by_indices(self, indices):
+        """Закрыть вкладки по индексам, не сбивая нумерацию при удалении."""
+        tab_ids = []
+        for index in indices:
+            widget = self.widget(index)
+            tab_id = self._tab_id_for_widget(widget)
+            if tab_id is not None:
+                tab_ids.append(tab_id)
+
+        for tab_id in tab_ids:
+            self.close_tab(tab_id)
 
     def _on_close_requested(self, index):
         widget = self.widget(index)

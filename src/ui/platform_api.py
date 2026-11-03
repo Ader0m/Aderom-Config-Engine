@@ -54,6 +54,7 @@ class PlatformApi:
 
         commands.register("ui.open_file", self.request_open_file)
         commands.register("ui.open_file_raw", self.request_open_file_raw)
+        commands.register("ui.open_file_raw_at_line", self.request_open_file_raw_at_line)
         commands.register("ui.editor_undo", self.request_editor_undo)
         commands.register("ui.editor_redo", self.request_editor_redo)
         commands.register("ui.editor_find", self.request_editor_find)
@@ -216,6 +217,17 @@ class PlatformApi:
             self.show_error("Нет обработчика по умолчанию для: %s" % path)
         return ok
 
+    def request_open_file_raw_at_line(self, path, line_number: int):
+        """Открыть исходный файл (без резолва) и перейти к строке."""
+        key = _path_key(path)
+        self._pending_file_actions[key] = ("line", int(line_number))
+
+        ok = self.router.open_default(path, self)
+        if not ok:
+            self._pending_file_actions.pop(key, None)
+            self.show_error("Нет обработчика по умолчанию для: %s" % path)
+        return ok
+
     def request_editor_undo(self):
         if self.window is not None:
             self.window.editor.undo()
@@ -307,7 +319,8 @@ class PlatformApi:
         if self._pending_file_actions.pop(_path_key(path), None) is not None:
             self.log("[open] навигация отменена, файл не открыт: %s" % path)
 
-    def open_resolved_tab(self, tab_id, title, text, line_sources, root_path):
+    def open_resolved_tab(self, tab_id, title, text, line_sources, root_path,
+                          line_number=None):
         """Создать ResolvedView и открыть его как вкладку."""
         if self.window is None:
             return
@@ -326,3 +339,47 @@ class PlatformApi:
             view,
             source_path=root_path,
         )
+        if line_number is not None:
+            view.goto_line(int(line_number))
+
+    def open_xml_resolved_tab(self, tab_id, title, text, root_path,
+                              line_sources=None):
+        """Открыть XML-резолв в отдельной вкладке с панелью источников."""
+        if self.window is None:
+            return
+        from .editor import ResolvedView
+
+        sources = list(line_sources or [])
+        has_sources = any(src is not None for src in sources)
+        view = ResolvedView()
+        view.set_content(
+            text,
+            sources,
+            str(root_path),
+            sources_visible=has_sources,
+        )
+        view.source_activated.connect(
+            lambda path, search: self.request_open_file_with_search(path, search)
+        )
+        view.source_raw_activated.connect(
+            lambda path, search: self.request_open_file_raw_with_search(path, search)
+        )
+        view.diagnostic.connect(lambda msg: self.log("[xml-resolved] %s" % msg))
+        view.diagnostic.connect(lambda msg: self.set_status(msg, 8000))
+        self.window.editor.open_tab(
+            tab_id,
+            title,
+            view,
+            source_path=str(root_path),
+        )
+
+    def request_open_file_raw_with_search(self, path, search_text):
+        """Открыть файл как сырой текст и перейти к строке поиска."""
+        key = _path_key(path)
+        self._pending_file_actions[key] = ("search", search_text)
+
+        ok = self.router.open_default(path, self)
+        if not ok:
+            self._pending_file_actions.pop(key, None)
+            self.show_error("Нет обработчика по умолчанию для: %s" % path)
+        return ok

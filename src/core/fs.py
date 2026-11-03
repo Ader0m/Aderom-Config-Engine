@@ -82,6 +82,20 @@ def read_text_safe(path) -> str:
         return raw.decode("windows-1251", errors="replace")
 
 
+def read_xml_text(path) -> str:
+    """Читает XML строго как windows-1251 (без автоопределения).
+
+    Конфиги X-Ray/Anomaly объявляют ``encoding="windows-1251"``.
+    BOM, если он есть, отбрасывается; остальные байты декодируются 1:1.
+    """
+    raw = Path(path).read_bytes()
+
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raw = raw[3:]
+
+    return raw.decode("windows-1251", errors="replace")
+
+
 # ------------------------------------------------------------ include
 
 def strip_comments(line: str) -> str:

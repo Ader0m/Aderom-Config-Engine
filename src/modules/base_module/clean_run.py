@@ -92,6 +92,14 @@ class CleanRunFeature:
         self.ctx.events.publish(Events.TREE_READY, forest)
         self.ctx.events.publish(Events.CLEAN_RUN_FINISHED, forest)
 
+        try:
+            self.ctx.services.start_prebuild(
+                forest,
+                self.session.config_dir,
+            )
+        except Exception as exc:
+            self.ctx.ui.log("Не удалось запустить фоновую сборку: %s" % exc)
+
         summary = self.ctx.services.tree_summary(forest)
         self.ctx.ui.set_status(
             "Корней: %d; файлов LTX: %d; XML: %d; в дереве system: %d; секций: %s"

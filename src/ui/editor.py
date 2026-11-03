@@ -310,10 +310,20 @@ class CodeEditor(QWidget):
     # -------------------------------------------------- содержимое
     @staticmethod
     def _read_text(path: Path) -> str:
+        # XML в X-Ray/Anomaly всегда windows-1251, без автоопределения.
+        if path.suffix.lower() == ".xml":
+            raw = path.read_bytes()
+            if raw.startswith(b"\xef\xbb\xbf"):
+                raw = raw[3:]
+            return raw.decode("windows-1251", errors="replace")
+
+        raw = path.read_bytes()
+        if raw.startswith(b"\xef\xbb\xbf"):
+            raw = raw[3:]
         try:
-            return path.read_text(encoding="utf-8", errors="replace")
+            return raw.decode("utf-8")
         except UnicodeDecodeError:
-            return path.read_text(encoding="windows-1251", errors="replace")
+            return raw.decode("windows-1251", errors="replace")
 
     def _show_content(self, text, label, source_path=None, readonly=False):
         """Единая точка отображения содержимого в редакторе.
@@ -477,7 +487,7 @@ class SourceListModel(QAbstractListModel):
             return None
         src = self._sources[index.row()]
         if isinstance(src, tuple):
-            pretty, _full = src
+            pretty = src[0]
         else:
             pretty = src
         if role == Qt.DisplayRole:
@@ -565,6 +575,7 @@ class ResolvedView(QWidget):
     ORIGINAL_LABEL = "оригинал"
 
     source_activated = pyqtSignal(object, str)  # (path, search_text)
+    source_raw_activated = pyqtSignal(object, str)  # сырой файл (XML/script)
     diagnostic = pyqtSignal(str)
 
     def __init__(self, parent=None):
@@ -572,6 +583,7 @@ class ResolvedView(QWidget):
         self._root_path = None
         self._line_sources = []
         self._syncing = False
+        self._source_visible = True
         self._init_ui()
         self._init_shortcuts()
 
@@ -690,27 +702,83 @@ class ResolvedView(QWidget):
         self.editor.setWrapMode(QsciScintilla.WrapNone)
         self.editor.setReadOnly(True)
 
-        lexer = QsciLexerProperties()
-        lexer.setDefaultFont(font)
-        lexer.setDefaultColor(QColor(PALETTE.syn_default))
-        lexer.setDefaultPaper(QColor(PALETTE.bg_main))
-        lexer.setFont(font)
-        lexer.setColor(QColor(PALETTE.syn_default))
-        lexer.setPaper(QColor(PALETTE.bg_main))
-        lexer.setColor(QColor(PALETTE.syn_comment), QsciLexerProperties.Comment)
-        lexer.setColor(QColor(PALETTE.syn_section), QsciLexerProperties.Section)
-        lexer.setColor(QColor(PALETTE.syn_key), QsciLexerProperties.Key)
-        lexer.setColor(QColor(PALETTE.syn_assign), QsciLexerProperties.Assignment)
-        lexer.setColor(QColor(PALETTE.syn_value), QsciLexerProperties.DefaultValue)
+        self._apply_lexer(None)
+
+    def _apply_lexer(self, path):
+        """Подсветка: XML для .xml, LTX/properties для остального."""
+        font = QFont(PALETTE.editor_font_family, PALETTE.editor_font_size_pt)
+        paper = QColor(PALETTE.bg_main)
+        fg = QColor(PALETTE.syn_default)
+
+        suffix = Path(path).suffix.lower() if path else ""
+
+        if suffix == ".xml":
+            lexer = QsciLexerXML()
+            lexer.setDefaultFont(font)
+            lexer.setDefaultColor(fg)
+            lexer.setDefaultPaper(paper)
+            lexer.setFont(font)
+            lexer.setColor(fg)
+            lexer.setPaper(paper)
+            lexer.setColor(QColor(PALETTE.syn_section), QsciLexerXML.Tag)
+            lexer.setColor(QColor(PALETTE.syn_section), QsciLexerXML.XMLTagEnd)
+            lexer.setColor(QColor(PALETTE.syn_key), QsciLexerXML.Attribute)
+            lexer.setColor(
+                QColor(PALETTE.syn_value),
+                QsciLexerXML.HTMLDoubleQuotedString,
+            )
+            lexer.setColor(
+                QColor(PALETTE.syn_value),
+                QsciLexerXML.HTMLSingleQuotedString,
+            )
+            lexer.setColor(
+                QColor(PALETTE.syn_comment),
+                QsciLexerXML.HTMLComment,
+            )
+        else:
+            lexer = QsciLexerProperties()
+            lexer.setDefaultFont(font)
+            lexer.setDefaultColor(fg)
+            lexer.setDefaultPaper(paper)
+            lexer.setFont(font)
+            lexer.setColor(fg)
+            lexer.setPaper(paper)
+            lexer.setColor(
+                QColor(PALETTE.syn_comment),
+                QsciLexerProperties.Comment,
+            )
+            lexer.setColor(
+                QColor(PALETTE.syn_section),
+                QsciLexerProperties.Section,
+            )
+            lexer.setColor(QColor(PALETTE.syn_key), QsciLexerProperties.Key)
+            lexer.setColor(
+                QColor(PALETTE.syn_assign),
+                QsciLexerProperties.Assignment,
+            )
+            lexer.setColor(
+                QColor(PALETTE.syn_value),
+                QsciLexerProperties.DefaultValue,
+            )
+
         # Ссылка обязательна: иначе лексер удаляется сборщиком мусора
-        # сразу после выхода из _setup_editor.
+        # сразу после выхода из метода.
         self._lexer = lexer
         self.editor.setLexer(lexer)
 
     # -------------------------------------------------- публичные API
-    def set_content(self, text, line_sources, root_path):
+    def set_sources_visible(self, visible):
+        self._source_visible = bool(visible)
+        self.source_header.setVisible(self._source_visible)
+        self.source_list.setVisible(self._source_visible)
+        if not self._source_visible:
+            self.splitter.setSizes([1, 0])
+
+    def set_content(self, text, line_sources, root_path, sources_visible=True):
         self._root_path = str(root_path)
         self._line_sources = list(line_sources)
+
+        self.set_sources_visible(sources_visible)
 
         self.editor.setReadOnly(False)
         self.editor.setText(text)
@@ -719,6 +787,8 @@ class ResolvedView(QWidget):
         # beginResetModel/endResetModel внутри set_sources полностью
         # заменяют данные панели; clear() не нужен (и у QListView его нет).
         self.source_list.set_sources(self._line_sources)
+
+        self._apply_lexer(root_path)
 
         rel = str(root_path)
         self.file_label.setText("RESOLVED: %s" % rel)
@@ -729,6 +799,15 @@ class ResolvedView(QWidget):
             return False
         self.editor.setCursorPosition(0, 0)
         return self.editor.findFirst(text, False, False, False, True)
+
+    def goto_line(self, line_number):
+        """Перейти к строке (1-based) в XML-резолв-вью."""
+        if line_number < 1:
+            return
+        line_index = line_number - 1
+        self.editor.setCursorPosition(line_index, 0)
+        self.editor.ensureLineVisible(line_index)
+        self.editor.setFocus(Qt.OtherFocusReason)
 
     def _show_find(self):
         self.find_bar.show_and_focus()
@@ -778,7 +857,7 @@ class ResolvedView(QWidget):
             )
             return
 
-        pretty, full_path = src
+        pretty, full_path = src[0], src[1]
         if full_path is None:
             self.diagnostic.emit(
                 "Строка %d (%s): в снапшоте дерева нет полного пути — "
@@ -800,6 +879,10 @@ class ResolvedView(QWidget):
                 "Строка %d (%s): строка пустая — владелец откроется, "
                 "но искать в нём нечего." % (row + 1, pretty)
             )
+
+        if len(src) >= 3 and src[2] == "raw":
+            self.source_raw_activated.emit(full_path, line_text)
+            return
 
         self.source_activated.emit(full_path, line_text)
 

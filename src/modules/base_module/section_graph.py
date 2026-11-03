@@ -69,10 +69,14 @@ class SectionGraphFeature:
         )
 
         def work(log):
+            # Граф не должен конкурировать с фоновой сборкой и не
+            # перезапускать её: ждём завершения, затем идём по кэшу.
+            self.ctx.services.wait_prebuild(log)
             return self.ctx.services.build_section_graph(
                 forest,
                 section_name,
                 vfs_mode=vfs_mode,
+                log=log,
             )
 
         self.ctx.tasks.run(
@@ -114,19 +118,33 @@ class SectionGraphFeature:
         if self._window is None:
             self._window = SectionGraphWindow(
                 self.ctx.ui.open_at_line,
+                open_raw_at_line=self.ctx.ui.open_raw_at_line,
+                open_resolved_at_line=self._open_resolved_at_line,
                 on_vfs_toggled=self._on_vfs_toggled,
             )
 
         self._window.update_graph(graph, vfs_mode=vfs_mode)
         self.ctx.ui.show_module_window(self.WINDOW_KEY, self._window)
 
+    def _open_resolved_at_line(self, path, line_number):
+        """Открыть итоговый файл резолвера на строке совпадения."""
+        self.ctx.commands.execute(
+            "base.open_ltx_resolved_at_line",
+            path,
+            line_number,
+        )
+
 
 class SectionGraphWindow(QDialog):
     """Немодальное окно графа. Создаётся и наполняется модулем."""
 
-    def __init__(self, open_at_line, on_vfs_toggled=None, parent=None):
+    def __init__(self, open_at_line, open_raw_at_line=None,
+                 open_resolved_at_line=None, on_vfs_toggled=None,
+                 parent=None):
         super().__init__(parent)
         self._open_at_line = open_at_line
+        self._open_raw_at_line = open_raw_at_line
+        self._open_resolved_at_line = open_resolved_at_line
         self._on_vfs_toggled = on_vfs_toggled
         self._graph = None
         self._vfs_mode = False
@@ -189,7 +207,10 @@ class SectionGraphWindow(QDialog):
 
         button_layout = QHBoxLayout()
 
-        open_btn = QPushButton("Открыть файл")
+        open_btn = QPushButton("Открыть совпадение")
+        open_btn.setToolTip(
+            "Обычный режим: итоговый файл резолвера; VFS: исходный файл"
+        )
         open_btn.clicked.connect(self._on_open_clicked)
         button_layout.addWidget(open_btn)
 
@@ -274,9 +295,14 @@ class SectionGraphWindow(QDialog):
             list_widget.addItem(self._make_item(node))
 
     def _make_root_item(self, node):
+        line_label = (
+            "строка резолва"
+            if getattr(node, "resolved", False)
+            else "исходная строка"
+        )
         item = QListWidgetItem(
-            "[ОБЪЯВЛЕНИЕ] %s (строка %s)"
-            % (_path_name(node.file_path), node.first_match_line)
+            "[ОБЪЯВЛЕНИЕ] %s (%s %s)"
+            % (_path_name(node.file_path), line_label, node.first_match_line)
         )
         item.setData(Qt.UserRole, node)
         item.setToolTip(_path_text(node.file_path))
@@ -290,12 +316,18 @@ class SectionGraphWindow(QDialog):
                 % (_path_name(node.file_path), node.first_match_line)
             )
         else:
+            line_label = (
+                "строка резолва"
+                if getattr(node, "resolved", False)
+                else "исходная строка"
+            )
             item_text = (
-                "%s  [совпадений: %d, типы: %s, первая строка: %s]"
+                "%s  [совпадений: %d, типы: %s, %s: %s]"
                 % (
                     node.display_name,
                     node.matches_count,
                     ", ".join(node.edge_types),
+                    line_label,
                     node.first_match_line,
                 )
             )
@@ -315,7 +347,16 @@ class SectionGraphWindow(QDialog):
         if node is None or node.file_path is None:
             return
 
-        self._open_at_line(node.file_path, node.first_match_line)
+        resolved = bool(getattr(node, "resolved", False))
+
+        if resolved and self._open_resolved_at_line is not None:
+            # Строка относится к итоговому файлу после резолва.
+            self._open_resolved_at_line(node.file_path, node.first_match_line)
+        elif self._open_raw_at_line is not None:
+            # VFS/скрипты: строка относится к исходному файлу.
+            self._open_raw_at_line(node.file_path, node.first_match_line)
+        else:
+            self._open_at_line(node.file_path, node.first_match_line)
 
     def _on_open_clicked(self):
         self._on_item_double_clicked(self._active_list.currentItem())

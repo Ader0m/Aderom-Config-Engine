@@ -39,6 +39,9 @@ class GraphNode:
     first_match_line: int
     matches: list[MatchInfo] = field(default_factory=list)
     raw_ref: Optional[str] = None
+    # True — file_path/line относятся к результату резолва;
+    # False — к исходному файлу (VFS/скрипты).
+    resolved: bool = False
 
 @dataclass
 class SectionGraph:
@@ -87,12 +90,35 @@ class ReferenceGraphBuilder:
         forest,
         section_name: str,
         vfs_mode: bool = False,
+        resolved_provider=None,
+        log=None,
     ) -> SectionGraph:
         if vfs_mode:
-            return self.build_for_section_vfs(forest, section_name)
+            return self.build_for_section_vfs(
+                forest,
+                section_name,
+                log=log,
+            )
 
         section = section_name.lower().strip()
 
+        # Основной режим — поиск по финальным файлам резолвера.
+        if resolved_provider is not None:
+            graph = self._build_resolved(
+                forest,
+                section,
+                resolved_provider,
+                log=log,
+            )
+            if graph is not None:
+                return graph
+            if log:
+                log("resolved graph недоступен — fallback на исходные файлы")
+
+        return self._build_raw(forest, section, log=log)
+
+    def _build_raw(self, forest, section: str, log=None) -> SectionGraph:
+        """Старый режим: поиск по исходным .ltx + .script файлам."""
         # 1. Ищем объявление секции + icons_texture в теле секции
         root_node, texture = self._find_declaration(forest, section)
         if root_node is None:
@@ -126,17 +152,7 @@ class ReferenceGraphBuilder:
                 ))
 
         # 3. Сканируем .script файлы в scan_dir
-        scan_dir = Path(forest.scan_dir)
-        if scan_dir.is_dir():
-            for script_path in scan_files(scan_dir, {".script"}):
-                matches = self._scan_script_file(script_path, section)
-                if matches:
-                    children.append(GraphNode(
-                        display_name=script_path.name,
-                        file_path=script_path,
-                        first_match_line=matches[0].line_number,
-                        matches=matches,
-                    ))
+        self._append_script_children(children, forest, section)
 
         # 4. XML — заглушка
 
@@ -146,9 +162,137 @@ class ReferenceGraphBuilder:
             children=children,
         )
 
+    def _build_resolved(self, forest, section, resolved_provider, log=None):
+        """Поиск по итоговым файлам резолвера (LTX-корням)."""
+        from .resolve_targets import resolved_ltx_roots
+
+        roots = resolved_ltx_roots(forest)
+        if not roots:
+            return None
+
+        items = []
+        total = len(roots)
+
+        for i, root in enumerate(roots, 1):
+            try:
+                result = resolved_provider(root)
+            except Exception as exc:
+                if log:
+                    log("resolved graph: %s: %s" % (root.name, exc))
+                continue
+
+            if result is None:
+                continue
+
+            if isinstance(result, tuple):
+                text = result[0]
+                line_sources = result[1] if len(result) > 1 else []
+            else:
+                text = result
+                line_sources = []
+
+            if not text:
+                continue
+
+            items.append((root, text, line_sources or []))
+            if log and (i == 1 or i == total or i % 25 == 0):
+                log("resolved graph: %d/%d" % (i, total))
+
+        if not items:
+            return None
+
+        root_node, texture = self._find_declaration_in_items(
+            [(path, text) for path, text, _sources in items],
+            section,
+            resolved=True,
+        )
+        if root_node is None:
+            return None
+
+        children = []
+
+        if texture is not None:
+            raw_ref, tex_match = texture
+            children.append(GraphNode(
+                display_name=self._texture_display_name(raw_ref),
+                file_path=root_node.file_path,
+                first_match_line=tex_match.line_number,
+                matches=[tex_match],
+                raw_ref=raw_ref,
+                resolved=True,
+            ))
+
+        for root, text, line_sources in items:
+            matches = self._scan_ltx_text(text, section)
+
+            if root == root_node.file_path:
+                # Объявление уже показано корневым узлом; остальные
+                # вхождения в том же итоговом файле оставляем детьми.
+                matches = [
+                    match for match in matches
+                    if not (
+                        match.line_number == root_node.first_match_line
+                        and match.edge_type == EdgeType.DECLARATION
+                    )
+                ]
+
+            if not matches:
+                continue
+
+            display = self._owner_label(
+                line_sources,
+                matches[0].line_number,
+                root.name,
+            )
+            children.append(GraphNode(
+                display_name=display,
+                file_path=root,
+                first_match_line=matches[0].line_number,
+                matches=matches,
+                resolved=True,
+            ))
+
+        # Скрипты не проходят через LTX-резолвер — их ищем по исходникам.
+        self._append_script_children(children, forest, section)
+
+        return SectionGraph(
+            section_name=section,
+            root=root_node,
+            children=children,
+        )
+
+    def _append_script_children(self, children, forest, section):
+        scan_dir = Path(forest.scan_dir)
+        if not scan_dir.is_dir():
+            return
+
+        for script_path in scan_files(scan_dir, {".script"}):
+            matches = self._scan_script_file(script_path, section)
+            if matches:
+                children.append(GraphNode(
+                    display_name=script_path.name,
+                    file_path=script_path,
+                    first_match_line=matches[0].line_number,
+                    matches=matches,
+                ))
+
+    @staticmethod
+    def _owner_label(line_sources, line_number, fallback):
+        """Имя исходного файла-владельца строки итогового резолва."""
+        try:
+            if line_sources and 1 <= line_number <= len(line_sources):
+                source = line_sources[line_number - 1]
+                if isinstance(source, tuple) and source:
+                    return source[0]
+                if source and source != "__ORIGINAL__":
+                    return str(source)
+        except Exception:
+            pass
+        return fallback
+
     # ------------------------------------------------------------ режим VFS
 
-    def build_for_section_vfs(self, forest, section_name: str) -> SectionGraph:
+    def build_for_section_vfs(self, forest, section_name: str, log=None) -> SectionGraph:
         """Построить граф по всем текстовым файлам VFS, без фильтра LtxForest.
 
         В ``lost_children`` попадают только совпадения, которых нет в
@@ -288,8 +432,20 @@ class ReferenceGraphBuilder:
 
     def _find_declaration_in_files(self, files, section: str):
         """Ищет объявление секции в произвольном наборе файлов."""
-        for file_path in files:
-            text = self._read_file(file_path)
+        items = [
+            (file_path, self._read_file(file_path))
+            for file_path in files
+        ]
+        return self._find_declaration_in_items(items, section)
+
+    def _find_declaration_in_items(
+        self,
+        items,
+        section: str,
+        resolved: bool = False,
+    ):
+        """Ищет объявление секции в парах (file_path, text)."""
+        for file_path, text in items:
             if not text:
                 continue
 
@@ -303,10 +459,11 @@ class ReferenceGraphBuilder:
                         first_match_line=line_num,
                         matches=[MatchInfo(
                             edge_type=EdgeType.DECLARATION,
-                            
+
                             line_number=line_num,
                             line_text=line,
                         )],
+                        resolved=resolved,
                     )
                     raw_ref, tex_match = self._find_icons_texture(lines, idx + 1)
                     return root, (raw_ref, tex_match) if tex_match else None
@@ -363,7 +520,10 @@ class ReferenceGraphBuilder:
         text = self._read_file(file_path)
         if not text:
             return []
+        return self._scan_ltx_text(text, section)
 
+    def _scan_ltx_text(self, text: str, section: str) -> list[MatchInfo]:
+        """Сканирует текст LTX (исходный или итоговый) на совпадения."""
         matches = []
         for line_num, line in enumerate(text.splitlines(), 1):
             if section not in line.lower():

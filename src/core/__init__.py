@@ -21,6 +21,7 @@ from .fs import (
     rel_path,
     pattern_match,
     read_text_safe,
+    read_xml_text,
     strip_comments,
     extract_includes,
     resolve_include_targets,
@@ -39,6 +40,7 @@ from .fs import (
 from .external import open_in_notepad_pp
 
 from .file_cache import FileCacheSystem
+from .resolved_cache import ResolvedCache
 
 from .tree_builder import (
     TreeBuilder,
@@ -62,6 +64,16 @@ from .patch_planner import PatchPlanner
 from .dltx_generator import DltxGenerator
 from .dxml_generator import DxmlGenerator
 from .reference_graph import ReferenceGraphBuilder
+from .xml_slaxml import (
+    SlaxmlParser,
+    SlaxmlError,
+    SourceRef,
+    assign_origins,
+    pretty_dom,
+    pretty_xml,
+)
+from .xml_dxml import DxmlProcessor, DxmlError, XmlObject
+from .xml_resolver import XmlResolver, XmlResolveOutput, XmlResolveError
 
 
 __all__ = [
@@ -75,6 +87,7 @@ __all__ = [
     "rel_path",
     "pattern_match",
     "read_text_safe",
+    "read_xml_text",
     "strip_comments",
     "extract_includes",
     "resolve_include_targets",
@@ -94,6 +107,7 @@ __all__ = [
 
     # cache
     "FileCacheSystem",
+    "ResolvedCache",
 
     # tree
     "TreeBuilder",
@@ -117,4 +131,18 @@ __all__ = [
 
     # graph
     "ReferenceGraphBuilder",
+
+    # xml / dxml
+    "SlaxmlParser",
+    "SlaxmlError",
+    "SourceRef",
+    "assign_origins",
+    "pretty_dom",
+    "pretty_xml",
+    "DxmlProcessor",
+    "DxmlError",
+    "XmlObject",
+    "XmlResolver",
+    "XmlResolveOutput",
+    "XmlResolveError",
 ]

@@ -15,6 +15,7 @@ from .api import (
     GraphMatch,
     GraphNode,
     SectionGraph,
+    XmlResolveResult,
 )
 from .adapters import CoreApiAdapter, TaskApiAdapter, UiApiAdapter
 
@@ -38,6 +39,7 @@ __all__ = [
     "GraphMatch",
     "GraphNode",
     "SectionGraph",
+    "XmlResolveResult",
     "CoreApiAdapter",
     "TaskApiAdapter",
     "UiApiAdapter",

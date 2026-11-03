@@ -38,6 +38,7 @@ def main():
     from core.reference_graph import ReferenceGraphBuilder, DisabledCache
     from core.resolver_service import ResolverService
     from core.assembly_service import AssemblyService
+    from core.resolved_cache import ResolvedCache
 
     from sdk import SDK_VERSION, ModuleContext, ModuleLoader
     from sdk.events import Events
@@ -70,7 +71,15 @@ def main():
     graph_builder = ReferenceGraphBuilder(cache=DisabledCache())
 
     # Резолвер и сборка
-    resolver_service = ResolverService(cache=cache)
+    resolved_cache = ResolvedCache(
+        cache_dir=app_dir / "generated" / "resolved_cache",
+        max_entries=128,
+        max_chars=256_000_000,
+    )
+    resolver_service = ResolverService(
+        cache=cache,
+        resolved_cache=resolved_cache,
+    )
     assembly_service = AssemblyService(
         resolver_service=resolver_service,
         generated_dir=app_dir / "generated",
@@ -114,6 +123,7 @@ def main():
 
     code = app.exec_()
 
+    services.stop_prebuild()
     loader.deactivate_all(log=api.log)
     sys.exit(code)
 

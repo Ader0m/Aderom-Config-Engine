@@ -59,9 +59,38 @@ class AssemblyService:
         Raises:
             RuntimeError: Если резолвер не загружен.
         """
-        adapter = self._resolver.get_adapter()
-        if adapter is None:
+        if self._resolver is None:
             raise RuntimeError("Резолвер не загружен")
 
-        sm = self.source_map(forest)
-        return adapter.assemble_to_file(root_path, self._generated_dir, sm)
+        config_dir = getattr(forest, "scan_dir", None)
+        return self._resolver.assemble_to_file(
+            root_path,
+            forest,
+            self._generated_dir,
+            config_dir=config_dir,
+        )
+
+    # -------------------------------------------------- XML-сборка
+    def write_generated_xml(self, root_path, text):
+        """Сохранить результат XmlResolver в generated/xml/ (UTF-8)."""
+        out_dir = self._generated_dir / "xml"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        rp = Path(root_path)
+
+        def safe(s):
+            return "".join(
+                c if c.isalnum() or c in "_-" else "_"
+                for c in str(s)
+            ).lower()
+
+        out = out_dir / (
+            "%s__%s__resolved.xml"
+            % (safe(rp.parent.name), safe(rp.stem))
+        )
+        out.write_text(
+            text,
+            encoding="windows-1251",
+            errors="replace",
+        )
+        return out

@@ -7,7 +7,7 @@
 запрос данных идёт через api.services (TreeQueryService.search_nodes).
 """
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
     QAction,
@@ -26,6 +26,7 @@ from sdk.events import Events
 from .editor_tabs import EditorTabs
 from .file_open_router import TextEditorHandler
 from .file_tree import FileTreeWidget
+from .prebuild_panel import PrebuildPanel
 from .search_bar import SearchBar
 
 
@@ -139,6 +140,33 @@ class MainWindow(QMainWindow):
     def _init_statusbar(self):
         self.statusBar().showMessage("Готов")
 
+        self.prebuild_panel = PrebuildPanel(self)
+        self.statusBar().addPermanentWidget(self.prebuild_panel)
+
+        self._prebuild_timer = QTimer(self)
+        self._prebuild_timer.setInterval(250)
+        self._prebuild_timer.timeout.connect(self._update_prebuild)
+        self._prebuild_timer.start()
+
+    def _update_prebuild(self):
+        services = getattr(self.api, "services", None)
+        status_fn = getattr(services, "prebuild_status", None)
+        if not callable(status_fn):
+            self.prebuild_panel.setVisible(False)
+            return
+
+        try:
+            status = status_fn()
+        except Exception:
+            return
+
+        self.prebuild_panel.set_status(
+            status.get("state", "idle"),
+            status.get("done", 0),
+            status.get("total", 0),
+            status.get("error"),
+        )
+
     # -------------------------------------------------- поиск
     def _toggle_search(self):
         if self.search_bar.isVisible():
@@ -189,4 +217,13 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------- завершение
     def closeEvent(self, event):
         self._tree_ready_sub.unsubscribe()
+        if hasattr(self, "_prebuild_timer"):
+            self._prebuild_timer.stop()
+        services = getattr(self.api, "services", None)
+        stop_fn = getattr(services, "stop_prebuild", None)
+        if callable(stop_fn):
+            try:
+                stop_fn()
+            except Exception:
+                pass
         super().closeEvent(event)

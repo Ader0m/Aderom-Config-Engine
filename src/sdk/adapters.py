@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .api import GraphMatch, GraphNode, SectionGraph, TreeSummary
+from .api import GraphMatch, GraphNode, SectionGraph, TreeSummary, XmlResolveResult
 
 
 _SDK_API_MARKER = "_sdk_api_kind"
@@ -95,6 +95,20 @@ class CoreApiAdapter:
             return reader(path)
         return Path(path).read_text(encoding="utf-8", errors="replace")
 
+    # --- фоновая предсборка ------------------------------------------------
+
+    def start_prebuild(self, forest, config_dir):
+        return self._provider.start_prebuild(forest, config_dir)
+
+    def prebuild_status(self):
+        return self._provider.prebuild_status()
+
+    def wait_prebuild(self, log=None):
+        return self._provider.wait_prebuild(log=log)
+
+    def stop_prebuild(self):
+        return self._provider.stop_prebuild()
+
     # --- резолвер и сборка ------------------------------------------------
 
     def run_resolver(self, forest, config_dir, log=None):
@@ -135,13 +149,40 @@ class CoreApiAdapter:
             root_path, forest, config_dir, log=log,
         )
 
+    # --- XML-резолв -------------------------------------------------------
+
+    def resolve_xml(self, path, config_dir, log=None, dxml=True):
+        raw = self._provider.resolve_xml(
+            path,
+            config_dir,
+            log=log,
+            dxml=dxml,
+        )
+        return XmlResolveResult(
+            text=raw.text,
+            virtual_name=raw.virtual_name,
+            dxml_applied=bool(raw.dxml_applied),
+            notes=tuple(raw.notes or ()),
+            line_sources=tuple(getattr(raw, "line_sources", ()) or ()),
+        )
+
+    def resolve_xml_to_file(self, path, config_dir, log=None, dxml=True):
+        return self._provider.resolve_xml_to_file(
+            path,
+            config_dir,
+            log=log,
+            dxml=dxml,
+        )
+
     # --- граф связей и внешние инструменты -------------------------------
 
-    def build_section_graph(self, forest, section_name, vfs_mode=False):
+    def build_section_graph(self, forest, section_name, vfs_mode=False,
+                            log=None):
         graph = self._provider.build_section_graph(
             forest,
             section_name,
             vfs_mode=vfs_mode,
+            log=log,
         )
         return _to_section_graph_view(graph)
 
@@ -243,8 +284,26 @@ class UiApiAdapter:
     def dispatch_action(self, action, payload=None):
         return self._platform.dispatch_action(action, payload)
 
-    def open_resolved_tab(self, tab_id, title, text, line_sources, root_path):
-        self._platform.open_resolved_tab(tab_id, title, text, line_sources, root_path)
+    def open_resolved_tab(self, tab_id, title, text, line_sources, root_path,
+                          line_number=None):
+        self._platform.open_resolved_tab(
+            tab_id,
+            title,
+            text,
+            line_sources,
+            root_path,
+            line_number,
+        )
+
+    def open_xml_resolved_tab(self, tab_id, title, text, root_path,
+                              line_sources=()):
+        self._platform.open_xml_resolved_tab(
+            tab_id,
+            title,
+            text,
+            root_path,
+            line_sources,
+        )
 
     def open_file_with_search(self, path, search_text):
         self._platform.commands.execute("ui.open_file_with_search", path, search_text)
@@ -297,6 +356,13 @@ class UiApiAdapter:
     def open_at_line(self, path, line_number):
         self._platform.commands.execute(
             "ui.open_file_at_line",
+            path,
+            int(line_number),
+        )
+
+    def open_raw_at_line(self, path, line_number):
+        self._platform.commands.execute(
+            "ui.open_file_raw_at_line",
             path,
             int(line_number),
         )
@@ -356,6 +422,7 @@ def _to_graph_node_view(node) -> GraphNode:
         first_match_line=int(getattr(node, "first_match_line", 0) or 0),
         matches=matches,
         raw_ref=getattr(node, "raw_ref", None),
+        resolved=bool(getattr(node, "resolved", False)),
     )
 
 

@@ -89,7 +89,15 @@ class LtxFileOpener:
         return True
 
     # -------------------------------------------------- резолв
-    def _open_resolved(self, path: Path) -> bool:
+    def open_resolved_at_line(self, path, line_number) -> bool:
+        """Принудительно открыть резолв файла и перейти к строке.
+
+        Нужно графу связей: он ищет по итоговым файлам резолвера,
+        в том числе для mod_*-файлов.
+        """
+        return self._open_resolved(path, line_number=line_number)
+
+    def _open_resolved(self, path: Path, line_number=None) -> bool:
         self.ctx.ui.set_status("Резолв: %s…" % path.name)
 
         forest = self.session.forest
@@ -108,7 +116,12 @@ class LtxFileOpener:
         try:
             self.ctx.tasks.run(
                 work,
-                on_done=lambda result, err: self._on_resolved(path, result, err),
+                on_done=lambda result, err: self._on_resolved(
+                    path,
+                    result,
+                    err,
+                    line_number,
+                ),
                 on_log=self.ctx.ui.log,
             )
         except Exception as exc:
@@ -119,7 +132,7 @@ class LtxFileOpener:
             return False
         return True
 
-    def _on_resolved(self, path: Path, result, err):
+    def _on_resolved(self, path: Path, result, err, line_number=None):
         if err is not None:
             self._open_failed(path)
             self.ctx.ui.set_status("Ошибка")
@@ -141,6 +154,7 @@ class LtxFileOpener:
             text,
             line_sources,
             str(path),
+            line_number=line_number,
         )
         self.ctx.ui.set_status("Открыт резолв: %s" % rel, 5000)
 

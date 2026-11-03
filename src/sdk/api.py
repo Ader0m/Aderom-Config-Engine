@@ -51,6 +51,7 @@ class GraphNode:
     first_match_line: int
     matches: tuple[GraphMatch, ...] = field(default_factory=tuple)
     raw_ref: Optional[str] = None
+    resolved: bool = False
 
     @property
     def matches_count(self) -> int:
@@ -74,6 +75,17 @@ class SectionGraph:
     children: tuple[GraphNode, ...] = field(default_factory=tuple)
     # Заполняется только в режиме VFS: связи, отсутствующие в итоговом дереве.
     lost_children: tuple[GraphNode, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class XmlResolveResult:
+    """Результат XML-резолва (include-сборка + DXML)."""
+
+    text: str
+    virtual_name: str
+    dxml_applied: bool = False
+    notes: tuple[str, ...] = field(default_factory=tuple)
+    line_sources: tuple = field(default_factory=tuple)
 
 
 # ---------------------------------------------------------------- контракты
@@ -114,6 +126,20 @@ class CoreApi(Protocol):
     def read_text(self, path: Path) -> str:
         """Прочитать текстовый файл средствами ядра."""
 
+    # --- фоновая предсборка ----------------------------------------------
+
+    def start_prebuild(self, forest, config_dir: Path) -> None:
+        """Запустить фоновую сборку всех LTX-файлов дерева."""
+
+    def prebuild_status(self) -> dict:
+        """Текущий статус фоновой сборки: state/done/total/error."""
+
+    def wait_prebuild(self, log: Optional[Callable[[str], None]] = None) -> None:
+        """Дождаться окончания фоновой сборки."""
+
+    def stop_prebuild(self) -> None:
+        """Остановить фоновую сборку."""
+
     # --- резолвер и сборка ------------------------------------------------
 
     def run_resolver(
@@ -145,6 +171,24 @@ class CoreApi(Protocol):
     ) -> tuple[str, list[Optional[str]]]:
          """Собрать чистый резолв + маппинг (source_per_line)."""
 
+    def resolve_xml(
+        self,
+        path: Path,
+        config_dir: Path,
+        log: Optional[Callable[[str], None]] = None,
+        dxml: bool = True,
+    ) -> XmlResolveResult:
+        """Разрешить XML: #include-сборка + DXML-патчи."""
+
+    def resolve_xml_to_file(
+        self,
+        path: Path,
+        config_dir: Path,
+        log: Optional[Callable[[str], None]] = None,
+        dxml: bool = True,
+    ) -> Path:
+        """Разрешить XML и сохранить результат в generated/xml/."""
+
     # --- граф связей и внешние инструменты -------------------------------
 
     def build_section_graph(
@@ -152,6 +196,7 @@ class CoreApi(Protocol):
         forest,
         section_name: str,
         vfs_mode: bool = False,
+        log: Optional[Callable[[str], None]] = None,
     ) -> SectionGraph:
         """Построить граф связей для секции.
 
@@ -254,8 +299,23 @@ class UiApi(Protocol):
         text: str,
         line_sources: list[Optional[str]],
         root_path: Path,
+        line_number: Optional[int] = None,
     ) -> None:
         """Открыть вкладку резолв-вида с панелью источников."""
+
+    def open_xml_resolved_tab(
+        self,
+        tab_id: str,
+        title: str,
+        text: str,
+        root_path: Path,
+        line_sources: tuple = (),
+    ) -> None:
+        """Открыть вкладку с результатом XML-резолва.
+
+        ``line_sources`` — владельцы строк в том же формате, что у LTX:
+        ``(pretty, full_path)``, ``"__ORIGINAL__"`` или ``None``.
+        """
 
     def open_file_with_search(self, path: Path, search_text: str) -> None:
         """Открыть файл и перейти к первому вхождению ``search_text``."""
@@ -312,6 +372,9 @@ class UiApi(Protocol):
 
     def open_at_line(self, path: Path, line_number: int) -> None:
         """Открыть файл и перейти к строке."""
+
+    def open_raw_at_line(self, path: Path, line_number: int) -> None:
+        """Открыть исходный файл без резолва и перейти к строке."""
 
     def undo(self) -> None:
         """Отменить действие в редакторе."""

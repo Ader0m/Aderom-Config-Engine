@@ -18,6 +18,8 @@ from pathlib import Path
 from .external import open_in_notepad_pp
 from .fs import find_system_ltx, detect_config_dir
 from .tree_query_service import search_nodes, sort_nodes
+from .xml_resolver import XmlResolver
+from .prebuild_service import PrebuildService
 
 
 class CoreServices:
@@ -51,6 +53,7 @@ class CoreServices:
         self.resolver = resolver_service
         self.assembly = assembly_service
         self.generated_dir = Path(generated_dir)
+        self.prebuild = PrebuildService(resolver_service)
 
         # Для обратной совместимости (модули пока используют старые имена)
         self._adapter = None  # Устаревшее, использовать через .resolver
@@ -60,6 +63,23 @@ class CoreServices:
     def invalidate_cache(self):
         """Очистить общий кэш ядра."""
         self.cache.clear()
+        if hasattr(self.resolver, "invalidate_cache"):
+            self.resolver.invalidate_cache()
+
+    # -------------------------------------------------- фоновая предсборка
+
+    def start_prebuild(self, forest, config_dir):
+        """Запустить фоновую сборку всех LTX после построения дерева."""
+        self.prebuild.start(forest, config_dir)
+
+    def prebuild_status(self):
+        return self.prebuild.status()
+
+    def wait_prebuild(self, log=None):
+        self.prebuild.wait(log=log)
+
+    def stop_prebuild(self):
+        self.prebuild.stop()
 
     # -------------------------------------------------- дерево
 
@@ -133,17 +153,59 @@ class CoreServices:
         forest,
         section_name: str,
         vfs_mode: bool = False,
+        log=None,
     ):
         """Построить граф связей для секции.
 
         ``vfs_mode=True`` — полный обход VFS без фильтра LtxForest;
         в результате заполняется ``lost_children``.
+
+        Обычный режим ищет по финальным файлам резолвера. Перед резолвом
+        каждого корня проверяется :class:`ResolvedCache`.
         """
-        return self.graph_builder.build_for_section(
-            forest,
-            section_name,
-            vfs_mode=vfs_mode,
-        )
+        resolved_provider = None
+
+        if not vfs_mode:
+            config_dir = Path(getattr(forest, "scan_dir", "") or "")
+            reported = {"error": False}
+
+            def resolved_provider(root_path):
+                try:
+                    text, line_sources = self.resolver.assemble_resolved(
+                        root_path,
+                        forest,
+                        config_dir,
+                        log=None,
+                    )
+                    return text, line_sources
+                except Exception as exc:
+                    if log and not reported["error"]:
+                        log("resolved graph: резолвер недоступен: %s" % exc)
+                        reported["error"] = True
+                    return None
+
+        try:
+            return self.graph_builder.build_for_section(
+                forest,
+                section_name,
+                vfs_mode=vfs_mode,
+                resolved_provider=resolved_provider,
+                log=log,
+            )
+        finally:
+            if log and hasattr(self.resolver, "cache_stats"):
+                stats = self.resolver.cache_stats()
+                log(
+                    "resolve cache: entries=%d, chars=%d, hits=%d, "
+                    "disk_hits=%d, misses=%d"
+                    % (
+                        stats.get("entries", 0),
+                        stats.get("chars", 0),
+                        stats.get("hits", 0),
+                        stats.get("disk_hits", 0),
+                        stats.get("misses", 0),
+                    )
+                )
 
     # -------------------------------------------------- внешние инструменты
 
@@ -158,3 +220,20 @@ class CoreServices:
     def assemble_resolved(self, root_path, forest, config_dir, log=None):
         """Чистый резолв + построчный маппинг владельцев."""
         return self.resolver.assemble_resolved(root_path, forest, config_dir, log=log)
+
+    # -------------------------------------------------- XML-резолв
+
+    def resolve_xml(self, path, config_dir, log=None, dxml=True):
+        """Разрешить XML: include-сборка + DXML (XmlResolveOutput)."""
+        resolver = XmlResolver(
+            config_dir=config_dir,
+            log=log,
+            dxml=dxml,
+        )
+        return resolver.resolve_output(path, dxml=dxml)
+
+    def resolve_xml_to_file(self, path, config_dir, log=None, dxml=True):
+        """Разрешить XML и сохранить результат в generated/xml/."""
+        result = self.resolve_xml(path, config_dir, log=log, dxml=dxml)
+        out = self.assembly.write_generated_xml(path, result.text)
+        return out
