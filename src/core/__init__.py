@@ -16,6 +16,7 @@ from .models import LtxForest
 
 from .fs import (
     RESOLVER_CANDIDATES,
+    TEXT_FILE_SUFFIXES,
     normalize_path,
     rel_path,
     pattern_match,
@@ -23,6 +24,7 @@ from .fs import (
     strip_comments,
     extract_includes,
     resolve_include_targets,
+    scan_files,
     scan_ltx_files,
     find_system_ltx,
     build_search_bases,
@@ -67,6 +69,7 @@ __all__ = [
 
     # fs
     "RESOLVER_CANDIDATES",
+    "TEXT_FILE_SUFFIXES",
     "normalize_path",
     "rel_path",
     "pattern_match",
@@ -74,6 +77,7 @@ __all__ = [
     "strip_comments",
     "extract_includes",
     "resolve_include_targets",
+    "scan_files",
     "scan_ltx_files",
     "find_system_ltx",
     "build_search_bases",

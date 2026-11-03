@@ -71,6 +71,8 @@ class SectionGraph:
     section_name: str
     root: GraphNode
     children: tuple[GraphNode, ...] = field(default_factory=tuple)
+    # Заполняется только в режиме VFS: связи, отсутствующие в итоговом дереве.
+    lost_children: tuple[GraphNode, ...] = field(default_factory=tuple)
 
 
 # ---------------------------------------------------------------- контракты
@@ -144,8 +146,18 @@ class CoreApi(Protocol):
 
     # --- граф связей и внешние инструменты -------------------------------
 
-    def build_section_graph(self, forest, section_name: str) -> SectionGraph:
-        """Построить граф связей для секции."""
+    def build_section_graph(
+        self,
+        forest,
+        section_name: str,
+        vfs_mode: bool = False,
+    ) -> SectionGraph:
+        """Построить граф связей для секции.
+
+        ``vfs_mode=True`` — обойти всю VFS, не ограничиваясь LtxForest.
+        В ``SectionGraph.lost_children`` попадут связи, которых нет в
+        итоговом дереве.
+        """
 
     def open_external_editor(self, path: Path) -> tuple[bool, str]:
         """Открыть файл во внешнем редакторе. Возвращает ``(ok, message)``."""

@@ -136,8 +136,12 @@ class CoreApiAdapter:
 
     # --- граф связей и внешние инструменты -------------------------------
 
-    def build_section_graph(self, forest, section_name):
-        graph = self._provider.build_section_graph(forest, section_name)
+    def build_section_graph(self, forest, section_name, vfs_mode=False):
+        graph = self._provider.build_section_graph(
+            forest,
+            section_name,
+            vfs_mode=vfs_mode,
+        )
         return _to_section_graph_view(graph)
 
     def open_external_editor(self, path):
@@ -323,6 +327,10 @@ def _to_section_graph_view(graph) -> SectionGraph:
         children=tuple(
             _to_graph_node_view(node)
             for node in (getattr(graph, "children", ()) or ())
+        ),
+        lost_children=tuple(
+            _to_graph_node_view(node)
+            for node in (getattr(graph, "lost_children", ()) or ())
         ),
     )
 

@@ -128,9 +128,22 @@ class CoreServices:
 
     # -------------------------------------------------- граф связей
 
-    def build_section_graph(self, forest, section_name: str):
-        """Построить граф связей для секции."""
-        return self.graph_builder.build_for_section(forest, section_name)
+    def build_section_graph(
+        self,
+        forest,
+        section_name: str,
+        vfs_mode: bool = False,
+    ):
+        """Построить граф связей для секции.
+
+        ``vfs_mode=True`` — полный обход VFS без фильтра LtxForest;
+        в результате заполняется ``lost_children``.
+        """
+        return self.graph_builder.build_for_section(
+            forest,
+            section_name,
+            vfs_mode=vfs_mode,
+        )
 
     # -------------------------------------------------- внешние инструменты
 

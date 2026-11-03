@@ -11,6 +11,10 @@ from typing import Optional
 
 RESOLVER_CANDIDATES = ("Resolver4.py", "resolver4.py")
 
+# Текстовые файлы, которые имеет смысл читать при полном обходе VFS.
+# Бинарные ресурсы (.dds, .ogf, .db и т.п.) сюда не попадают.
+TEXT_FILE_SUFFIXES = frozenset({".ltx", ".xml", ".script", ".lua"})
+
 
 # ------------------------------------------------------------ пути и маски
 
@@ -211,9 +215,12 @@ def resolve_include_targets(inc_name: str, parent_path):
 
 # ------------------------------------------------------------ сканирование
 
-def scan_ltx_files(root_dir):
+def scan_files(root_dir, suffixes=None):
     """
-    Рекурсивно находит все .ltx файлы.
+    Рекурсивно находит файлы под root_dir.
+
+    ``suffixes`` — необязательный набор расширений (например,
+    ``TEXT_FILE_SUFFIXES``). Если не задан, возвращаются все файлы.
     """
     out = set()
 
@@ -223,16 +230,30 @@ def scan_ltx_files(root_dir):
         if root.is_file():
             root = root.parent
 
+        allowed = None
+        if suffixes is not None:
+            allowed = {str(s).lower() for s in suffixes}
+
         for p in root.rglob("*"):
             try:
-                if p.is_file() and p.suffix.lower() == ".ltx":
-                    out.add(normalize_path(p))
+                if not p.is_file():
+                    continue
+                if allowed is not None and p.suffix.lower() not in allowed:
+                    continue
+                out.add(normalize_path(p))
             except OSError:
                 pass
     except Exception:
         pass
 
     return sorted(out, key=lambda x: str(x).lower())
+
+
+def scan_ltx_files(root_dir):
+    """
+    Рекурсивно находит все .ltx файлы.
+    """
+    return scan_files(root_dir, {".ltx"})
 
 
 def find_system_ltx(selected_dir) -> Optional[Path]:

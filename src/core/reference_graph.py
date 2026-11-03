@@ -6,6 +6,13 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+from .fs import (
+    TEXT_FILE_SUFFIXES,
+    normalize_path,
+    read_text_safe,
+    scan_files,
+)
+
 
 # ------------------------------------------------------------ типы
 
@@ -38,6 +45,8 @@ class SectionGraph:
     section_name: str
     root: GraphNode
     children: list[GraphNode] = field(default_factory=list)
+    # Только для режима VFS: связи, которых нет в итоговом дереве.
+    lost_children: list[GraphNode] = field(default_factory=list)
 
 
 # ------------------------------------------------------------ заглушка кэша
@@ -61,16 +70,27 @@ class ReferenceGraphBuilder:
     """
     Строит граф связей по имени секции.
 
-    Работает только с готовым деревом (LtxForest) от TreeBuilder.
-    Для .ltx файлов использует пути из леса.
-    Для .script файлов сканирует scan_dir леса.
-    Для .xml — заглушка.
+    Обычный режим работает только с готовым деревом (LtxForest) от
+    TreeBuilder. Для .ltx файлов использует пути из леса, для .script
+    сканирует scan_dir леса, для .xml — заглушка.
+
+    Режим ``vfs_mode`` игнорирует фильтр LtxForest и сканирует все
+    текстовые файлы под ``forest.scan_dir``. Это позволяет увидеть связи,
+    которые физически есть в VFS, но не выжили в итоговой сборке.
     """
 
     def __init__(self, cache=None):
         self.cache = cache or DisabledCache()
 
-    def build_for_section(self, forest, section_name: str) -> SectionGraph:
+    def build_for_section(
+        self,
+        forest,
+        section_name: str,
+        vfs_mode: bool = False,
+    ) -> SectionGraph:
+        if vfs_mode:
+            return self.build_for_section_vfs(forest, section_name)
+
         section = section_name.lower().strip()
 
         # 1. Ищем объявление секции + icons_texture в теле секции
@@ -108,7 +128,7 @@ class ReferenceGraphBuilder:
         # 3. Сканируем .script файлы в scan_dir
         scan_dir = Path(forest.scan_dir)
         if scan_dir.is_dir():
-            for script_path in scan_dir.rglob("*.script"):
+            for script_path in scan_files(scan_dir, {".script"}):
                 matches = self._scan_script_file(script_path, section)
                 if matches:
                     children.append(GraphNode(
@@ -126,14 +146,149 @@ class ReferenceGraphBuilder:
             children=children,
         )
 
+    # ------------------------------------------------------------ режим VFS
+
+    def build_for_section_vfs(self, forest, section_name: str) -> SectionGraph:
+        """Построить граф по всем текстовым файлам VFS, без фильтра LtxForest.
+
+        В ``lost_children`` попадают только совпадения, которых нет в
+        обычном (итоговом) графе той же секции.
+        """
+        section = section_name.lower().strip()
+        files = scan_files(Path(forest.scan_dir), TEXT_FILE_SUFFIXES)
+
+        try:
+            final_graph = self.build_for_section(forest, section)
+        except ValueError:
+            final_graph = None
+
+        # Если секция есть в итоговом дереве, держим его объявление
+        # первым: тогда перекрытые объявления из VFS попадут в children
+        # и смогут быть показаны как «потерянные».
+        if final_graph is not None:
+            final_root = normalize_path(final_graph.root.file_path)
+            files = [final_root] + [f for f in files if f != final_root]
+
+        root_node, texture = self._find_declaration_in_files(files, section)
+        if root_node is None:
+            raise ValueError(f"Секция '{section}' не найдена во VFS")
+
+        children = []
+        if texture is not None:
+            raw_ref, tex_match = texture
+            children.append(GraphNode(
+                display_name=self._texture_display_name(raw_ref),
+                file_path=root_node.file_path,
+                first_match_line=tex_match.line_number,
+                matches=[tex_match],
+                raw_ref=raw_ref,
+            ))
+
+        for file_path in files:
+            if file_path == root_node.file_path:
+                continue
+
+            matches = self._scan_vfs_file(file_path, section)
+            if matches:
+                children.append(GraphNode(
+                    display_name=file_path.name,
+                    file_path=file_path,
+                    first_match_line=matches[0].line_number,
+                    matches=matches,
+                ))
+
+        graph = SectionGraph(
+            section_name=section,
+            root=root_node,
+            children=children,
+        )
+
+        graph.lost_children = self._lost_children(graph, final_graph)
+        return graph
+
+    def _scan_vfs_file(self, file_path: Path, section: str) -> list[MatchInfo]:
+        """Просканировать один текстовый файл VFS."""
+        suffix = file_path.suffix.lower()
+
+        if suffix == ".ltx":
+            return self._scan_ltx_file(file_path, section)
+        if suffix in (".script", ".lua"):
+            return self._scan_script_file(file_path, section)
+        if suffix == ".xml":
+            return self._scan_xml_file(file_path, section)
+
+        return []
+
+    def _scan_xml_file(self, file_path: Path, section: str) -> list[MatchInfo]:
+        """Сканирует .xml на упоминания секции."""
+        text = self._read_file(file_path)
+        if not text:
+            return []
+
+        matches = []
+        for line_num, line in enumerate(text.splitlines(), 1):
+            if section in line.lower():
+                matches.append(MatchInfo(
+                    edge_type=EdgeType.XML_REFERENCE,
+                    line_number=line_num,
+                    line_text=line,
+                ))
+
+        return matches
+
+    def _lost_children(self, vfs_graph: SectionGraph, final_graph: SectionGraph):
+        """Оставить только те совпадения VFS, которых нет в итоговом графе."""
+        final_keys = set()
+
+        if final_graph is not None:
+            for match in final_graph.root.matches:
+                final_keys.add(self._match_key(final_graph.root.file_path, match))
+            for node in final_graph.children:
+                for match in node.matches:
+                    final_keys.add(self._match_key(node.file_path, match))
+
+        lost = []
+        for node in vfs_graph.children:
+            matches = [
+                match
+                for match in node.matches
+                if self._match_key(node.file_path, match) not in final_keys
+            ]
+            if not matches:
+                continue
+
+            lost.append(GraphNode(
+                display_name=node.display_name,
+                file_path=node.file_path,
+                first_match_line=matches[0].line_number,
+                matches=matches,
+                raw_ref=node.raw_ref,
+            ))
+
+        return lost
+
+    @staticmethod
+    def _match_key(file_path, match: MatchInfo):
+        path = normalize_path(file_path) if file_path is not None else None
+        return (
+            path,
+            int(match.line_number),
+            match.edge_type,
+            match.line_text.strip(),
+        )
+
     # ------------------------------------------------------------ поиск объявления
 
     def _find_declaration(self, forest, section: str):
         """
-        Ищем объявление секции [секция] или [секция]:... в .ltx файлах.
-        Возвращает (root_node, texture), где texture = (raw_path, MatchInfo) или (None, None).
+        Ищем объявление секции [секция] или [секция]:... в файлах леса.
+        Возвращает (root_node, texture), где texture = (raw_path, MatchInfo) или None.
         """
-        for file_path in forest.files:
+        return self._find_declaration_in_files(forest.files, section)
+
+    def _find_declaration_in_files(self, files, section: str):
+        """Ищет объявление секции в произвольном наборе файлов."""
+        for file_path in files:
             text = self._read_file(file_path)
             if not text:
                 continue
@@ -154,9 +309,9 @@ class ReferenceGraphBuilder:
                         )],
                     )
                     raw_ref, tex_match = self._find_icons_texture(lines, idx + 1)
-                    return root, (raw_ref, tex_match) if tex_match else (None, None)
+                    return root, (raw_ref, tex_match) if tex_match else None
 
-        return None, (None, None)
+        return None, None
 
     def _find_icons_texture(self, lines, start_idx):
         """
@@ -278,10 +433,11 @@ class ReferenceGraphBuilder:
             return cached
 
         try:
-            text = file_path.read_text(encoding="utf-8", errors="ignore")
+            text = read_text_safe(file_path)
         except Exception:
             text = ""
 
+        self.cache.set(("file", str(file_path)), text)
         return text
 
 
