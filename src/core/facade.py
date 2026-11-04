@@ -15,7 +15,7 @@ CoreServices — тонкий фасад над сервисами ядра.
 
 from pathlib import Path
 
-from .external import open_in_notepad_pp
+from .external import open_in_notepad_pp, open_with_shell
 from .fs import find_system_ltx, detect_config_dir
 from .tree_query_service import search_nodes, sort_nodes
 from .xml_resolve_service import XmlResolveService
@@ -246,6 +246,14 @@ class CoreServices:
     def open_notepad(self, path):
         """Открыть файл в Notepad++."""
         return open_in_notepad_pp(path)
+
+    def open_with_shell(self, path):
+        """Открыть файл приложением Windows по умолчанию.
+
+        Если ассоциация не задана, оболочка показывает диалог «Открыть
+        с помощью…». Возвращает ``(ok, message)``.
+        """
+        return open_with_shell(path)
 
     def detect_config_dir(self, candidates):
         """Определить каталог конфигов."""

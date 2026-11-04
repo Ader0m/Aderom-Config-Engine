@@ -23,6 +23,7 @@ class EdgeType(Enum):
     SCRIPT_REFERENCE = "script_reference"
     XML_REFERENCE = "xml_reference"
     TEXTURE_REFERENCE = "texture_reference"
+    VISUAL_REFERENCE = "visual_reference"
 
 
 @dataclass
@@ -42,6 +43,10 @@ class GraphNode:
     # True — file_path/line относятся к результату резолва;
     # False — к исходному файлу (VFS/скрипты).
     resolved: bool = False
+    # Полный путь к бинарному ресурсу (dds/ogf), если его удалось
+    # разрешить от корня VFS. file_path при этом остаётся файлом,
+    # в котором записана ссылка (icons_texture/visual).
+    target_path: Optional[Path] = None
 
 @dataclass
 class SectionGraph:
@@ -124,22 +129,22 @@ class ReferenceGraphBuilder:
 
     def _build_raw(self, forest, section: str, log=None) -> SectionGraph:
         """Старый режим: поиск по исходным .ltx + .script файлам."""
-        # 1. Ищем объявление секции + icons_texture в теле секции
-        root_node, texture = self._find_declaration(forest, section)
+        # 1. Ищем объявление секции + ресурсы в теле секции
+        root_node, assets = self._find_declaration(forest, section)
         if root_node is None:
             raise ValueError(f"Секция '{section}' не найдена в дереве")
 
         children = []
 
-        # 1.1. Узел текстуры: путь из icons_texture = *
-        if texture is not None:
-            raw_ref, tex_match = texture
-            children.append(GraphNode(
-                display_name= self._texture_display_name(raw_ref),
-                file_path=root_node.file_path,   # открывать файл объявления на строке icons_texture
-                first_match_line=tex_match.line_number,
-                matches=[tex_match],
-                raw_ref=raw_ref,
+        # 1.1. Ассеты секции: icons_texture = * и visual = *
+        for kind, raw_ref, asset_match in assets:
+            children.append(self._make_asset_node(
+                forest,
+                kind,
+                raw_ref,
+                asset_match,
+                file_path=root_node.file_path,
+                resolved=False,
             ))
 
         # 2. Сканируем .ltx файлы из леса (кроме файла объявления)
@@ -211,23 +216,23 @@ class ReferenceGraphBuilder:
         if not items and xml_provider is None:
             return None
 
-        root_node, texture = self._find_declaration_in_items(
+        root_node, assets = self._find_declaration_in_items(
             [(path, text) for path, text, _sources in items],
             section,
             resolved=True,
         )
         children = []
 
-        if texture is not None and root_node is not None:
-            raw_ref, tex_match = texture
-            children.append(GraphNode(
-                display_name=self._texture_display_name(raw_ref),
-                file_path=root_node.file_path,
-                first_match_line=tex_match.line_number,
-                matches=[tex_match],
-                raw_ref=raw_ref,
-                resolved=True,
-            ))
+        if root_node is not None:
+            for kind, raw_ref, asset_match in assets:
+                children.append(self._make_asset_node(
+                    forest,
+                    kind,
+                    raw_ref,
+                    asset_match,
+                    file_path=root_node.file_path,
+                    resolved=True,
+                ))
 
         for root, text, line_sources in items:
             matches = self._scan_ltx_text(text, section)
@@ -412,19 +417,19 @@ class ReferenceGraphBuilder:
             final_root = normalize_path(final_graph.root.file_path)
             files = [final_root] + [f for f in files if f != final_root]
 
-        root_node, texture = self._find_declaration_in_files(files, section)
+        root_node, assets = self._find_declaration_in_files(files, section)
         if root_node is None:
             raise ValueError(f"Секция '{section}' не найдена во VFS")
 
         children = []
-        if texture is not None:
-            raw_ref, tex_match = texture
-            children.append(GraphNode(
-                display_name=self._texture_display_name(raw_ref),
+        for kind, raw_ref, asset_match in assets:
+            children.append(self._make_asset_node(
+                forest,
+                kind,
+                raw_ref,
+                asset_match,
                 file_path=root_node.file_path,
-                first_match_line=tex_match.line_number,
-                matches=[tex_match],
-                raw_ref=raw_ref,
+                resolved=False,
             ))
 
         for file_path in files:
@@ -527,6 +532,7 @@ class ReferenceGraphBuilder:
                 first_match_line=matches[0].line_number,
                 matches=matches,
                 raw_ref=node.raw_ref,
+                target_path=getattr(node, "target_path", None),
             ))
 
         return lost
@@ -546,7 +552,8 @@ class ReferenceGraphBuilder:
     def _find_declaration(self, forest, section: str):
         """
         Ищем объявление секции [секция] или [секция]:... в файлах леса.
-        Возвращает (root_node, texture), где texture = (raw_path, MatchInfo) или None.
+        Возвращает ``(root_node, assets)``, где ``assets`` — список ссылок
+        на ресурсы секции (``icons_texture``/``visual``).
         """
         return self._find_declaration_in_files(forest.files, section)
 
@@ -564,7 +571,12 @@ class ReferenceGraphBuilder:
         section: str,
         resolved: bool = False,
     ):
-        """Ищет объявление секции в парах (file_path, text)."""
+        """Ищет объявление секции в парах (file_path, text).
+
+        Возвращает ``(root_node, assets)``. ``assets`` — список
+        ``(kind, raw_ref, MatchInfo)`` для ключей ``icons_texture`` и
+        ``visual`` в теле найденной секции.
+        """
         for file_path, text in items:
             if not text:
                 continue
@@ -585,17 +597,19 @@ class ReferenceGraphBuilder:
                         )],
                         resolved=resolved,
                     )
-                    raw_ref, tex_match = self._find_icons_texture(lines, idx + 1)
-                    return root, (raw_ref, tex_match) if tex_match else None
+                    assets = self._find_section_assets(lines, idx + 1)
+                    return root, assets
 
-        return None, None
+        return None, []
 
-    def _find_icons_texture(self, lines, start_idx):
+    def _find_section_assets(self, lines, start_idx):
         """
         Читает тело секции от строки объявления до следующего заголовка [...]
-        и ищет ключ icons_texture = *.
-        Возвращает (raw_path, MatchInfo) или (None, None).
+        и собирает ссылки на ресурсы: icons_texture (dds) и visual (ogf).
+        Возвращает список ``(kind, raw_ref, MatchInfo)``.
         """
+        assets = []
+
         for i in range(start_idx, len(lines)):
             s = lines[i].strip()
 
@@ -606,16 +620,41 @@ class ReferenceGraphBuilder:
             if s.startswith("[") or s.startswith("![") or s.startswith("@[") or s.startswith("!!["):
                 break
 
-            low = s.lower()
-            if low.startswith("icons_texture") and "=" in s:
-                raw = s.split("=", 1)[1].strip()
-                if raw:
-                    return raw, MatchInfo(
-                        edge_type=EdgeType.TEXTURE_REFERENCE,
-                        line_number=i + 1,
-                        line_text=lines[i],
-                    )
+            if "=" not in s:
+                continue
 
+            key, raw = s.split("=", 1)
+            key = key.strip().lower()
+            raw = raw.strip()
+            if not raw:
+                continue
+
+            if key == "icons_texture":
+                kind = "texture"
+                edge_type = EdgeType.TEXTURE_REFERENCE
+            elif key == "visual":
+                kind = "visual"
+                edge_type = EdgeType.VISUAL_REFERENCE
+            else:
+                continue
+
+            assets.append((
+                kind,
+                raw,
+                MatchInfo(
+                    edge_type=edge_type,
+                    line_number=i + 1,
+                    line_text=lines[i],
+                ),
+            ))
+
+        return assets
+
+    def _find_icons_texture(self, lines, start_idx):
+        """Совместимость: первая ссылка icons_texture в теле секции."""
+        for kind, raw_ref, match in self._find_section_assets(lines, start_idx):
+            if kind == "texture":
+                return raw_ref, match
         return None, None
 
     @staticmethod
@@ -623,7 +662,84 @@ class ReferenceGraphBuilder:
         """Имя файла dds из пути: ui\\ui_icon.dds -> ui_icon.dds"""
         normalized = raw_ref.replace("\\", "/")
         return normalized.rsplit("/", 1)[-1] or raw_ref
-        
+
+    # ------------------------------------------------------------ ассеты секции
+
+    def _make_asset_node(self, forest, kind, raw_ref, match,
+                         file_path, resolved=False) -> GraphNode:
+        """Узел ресурса секции: текстура (.dds) или визуальная модель (.ogf)."""
+        target = self._resolve_asset_path(forest, kind, raw_ref)
+        return GraphNode(
+            display_name=self._asset_display_name(kind, raw_ref, target),
+            file_path=file_path,
+            first_match_line=match.line_number,
+            matches=[match],
+            raw_ref=raw_ref,
+            resolved=resolved,
+            target_path=target,
+        )
+
+    @staticmethod
+    def _asset_display_name(kind, raw_ref, target=None) -> str:
+        if target is not None:
+            return target.name
+        if kind == "texture":
+            return ReferenceGraphBuilder._texture_display_name(raw_ref)
+        normalized = str(raw_ref).replace("\\", "/")
+        return normalized.rsplit("/", 1)[-1] or str(raw_ref)
+
+    @staticmethod
+    def _resolve_asset_path(forest, kind, raw_ref):
+        """Полный путь к dds/ogf относительно корня VFS.
+
+        ``forest.scan_dir`` — каталог configs (например,
+        ``<root>/gamedata/configs``). Ресурсы игры лежат рядом:
+        ``textures`` и ``meshes``. Проверяем несколько баз, чтобы
+        покрыть и VFS-корень, и отдельный каталог мода.
+        """
+        scan_dir = getattr(forest, "scan_dir", None)
+        if not scan_dir:
+            return None
+
+        raw = str(raw_ref or "").strip().strip('"').replace("\\", "/")
+        if not raw:
+            return None
+
+        suffix = ".dds" if kind == "texture" else ".ogf"
+        subdir = "textures" if kind == "texture" else "meshes"
+
+        p = Path(raw)
+        if p.is_absolute():
+            candidates = [p]
+        else:
+            if not p.suffix:
+                raw += suffix
+            has_subdir = raw.lower().startswith(subdir + "/")
+
+            bases = []
+            scan = Path(scan_dir)
+            for base in (scan, scan.parent, scan.parent.parent):
+                for candidate_base in (base, base / "gamedata"):
+                    if candidate_base not in bases:
+                        bases.append(candidate_base)
+
+            candidates = []
+            for base in bases:
+                if has_subdir:
+                    candidates.append(base / raw)
+                else:
+                    candidates.append(base / subdir / raw)
+                    candidates.append(base / raw)
+
+        for candidate in candidates:
+            try:
+                if candidate.is_file():
+                    return normalize_path(candidate)
+            except OSError:
+                continue
+
+        return None
+
     def _is_declaration(self, line: str, section: str) -> bool:
         """Проверяет, является ли строка объявлением секции."""
         stripped = line.strip()
@@ -649,6 +765,12 @@ class ReferenceGraphBuilder:
             if section not in line.lower():
                 continue
 
+            # Ссылки на ресурсы секции (icons_texture/visual) показаны
+            # отдельными узлами и не являются LTX-ссылками на секцию,
+            # даже если имя секции встречается в пути ассета.
+            if self._is_asset_line(line):
+                continue
+
             edge_type = self._classify_ltx_line(line, section)
             matches.append(MatchInfo(
                 edge_type=edge_type,
@@ -657,6 +779,14 @@ class ReferenceGraphBuilder:
             ))
 
         return matches
+
+    @staticmethod
+    def _is_asset_line(line: str) -> bool:
+        s = line.strip()
+        if "=" not in s:
+            return False
+        key = s.split("=", 1)[0].strip().lower()
+        return key in ("icons_texture", "visual")
 
     def _classify_ltx_line(self, line: str, section: str) -> EdgeType:
         """Классифицирует строку .ltx файла."""

@@ -37,3 +37,46 @@ def open_in_notepad_pp(path):
     return False, (
         "Notepad++ не найден (PATH, ProgramFiles, LocalAppData проверены)."
     )
+
+
+def open_with_shell(path):
+    """Открыть файл программой по умолчанию (Windows Shell).
+
+    Для бинарных ресурсов (.dds, .ogf) ассоциация может отсутствовать.
+    Тогда вместо исключения показываем системный диалог «Открыть с
+    помощью…» через ``OpenAs_RunDLL``.
+
+    Возвращает ``(True, "")`` или ``(False, message)``.
+    """
+    p = Path(path)
+    try:
+        if not p.is_file():
+            return False, "Файл не найден: %s" % p
+    except OSError as exc:
+        return False, "Файл недоступен: %s (%s)" % (p, exc)
+
+    startfile = getattr(os, "startfile", None)
+    if startfile is not None:
+        try:
+            startfile(str(p))
+            return True, ""
+        except OSError:
+            # Нет ассоциации или оболочка отказала — покажем выбор
+            # приложения ниже.
+            pass
+
+    if os.name != "nt":
+        return False, (
+            "Открытие файла средствами оболочки поддерживается "
+            "только в Windows."
+        )
+
+    try:
+        subprocess.Popen([
+            "rundll32.exe",
+            "shell32.dll,OpenAs_RunDLL",
+            str(p),
+        ])
+        return True, ""
+    except Exception as exc:
+        return False, "Не удалось открыть файл: %s" % exc

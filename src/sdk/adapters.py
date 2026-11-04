@@ -193,6 +193,13 @@ class CoreApiAdapter:
                 return fn(path)
         return False, "Внешний редактор не настроен."
 
+    def open_with_shell(self, path):
+        for name in ("open_with_shell", "open_shell", "open_path"):
+            fn = getattr(self._provider, name, None)
+            if callable(fn):
+                return fn(path)
+        return False, "Открытие средствами оболочки не настроено."
+
 
 # ---------------------------------------------------------------- tasks
 
@@ -420,6 +427,10 @@ def _to_graph_node_view(node) -> GraphNode:
     if file_path is not None:
         file_path = Path(file_path)
 
+    target_path = getattr(node, "target_path", None)
+    if target_path is not None:
+        target_path = Path(target_path)
+
     return GraphNode(
         display_name=str(getattr(node, "display_name", "")),
         file_path=file_path,
@@ -427,6 +438,7 @@ def _to_graph_node_view(node) -> GraphNode:
         matches=matches,
         raw_ref=getattr(node, "raw_ref", None),
         resolved=bool(getattr(node, "resolved", False)),
+        target_path=target_path,
     )
 
 

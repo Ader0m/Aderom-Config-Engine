@@ -62,6 +62,9 @@ class GraphNode:
     matches: tuple[GraphMatch, ...] = field(default_factory=tuple)
     raw_ref: Optional[str] = None
     resolved: bool = False
+    # Полный путь к бинарному ресурсу (dds/ogf). file_path при этом
+    # указывает на файл, где записана ссылка (icons_texture/visual).
+    target_path: Optional[Path] = None
 
     @property
     def matches_count(self) -> int:
@@ -72,8 +75,24 @@ class GraphNode:
         return tuple(sorted({m.edge_type for m in self.matches}))
 
     @property
+    def primary_edge_type(self) -> str:
+        """Тип связи первой строки совпадения (для маркера в окне)."""
+        if self.matches:
+            return self.matches[0].edge_type
+        return "declaration"
+
+    @property
     def is_texture(self) -> bool:
-        return self.raw_ref is not None
+        return "texture_reference" in self.edge_types
+
+    @property
+    def is_visual(self) -> bool:
+        return "visual_reference" in self.edge_types
+
+    @property
+    def is_asset(self) -> bool:
+        """Узел ссылается на бинарный ресурс (текстура/модель)."""
+        return self.is_texture or self.is_visual
 
 
 @dataclass(frozen=True)
@@ -218,6 +237,13 @@ class CoreApi(Protocol):
 
     def open_external_editor(self, path: Path) -> tuple[bool, str]:
         """Открыть файл во внешнем редакторе. Возвращает ``(ok, message)``."""
+
+    def open_with_shell(self, path: Path) -> tuple[bool, str]:
+        """Открыть файл приложением Windows по умолчанию.
+
+        Если ассоциация не настроена, показывается системный диалог
+        «Открыть с помощью…». Возвращает ``(ok, message)``.
+        """
 
 
 class UiApi(Protocol):

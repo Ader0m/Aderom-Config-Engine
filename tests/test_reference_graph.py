@@ -193,6 +193,109 @@ class ReferenceGraphTest(unittest.TestCase):
         self.assertEqual(graph.root.file_path, self.xml)
         self.assertEqual(graph.root.first_match_line, 2)
 
+    def test_texture_and_visual_assets_are_resolved(self):
+        game = self.root / "gamedata"
+        configs = game / "configs"
+        configs.mkdir(parents=True)
+
+        system = configs / "system.ltx"
+        system.write_text(
+            "[test]\n"
+            "icons_texture = ui\\ui_icon\n"
+            "visual = dynamics\\equipments\\trade\\mili_maps.ogf\n"
+            "[other]\n"
+            "parent = test\n",
+            encoding="utf-8",
+        )
+
+        texture = game / "textures" / "ui" / "ui_icon.dds"
+        texture.parent.mkdir(parents=True)
+        texture.write_bytes(b"DDS ")
+
+        model = (
+            game / "meshes" / "dynamics" / "equipments" / "trade"
+            / "mili_maps.ogf"
+        )
+        model.parent.mkdir(parents=True)
+        model.write_bytes(b"OGF ")
+
+        forest = FakeForest(
+            roots=[system],
+            files=[system],
+            xml_files=[],
+            scan_dir=configs,
+        )
+
+        graph = ReferenceGraphBuilder().build_for_section(forest, "test")
+        by_type = {
+            node.matches[0].edge_type.value: node
+            for node in graph.children
+            if node.matches
+        }
+
+        tex_node = by_type["texture_reference"]
+        self.assertEqual(tex_node.display_name, "ui_icon.dds")
+        self.assertEqual(tex_node.target_path, texture)
+        self.assertEqual(tex_node.first_match_line, 2)
+
+        visual_node = by_type["visual_reference"]
+        self.assertEqual(visual_node.display_name, "mili_maps.ogf")
+        self.assertEqual(visual_node.target_path, model)
+        self.assertEqual(visual_node.first_match_line, 3)
+
+    def test_asset_without_disk_file_keeps_reference(self):
+        self.system.write_text(
+            "[test]\nvisual = no\\such\\model\n",
+            encoding="utf-8",
+        )
+        forest = FakeForest(
+            roots=[self.system],
+            files=[self.system],
+            xml_files=[],
+            scan_dir=self.root,
+        )
+
+        graph = ReferenceGraphBuilder().build_for_section(forest, "test")
+        visual_nodes = [
+            node for node in graph.children
+            if node.matches
+            and node.matches[0].edge_type.value == "visual_reference"
+        ]
+
+        self.assertEqual(len(visual_nodes), 1)
+        self.assertIsNone(visual_nodes[0].target_path)
+        self.assertEqual(visual_nodes[0].raw_ref, "no\\such\\model")
+
+    def test_asset_line_is_not_duplicated_as_ltx_reference(self):
+        text = (
+            "[mili_maps]\n"
+            "visual = dynamics\\trade\\mili_maps.ogf\n"
+        )
+        self.system.write_text(text, encoding="utf-8")
+        sources = [
+            LineSource(kind="original") for _ in text.splitlines()
+        ]
+        forest = FakeForest(
+            roots=[self.system],
+            files=[self.system],
+            xml_files=[],
+            scan_dir=self.root,
+        )
+
+        graph = ReferenceGraphBuilder().build_for_section(
+            forest,
+            "mili_maps",
+            resolved_provider=lambda _p: (text, sources),
+        )
+
+        edge_types = [
+            match.edge_type.value
+            for node in graph.children
+            for match in node.matches
+        ]
+        self.assertIn("visual_reference", edge_types)
+        self.assertNotIn("ltx_reference", edge_types)
+
 
 if __name__ == "__main__":
     unittest.main()

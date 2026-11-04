@@ -69,6 +69,112 @@ class SectionGraphWindowTest(unittest.TestCase):
         )
         window.close()
 
+    def test_asset_rows_show_file_name_and_open_with_shell(self):
+        opened = []
+        messages = []
+        window = SectionGraphWindow(
+            lambda path, line: None,
+            open_raw_at_line=lambda path, line: None,
+            open_with_shell=lambda path: (
+                opened.append(path) or (True, "")
+            ),
+            on_message=messages.append,
+        )
+
+        ltx_path = Path("C:/game/gamedata/configs/items/weapons.ltx")
+        texture_path = Path("C:/game/gamedata/textures/ui/ui_icon.dds")
+        root = GraphNode(
+            display_name="weapon",
+            file_path=ltx_path,
+            first_match_line=10,
+            matches=(GraphMatch("declaration", 10, "[weapon]"),),
+        )
+        texture = GraphNode(
+            display_name="ui_icon.dds",
+            file_path=ltx_path,
+            first_match_line=12,
+            matches=(
+                GraphMatch(
+                    "texture_reference",
+                    12,
+                    "icons_texture = ui\\ui_icon",
+                ),
+            ),
+            raw_ref="ui\\ui_icon",
+            target_path=texture_path,
+        )
+
+        window.update_graph(
+            SectionGraph(
+                section_name="weapon",
+                root=root,
+                children=(texture,),
+            )
+        )
+
+        root_item = window.list_widget.topLevelItem(0)
+        texture_item = window.list_widget.topLevelItem(1)
+
+        self.assertEqual(root_item.text(0), "[Объявление] weapons.ltx")
+        self.assertEqual(texture_item.text(0), "[Текстура] ui_icon.dds")
+        self.assertEqual(texture_item.text(1), "1")
+        self.assertEqual(texture_item.text(2), "12")
+        self.assertEqual(root_item.text(1), "1")
+        self.assertEqual(root_item.text(2), "10")
+        self.assertIn(str(texture_path), texture_item.toolTip(0))
+
+        window._on_item_double_clicked(texture_item)
+        self.assertEqual(opened, [texture_path])
+        self.assertEqual(messages, [])
+        window.close()
+
+    def test_missing_asset_reports_and_opens_declaration(self):
+        calls = []
+        messages = []
+        window = SectionGraphWindow(
+            lambda path, line: calls.append(("bus", path, line)),
+            open_raw_at_line=lambda path, line: calls.append(
+                ("raw", path, line)
+            ),
+            open_with_shell=lambda path: (True, ""),
+            on_message=messages.append,
+        )
+
+        ltx_path = Path("C:/game/configs/test.ltx")
+        root = GraphNode(
+            display_name="test",
+            file_path=ltx_path,
+            first_match_line=1,
+            matches=(GraphMatch("declaration", 1, "[test]"),),
+        )
+        visual = GraphNode(
+            display_name="model.ogf",
+            file_path=ltx_path,
+            first_match_line=3,
+            matches=(
+                GraphMatch(
+                    "visual_reference",
+                    3,
+                    "visual = no\\such\\model",
+                ),
+            ),
+            raw_ref="no\\such\\model",
+        )
+
+        window.update_graph(
+            SectionGraph(
+                section_name="test",
+                root=root,
+                children=(visual,),
+            )
+        )
+
+        window._on_item_double_clicked(window.list_widget.topLevelItem(1))
+        self.assertTrue(messages)
+        self.assertIn("no\\such\\model", messages[0])
+        self.assertEqual(calls, [("raw", ltx_path, 3)])
+        window.close()
+
 
 if __name__ == "__main__":
     unittest.main()

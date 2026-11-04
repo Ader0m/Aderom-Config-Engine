@@ -4,18 +4,68 @@
 from pathlib import Path
 
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QCheckBox,
     QDialog,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
     QPushButton,
     QSplitter,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
+
+try:  # окно модуля платформы: палитра — единственный источник цветов
+    from ui.theme import PALETTE
+except Exception:  # pragma: no cover - запуск без UI-слоя (тесты)
+    PALETTE = None
+
+
+# Маркеры и цвета типов связей. Цвета берутся из Palette (ui/theme.py),
+# чтобы окно не дублировало hex-литералы.
+EDGE_STYLES = {
+    "declaration": ("Объявление", "graph_declaration"),
+    "inheritance": ("Наследование", "graph_inheritance"),
+    "ltx_reference": ("LTX", "graph_ltx"),
+    "script_reference": ("Скрипт", "graph_script"),
+    "xml_reference": ("XML", "graph_xml"),
+    "texture_reference": ("Текстура", "graph_texture"),
+    "visual_reference": ("Модель", "graph_visual"),
+}
+
+
+def _edge_style(edge_type):
+    """(маркер, QColor|None) для типа связи."""
+    label, attr = EDGE_STYLES.get(
+        str(edge_type or ""),
+        (str(edge_type or "Связь"), None),
+    )
+    color = getattr(PALETTE, attr, None) if (PALETTE and attr) else None
+    return label, QColor(color) if color else None
+
+
+class GraphTree(QTreeWidget):
+    """QTreeWidget с алиасами count/item для совместимости с QListWidget."""
+
+    def count(self):
+        return self.topLevelItemCount()
+
+    def item(self, index):
+        return self.topLevelItem(index)
+
+
+def _node_file_name(node):
+    """Только имя файла: полный путь остаётся в tooltip и в node."""
+    target = getattr(node, "target_path", None)
+    if target is not None:
+        return Path(target).name
+    if getattr(node, "file_path", None) is not None:
+        return Path(node.file_path).name
+    return getattr(node, "display_name", None) or "—"
 
 
 class SectionGraphFeature:
@@ -122,6 +172,14 @@ class SectionGraphFeature:
             return
         self._request_graph(self._current_section, bool(checked))
 
+    def _on_window_message(self, message):
+        """Сообщение окна графа: в журнал и, если ошибка, диалогом."""
+        message = str(message)
+        self.ctx.ui.log(message)
+        low = message.lower()
+        if "не найден" in low or "не удалось" in low:
+            self.ctx.ui.show_error(message)
+
     def _on_done(self, graph, err, section_name, vfs_mode, token):
         if token != self._request_seq:
             return
@@ -158,6 +216,8 @@ class SectionGraphFeature:
                 self.ctx.ui.open_at_line,
                 open_raw_at_line=self.ctx.ui.open_raw_at_line,
                 on_vfs_toggled=self._on_vfs_toggled,
+                open_with_shell=self.ctx.services.open_with_shell,
+                on_message=self._on_window_message,
             )
 
         self._window.update_graph(graph, vfs_mode=vfs_mode)
@@ -168,11 +228,14 @@ class SectionGraphWindow(QDialog):
     """Немодальное окно графа. Создаётся и наполняется модулем."""
 
     def __init__(self, open_at_line, open_raw_at_line=None,
-                 on_vfs_toggled=None, parent=None):
+                 on_vfs_toggled=None, parent=None,
+                 open_with_shell=None, on_message=None):
         super().__init__(parent)
         self._open_at_line = open_at_line
         self._open_raw_at_line = open_raw_at_line
         self._on_vfs_toggled = on_vfs_toggled
+        self._open_with_shell = open_with_shell
+        self._on_message = on_message
         self._graph = None
         self._vfs_mode = False
         self._lost_panel_expanded = False
@@ -203,11 +266,7 @@ class SectionGraphWindow(QDialog):
         main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_title = QLabel("Итоговое дерево")
         main_layout.addWidget(self.main_title)
-        self.list_widget = QListWidget()
-        self.list_widget.itemDoubleClicked.connect(self._on_item_double_clicked)
-        self.list_widget.itemClicked.connect(
-            lambda _item: self._set_active_list(self.list_widget)
-        )
+        self.list_widget = self._make_tree()
         main_layout.addWidget(self.list_widget)
         self.splitter.addWidget(main_panel)
 
@@ -215,13 +274,7 @@ class SectionGraphWindow(QDialog):
         lost_layout = QVBoxLayout(self.lost_panel)
         lost_layout.setContentsMargins(0, 0, 0, 0)
         lost_layout.addWidget(QLabel("Потерянные связи (VFS)"))
-        self.lost_list_widget = QListWidget()
-        self.lost_list_widget.itemDoubleClicked.connect(
-            self._on_item_double_clicked
-        )
-        self.lost_list_widget.itemClicked.connect(
-            lambda _item: self._set_active_list(self.lost_list_widget)
-        )
+        self.lost_list_widget = self._make_tree()
         lost_layout.addWidget(self.lost_list_widget)
         self.splitter.addWidget(self.lost_panel)
         self.lost_panel.setVisible(False)
@@ -236,7 +289,8 @@ class SectionGraphWindow(QDialog):
 
         open_btn = QPushButton("Открыть совпадение")
         open_btn.setToolTip(
-            "Обычный режим: итоговый файл резолвера; VFS: исходный файл"
+            "Обычный режим: итоговый файл резолвера; VFS: исходный файл.\n"
+            "Текстуры и модели открываются приложением Windows."
         )
         open_btn.clicked.connect(self._on_open_clicked)
         button_layout.addWidget(open_btn)
@@ -246,6 +300,27 @@ class SectionGraphWindow(QDialog):
         button_layout.addWidget(close_btn)
 
         layout.addLayout(button_layout)
+
+    def _make_tree(self):
+        """Плоский список связей с колонками совпадений и первой строки."""
+        tree = GraphTree()
+        tree.setColumnCount(3)
+        tree.setHeaderLabels(["Файл", "Совпадений", "Строка"])
+        tree.setRootIsDecorated(False)
+        tree.setAlternatingRowColors(True)
+        tree.setUniformRowHeights(True)
+        tree.setSelectionBehavior(QTreeWidget.SelectRows)
+
+        header = tree.header()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+
+        tree.itemDoubleClicked.connect(self._on_item_double_clicked)
+        tree.itemClicked.connect(
+            lambda *_: self._set_active_list(tree)
+        )
+        return tree
 
     # -------------------------------------------------- режим
     def vfs_enabled(self):
@@ -276,10 +351,10 @@ class SectionGraphWindow(QDialog):
             "Секция: %s\n"
             "Объявлена в: %s\n"
             "Строка: %s\n"
-            "Найдено файлов: %d"
+            "Найдено связей: %d"
             % (
                 graph.section_name,
-                _path_text(graph.root.file_path),
+                _node_file_name(graph.root),
                 graph.root.first_match_line,
                 len(main),
             )
@@ -292,6 +367,7 @@ class SectionGraphWindow(QDialog):
         else:
             info += "\nРежим: итоговое дерево"
         self.info_label.setText(info)
+        self.info_label.setToolTip(_path_text(graph.root.file_path))
 
         self._populate_list(self.list_widget, main, include_root=True)
         self.lost_list_widget.clear()
@@ -316,62 +392,106 @@ class SectionGraphWindow(QDialog):
         list_widget.clear()
 
         if include_root:
-            list_widget.addItem(self._make_root_item(self._graph.root))
+            list_widget.addTopLevelItem(
+                self._make_root_item(self._graph.root)
+            )
 
         for node in nodes:
-            list_widget.addItem(self._make_item(node))
+            list_widget.addTopLevelItem(self._make_item(node))
 
     def _make_root_item(self, node):
-        line_label = (
-            "строка резолва"
-            if getattr(node, "resolved", False)
-            else "исходная строка"
-        )
-        item = QListWidgetItem(
-            "[ОБЪЯВЛЕНИЕ] %s (%s %s)"
-            % (_path_name(node.file_path), line_label, node.first_match_line)
-        )
-        item.setData(Qt.UserRole, node)
-        item.setToolTip(_path_text(node.file_path))
+        label, color = _edge_style("declaration")
+        item = QTreeWidgetItem()
+        item.setText(0, "[%s] %s" % (label, _node_file_name(node)))
+        item.setText(1, str(getattr(node, "matches_count", 1) or 1))
+        item.setText(2, str(node.first_match_line))
+        if color is not None:
+            item.setForeground(0, color)
+        item.setData(0, Qt.UserRole, node)
+        item.setToolTip(0, _path_text(node.file_path))
         return item
 
     def _make_item(self, node):
-        if node.is_texture:
-            item_text = "[TEXTURE] %s" % node.raw_ref
-            tooltip = (
-                "icons_texture объявлена в %s, строка %s"
-                % (_path_name(node.file_path), node.first_match_line)
-            )
-        else:
-            line_label = (
-                "строка резолва"
-                if getattr(node, "resolved", False)
-                else "исходная строка"
-            )
-            item_text = (
-                "%s  [совпадений: %d, типы: %s, %s: %s]"
-                % (
-                    node.display_name,
-                    node.matches_count,
-                    ", ".join(node.edge_types),
-                    line_label,
-                    node.first_match_line,
-                )
-            )
-            tooltip = _path_text(node.file_path)
+        label, color = _edge_style(
+            getattr(node, "primary_edge_type", "declaration")
+        )
+        item = QTreeWidgetItem()
+        item.setText(0, "[%s] %s" % (label, _node_file_name(node)))
+        item.setText(1, str(node.matches_count))
+        item.setText(2, str(node.first_match_line))
+        if color is not None:
+            item.setForeground(0, color)
 
-        item = QListWidgetItem(item_text)
-        item.setData(Qt.UserRole, node)
-        item.setToolTip(tooltip)
+        item.setData(0, Qt.UserRole, node)
+        item.setToolTip(0, self._node_tooltip(node))
         return item
+
+    @staticmethod
+    def _node_tooltip(node):
+        source = "%s:%s" % (
+            _path_text(node.file_path),
+            getattr(node, "first_match_line", "—"),
+        )
+        target = getattr(node, "target_path", None)
+        raw_ref = getattr(node, "raw_ref", None)
+
+        if getattr(node, "is_asset", False):
+            lines = []
+            if target is not None:
+                lines.append("Файл: %s" % target)
+            else:
+                lines.append(
+                    "Файл не найден по ссылке: %s" % (raw_ref or "—")
+                )
+            lines.append("Объявлено: %s" % source)
+            if raw_ref:
+                lines.append("Ссылка: %s" % raw_ref)
+            return "\n".join(lines)
+
+        return source
 
     # -------------------------------------------------- действия
     def _set_active_list(self, list_widget):
         self._active_list = list_widget
 
     def _on_item_double_clicked(self, item):
-        node = item.data(Qt.UserRole) if item is not None else None
-        if node is None or node.file_path is None:
+        node = item.data(0, Qt.UserRole) if item is not None else None
+        if node is None:
+            return
+
+        # Текстуры (.dds) и модели (.ogf) — бинарные ресурсы: открываем
+        # приложением Windows. Если ассоциации нет, оболочка покажет
+        # диалог «Открыть с помощью…».
+        if getattr(node, "is_asset", False):
+            target = getattr(node, "target_path", None)
+            if target is not None:
+                if self._open_with_shell is not None:
+                    ok, message = self._open_with_shell(target)
+                    if not ok:
+                        self._notify(message)
+                    return
+                self._open_node_source(node)
+                return
+
+            self._notify(
+                "Файл не найден: %s\nОбъявлено в %s, строка %s"
+                % (
+                    getattr(node, "raw_ref", None) or node.display_name,
+                    _path_text(node.file_path),
+                    node.first_match_line,
+                )
+            )
+            self._open_node_source(node)
+            return
+
+        if node.file_path is None:
+            return
+
+        self._open_node_source(node)
+
+    def _open_node_source(self, node):
+        """Открыть строку объявления/совпадения в редакторе."""
+        if node.file_path is None:
             return
 
         resolved = bool(getattr(node, "resolved", False))
@@ -383,6 +503,10 @@ class SectionGraphWindow(QDialog):
         else:
             # VFS/скрипты: строка относится к исходному файлу.
             self._open_raw_at_line(node.file_path, node.first_match_line)
+
+    def _notify(self, message):
+        if self._on_message is not None:
+            self._on_message(message)
 
     def _on_open_clicked(self):
         self._on_item_double_clicked(self._active_list.currentItem())

@@ -38,7 +38,7 @@ from .fs import (
     pretty_source,
 )
 
-from .external import open_in_notepad_pp
+from .external import open_in_notepad_pp, open_with_shell
 
 from .file_cache import FileCacheSystem
 from .resolved_cache import ResolvedCache, invalidate_forest_signatures
@@ -108,6 +108,7 @@ __all__ = [
 
     # external
     "open_in_notepad_pp",
+    "open_with_shell",
 
     # cache
     "FileCacheSystem",

@@ -92,6 +92,18 @@ class Palette:
     syn_list_remove: str = "#CE9178" # DLTX: <key (удалить из CSV)
     syn_list_value: str = "#9ACD8B" # элементы списка через запятую
 
+    # ============ Граф связей секции (modules/base_module/section_graph.py) ============
+    # Семантические цвета маркеров типов связей. Значения совпадают с
+    # подсветкой LTX, но заданы отдельными полями, чтобы окно графа не
+    # зависело от стилей редактора.
+    graph_declaration: str = "#C578DD"  # [Объявление]
+    graph_inheritance: str = "#DCDCAA"  # [Наследование]
+    graph_ltx: str = "#9CDCFE"          # [LTX]
+    graph_script: str = "#CC7832"       # [Скрипт]
+    graph_xml: str = "#B5CEA8"          # [XML]
+    graph_texture: str = "#FFC66D"      # [Текстура]
+    graph_visual: str = "#4EC9B0"       # [Модель]
+
     # ============ Редактор (Scintilla, программные цвета) ============
     ed_margin_bg: str = "#313335"
     ed_margin_fg: str = "#787878"
