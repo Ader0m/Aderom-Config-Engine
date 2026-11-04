@@ -4,7 +4,6 @@
 from .version import SDK_VERSION, parse_version, is_compatible
 from .contracts import ModuleManifest, ModuleBase, ModuleContext, FileOpenHandler
 from .events import Events
-from .loader import ModuleLoader, ModuleLoadError
 from .api import (
     CoreApi,
     UiApi,
@@ -18,7 +17,13 @@ from .api import (
     XmlResolveResult,
     LineSource,
 )
-from .adapters import CoreApiAdapter, TaskApiAdapter, UiApiAdapter
+from .adapters import (
+    CommandApiAdapter,
+    CoreApiAdapter,
+    EventApiAdapter,
+    TaskApiAdapter,
+    UiApiAdapter,
+)
 
 __all__ = [
     "SDK_VERSION",
@@ -28,8 +33,6 @@ __all__ = [
     "ModuleBase",
     "ModuleContext",
     "Events",
-    "ModuleLoader",
-    "ModuleLoadError",
     "FileOpenHandler",
     "CoreApi",
     "UiApi",
@@ -43,6 +46,8 @@ __all__ = [
     "XmlResolveResult",
     "LineSource",
     "CoreApiAdapter",
+    "EventApiAdapter",
+    "CommandApiAdapter",
     "TaskApiAdapter",
     "UiApiAdapter",
 ]

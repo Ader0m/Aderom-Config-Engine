@@ -20,14 +20,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-try:  # окно модуля платформы: палитра — единственный источник цветов
-    from ui.theme import PALETTE
-except Exception:  # pragma: no cover - запуск без UI-слоя (тесты)
-    PALETTE = None
-
-
-# Маркеры и цвета типов связей. Цвета берутся из Palette (ui/theme.py),
-# чтобы окно не дублировало hex-литералы.
+# Маркеры и цвета типов связей. Цвета запрашиваются через ctx.ui,
+# чтобы модуль не импортировал внутренности UI.
 EDGE_STYLES = {
     "declaration": ("Объявление", "graph_declaration"),
     "inheritance": ("Наследование", "graph_inheritance"),
@@ -39,13 +33,13 @@ EDGE_STYLES = {
 }
 
 
-def _edge_style(edge_type):
+def _edge_style(edge_type, color_fn=None):
     """(маркер, QColor|None) для типа связи."""
     label, attr = EDGE_STYLES.get(
         str(edge_type or ""),
         (str(edge_type or "Связь"), None),
     )
-    color = getattr(PALETTE, attr, None) if (PALETTE and attr) else None
+    color = color_fn(attr) if (color_fn and attr) else None
     return label, QColor(color) if color else None
 
 
@@ -233,6 +227,7 @@ class SectionGraphFeature:
                 on_vfs_toggled=self._on_vfs_toggled,
                 open_with_shell=self.ctx.services.open_with_shell,
                 on_message=self._on_window_message,
+                theme_color=self.ctx.ui.theme_color,
             )
 
         self._window.update_graph(graph, vfs_mode=vfs_mode)
@@ -244,13 +239,15 @@ class SectionGraphWindow(QDialog):
 
     def __init__(self, open_at_line, open_raw_at_line=None,
                  on_vfs_toggled=None, parent=None,
-                 open_with_shell=None, on_message=None):
+                 open_with_shell=None, on_message=None,
+                 theme_color=None):
         super().__init__(parent)
         self._open_at_line = open_at_line
         self._open_raw_at_line = open_raw_at_line
         self._on_vfs_toggled = on_vfs_toggled
         self._open_with_shell = open_with_shell
         self._on_message = on_message
+        self._theme_color = theme_color
         self._graph = None
         self._vfs_mode = False
         self._lost_panel_expanded = False
@@ -415,7 +412,7 @@ class SectionGraphWindow(QDialog):
             list_widget.addTopLevelItem(self._make_item(node))
 
     def _make_root_item(self, node):
-        label, color = _edge_style("declaration")
+        label, color = _edge_style("declaration", self._theme_color)
         item = QTreeWidgetItem()
         item.setText(0, "[%s] %s" % (label, _node_file_name(node)))
         item.setText(1, str(getattr(node, "matches_count", 1) or 1))
@@ -428,7 +425,8 @@ class SectionGraphWindow(QDialog):
 
     def _make_item(self, node):
         label, color = _edge_style(
-            getattr(node, "primary_edge_type", "declaration")
+            getattr(node, "primary_edge_type", "declaration"),
+            self._theme_color,
         )
         item = QTreeWidgetItem()
         item.setText(0, "[%s] %s" % (label, _node_file_name(node)))

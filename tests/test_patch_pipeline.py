@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 import tempfile
 import unittest
 from dataclasses import replace
@@ -7,15 +7,15 @@ from pathlib import Path
 from tests.support import SRC  # noqa: F401
 
 from core.assembly_service import AssemblyService
-from core.document_diff import diff_texts
-from core.dltx_generator import DltxGenerator
+from core.documents.document_diff import diff_texts
+from core.patching.dltx_generator import DltxGenerator
 from core.facade import CoreServices
 from core.file_cache import FileCacheSystem
-from core.patch_models import PatchOptions
-from core.patch_planner import PatchPlanner
-from core.patch_targets import patch_file_name, resolve_patch_target
-from core.patch_verifier import ModelPatchVerifier, ResolverPatchVerifier
-from core.patch_writer import PatchWriteError, PatchWriter
+from core.patching.patch_models import PatchOptions
+from core.patching.patch_planner import PatchPlanner
+from core.patching.patch_targets import patch_file_name, resolve_patch_target
+from core.patching.patch_verifier import ModelPatchVerifier, ResolverPatchVerifier
+from core.patching.patch_writer import PatchWriteError, PatchWriter
 from core.reference_graph import DisabledCache, ReferenceGraphBuilder
 from core.resolved_cache import ResolvedCache
 from core.resolver_service import ResolverService
@@ -61,7 +61,7 @@ class PatchTargetTest(unittest.TestCase):
         )
 
     def test_patch_suffix_sorts_after_existing_mods(self):
-        from core.patch_targets import choose_load_last_suffix
+        from core.patching.patch_targets import choose_load_last_suffix
 
         root = Path("C:/game/system.ltx")
         self.assertEqual(
@@ -597,7 +597,7 @@ class PatchPipelineTest(unittest.TestCase):
                 )
             )
 
-            from core.patch_models import PatchFile
+            from core.patching.patch_models import PatchFile
 
             bad_text = generated.text.replace("cost = 150", "cost = 999")
             bad_file = replace(

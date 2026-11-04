@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,11 +6,11 @@ from types import SimpleNamespace
 
 from tests.support import SRC  # noqa: F401
 
-from core.dltx_generator import DltxGenerator
-from core.multiline_edit import analyze_multiline_edit
-from core.patch_models import PatchOptions
-from core.patch_planner import PatchPlanner
-from core.patch_verifier import ModelPatchVerifier
+from core.patching.dltx_generator import DltxGenerator
+from core.documents.multiline_edit import analyze_multiline_edit
+from core.patching.patch_models import PatchOptions
+from core.patching.patch_planner import PatchPlanner
+from core.patching.patch_verifier import ModelPatchVerifier
 
 
 class _Forest:
@@ -170,12 +170,12 @@ class MultiLinePlanTest(unittest.TestCase):
 
     def test_delete_section_block_patch(self):
         plan = self._plan(
-            "[a]\nx = 1\n[b]\ny = 2\n",
+            "[a]\nx = 1\n[new]\ny = 2\n",
             "[a]\nx = 1\n",
             allow_delete_section=True,
         )
         self.assertFalse(plan.has_errors)
-        self.assertIn("!![b]", plan.preview)
+        self.assertIn("!![new]", plan.preview)
 
         generated = DltxGenerator().generate(plan)
         self.assertTrue(ModelPatchVerifier().verify(generated).ok)

@@ -17,7 +17,7 @@ import copy
 from pathlib import Path
 from typing import List, Tuple
 
-from .document_model import (
+from ..documents.document_model import (
     LtxDocument,
     LtxSectionModel,
     parse_ltx_document,

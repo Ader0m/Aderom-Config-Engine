@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from .document_diff import DocumentChange
+from ..documents.document_diff import DocumentChange
 from .dltx_generator import DltxGenerator
 from .patch_models import PatchIssue, PatchPlan
 

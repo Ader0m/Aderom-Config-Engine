@@ -7,8 +7,8 @@ import traceback
 
 import modules as modules_package
 
-from .contracts import ModuleBase
-from .version import SDK_VERSION, is_compatible
+from sdk.contracts import ModuleBase
+from sdk.version import SDK_VERSION, is_compatible
 
 
 class ModuleLoadError(Exception):

@@ -426,6 +426,13 @@ class UiApi(Protocol):
     def copy_to_clipboard(self, text: str) -> None:
         """Поместить текст в буфер обмена."""
 
+    def theme_color(self, name: str, fallback: Optional[str] = None) -> Optional[str]:
+        """Вернуть цвет темы по имени токена.
+
+        Модуль не импортирует ``ui.theme`` и не знает структуру палитры:
+        он запрашивает только разрешённый токен.
+        """
+
     # --- команды платформы ------------------------------------------------
 
     def open_raw(self, path: Path) -> None:

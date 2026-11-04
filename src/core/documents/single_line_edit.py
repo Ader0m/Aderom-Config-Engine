@@ -29,7 +29,7 @@ from .document_model import (
     parse_section_header,
     parse_value,
 )
-from .fs import strip_comments
+from ..fs import strip_comments
 from .resolved_edit import line_context
 
 

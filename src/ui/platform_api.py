@@ -641,6 +641,11 @@ class PlatformApi:
     def clipboard_set(self, text):
         QApplication.clipboard().setText(str(text))
 
+    def theme_color(self, name, fallback=None):
+        from .theme import PALETTE
+
+        return getattr(PALETTE, str(name), fallback)
+
     # -------------------------------------------------- команды платформы
     def request_open_file(self, path):
         ok = self.router.open(path, self)

@@ -1,9 +1,9 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 import unittest
 
 from tests.support import SRC  # noqa: F401
 
-from core.single_line_edit import analyze_single_line_edit
+from core.documents.single_line_edit import analyze_single_line_edit
 
 
 class SingleLineEditTest(unittest.TestCase):

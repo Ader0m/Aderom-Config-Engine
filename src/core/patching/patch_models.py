@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
-from .document_diff import DocumentChange, DocumentDiff
+from ..documents.document_diff import DocumentChange, DocumentDiff
 
 
 # ---------------------------------------------------------------- цели

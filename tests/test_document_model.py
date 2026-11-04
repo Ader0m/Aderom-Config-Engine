@@ -1,13 +1,13 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 import unittest
 
 from tests.support import SRC  # noqa: F401
 
 from types import SimpleNamespace
 
-from core.document_diff import diff_texts
-from core.document_model import parse_ltx_document
-from core.resolved_edit import analyze_resolved_changes
+from core.documents.document_diff import diff_texts
+from core.documents.document_model import parse_ltx_document
+from core.documents.resolved_edit import analyze_resolved_changes
 
 
 class DocumentModelTest(unittest.TestCase):

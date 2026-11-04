@@ -20,7 +20,7 @@ from .document_model import (
     parse_key_line,
     parse_section_header,
 )
-from .fs import strip_comments
+from ..fs import strip_comments
 
 
 @dataclass(frozen=True)

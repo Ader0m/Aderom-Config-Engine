@@ -20,7 +20,7 @@ from typing import Optional
 
 from .document_diff import DocumentDiff, diff_documents
 from .document_model import LtxDocument, parse_ltx_document
-from .fs import read_text_safe
+from ..fs import read_text_safe
 
 
 class DocumentSession:
@@ -115,7 +115,7 @@ class DocumentSession:
 
     def plan(self, forest=None, options=None):
         """Построить план патча по текущему черновику."""
-        from .patch_planner import PatchPlanner
+        from ..patching.patch_planner import PatchPlanner
 
         return PatchPlanner().plan_document_change(
             self.source_path,

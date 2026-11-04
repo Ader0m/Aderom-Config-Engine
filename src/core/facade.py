@@ -21,11 +21,14 @@ from .fs import find_system_ltx, detect_config_dir
 from .tree_query_service import search_nodes, sort_nodes
 from .xml_resolve_service import XmlResolveService
 from .prebuild_service import PrebuildService
-from .patch_models import VerificationResult
-from .patch_planner import PatchPlanner
-from .dltx_generator import DltxGenerator
-from .patch_verifier import ModelPatchVerifier, ResolverPatchVerifier
-from .patch_writer import PatchWriter
+from .patching.patch_models import VerificationResult
+from .patching.patch_planner import PatchPlanner
+from .patching.dltx_generator import DltxGenerator
+from .patching.patch_verifier import (
+    ModelPatchVerifier,
+    ResolverPatchVerifier,
+)
+from .patching.patch_writer import PatchWriter
 
 
 class CoreServices:

@@ -53,11 +53,17 @@ class ModuleContext:
     """
 
     def __init__(self, sdk_version, events, commands, ui, tasks, services, paths):
-        from .adapters import CoreApiAdapter, TaskApiAdapter, UiApiAdapter
+        from .adapters import (
+            CommandApiAdapter,
+            CoreApiAdapter,
+            EventApiAdapter,
+            TaskApiAdapter,
+            UiApiAdapter,
+        )
 
         self.sdk_version = sdk_version
-        self.events = events
-        self.commands = commands
+        self.events = EventApiAdapter.wrap(events)
+        self.commands = CommandApiAdapter.wrap(commands)
         self.ui = UiApiAdapter.wrap(ui)
         self.tasks = TaskApiAdapter.wrap(tasks)
         self.services = CoreApiAdapter.wrap(services)

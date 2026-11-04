@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 from typing import Iterable, Optional, Sequence, Tuple
 
-from .fs import normalize_path
+from ..fs import normalize_path
 from .patch_models import PatchTarget
 
 

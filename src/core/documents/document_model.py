@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .fs import read_text_safe, strip_comments
+from ..fs import read_text_safe, strip_comments
 
 
 # ---------------------------------------------------------------- значения

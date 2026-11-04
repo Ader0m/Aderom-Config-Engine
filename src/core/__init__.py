@@ -62,7 +62,7 @@ from .resolver_adapter import (
     Assembler,
 )
 
-from .document_model import (
+from .documents.document_model import (
     LtxDocument,
     LtxEntry,
     LtxSectionModel,
@@ -70,7 +70,7 @@ from .document_model import (
     parse_ltx_document,
     parse_ltx_file,
 )
-from .document_diff import (
+from .documents.document_diff import (
     DocumentChange,
     DocumentDiff,
     DiffIssue,
@@ -78,22 +78,22 @@ from .document_diff import (
     diff_documents,
     diff_texts,
 )
-from .document_session import DocumentSession, FileDocumentTracker
-from .resolved_edit import (
+from .documents.document_session import DocumentSession, FileDocumentTracker
+from .documents.resolved_edit import (
     ResolvedEditAnalysis,
     ResolvedLineChange,
     analyze_resolved_changes,
 )
-from .single_line_edit import (
+from .documents.single_line_edit import (
     SingleLineEditAnalysis,
     analyze_single_line_edit,
 )
-from .multiline_edit import (
+from .documents.multiline_edit import (
     EditConflict,
     MultiLineEditAnalysis,
     analyze_multiline_edit,
 )
-from .patch_models import (
+from .patching.patch_models import (
     GeneratedPatch,
     PatchFile,
     PatchIssue,
@@ -103,7 +103,7 @@ from .patch_models import (
     VerificationCheck,
     VerificationResult,
 )
-from .patch_targets import (
+from .patching.patch_targets import (
     choose_load_last_suffix,
     patch_file_name,
     patch_file_rel,
@@ -114,16 +114,20 @@ from .patch_targets import (
     unique_suffix,
     validate_patch_mod_root,
 )
-from .patch_merge import merge_patch_plans
-from .patch_planner import PatchPlanner, PatchPlanningError
-from .dltx_generator import DltxGenerator, PatchGenerationError, render_dltx
-from .dxml_generator import DxmlGenerator
-from .patch_verifier import (
+from .patching.patch_merge import merge_patch_plans
+from .patching.patch_planner import PatchPlanner, PatchPlanningError
+from .patching.dltx_generator import (
+    DltxGenerator,
+    PatchGenerationError,
+    render_dltx,
+)
+from .patching.dxml_generator import DxmlGenerator
+from .patching.patch_verifier import (
     ModelPatchVerifier,
     ResolverPatchVerifier,
     apply_patch_document,
 )
-from .patch_writer import PatchWriteError, PatchWriter
+from .patching.patch_writer import PatchWriteError, PatchWriter
 from .reference_graph import ReferenceGraphBuilder
 from .xml_slaxml import (
     SlaxmlParser,

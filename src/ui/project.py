@@ -23,9 +23,13 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from core.fs import read_text_safe, read_xml_text
-from core.patch_merge import merge_patch_plans
-from core.patch_models import GeneratedPatch, PatchOptions, PatchPlan
-from core.multiline_edit import analyze_multiline_edit
+from core.patching.patch_merge import merge_patch_plans
+from core.patching.patch_models import (
+    GeneratedPatch,
+    PatchOptions,
+    PatchPlan,
+)
+from core.documents.multiline_edit import analyze_multiline_edit
 
 
 class ProjectError(Exception):

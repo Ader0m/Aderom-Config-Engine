@@ -12,7 +12,7 @@ import tempfile
 from pathlib import Path
 from typing import List, Sequence, Tuple
 
-from .fs import normalize_path
+from ..fs import normalize_path
 from .patch_models import GeneratedPatch
 from .patch_targets import validate_patch_mod_root
 

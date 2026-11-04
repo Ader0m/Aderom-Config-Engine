@@ -1,11 +1,11 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 import tempfile
 import unittest
 from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from core.document_session import DocumentSession, FileDocumentTracker
+from core.documents.document_session import DocumentSession, FileDocumentTracker
 
 
 class DocumentSessionTest(unittest.TestCase):

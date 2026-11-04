@@ -201,6 +201,69 @@ class CoreApiAdapter:
         return False, "Открытие средствами оболочки не настроено."
 
 
+# ---------------------------------------------------------------- events
+
+
+class EventApiAdapter:
+    """Реализация :class:`sdk.api.EventApi` поверх шины событий."""
+
+    _sdk_api_kind = "events"
+
+    def __init__(self, bus):
+        self._bus = bus
+
+    @classmethod
+    def wrap(cls, bus):
+        if getattr(bus, _SDK_API_MARKER, None) == cls._sdk_api_kind:
+            return bus
+        return cls(bus)
+
+    def subscribe(self, name, handler, priority=0):
+        return self._bus.subscribe(name, handler, priority=priority)
+
+    def unsubscribe(self, name, handler=None):
+        return self._bus.unsubscribe(name, handler)
+
+    def publish(self, name, payload=None):
+        return self._bus.publish(name, payload)
+
+    def dispatch(self, name, payload=None):
+        return self._bus.dispatch(name, payload)
+
+    def has(self, name):
+        return self._bus.has(name)
+
+
+# ---------------------------------------------------------------- commands
+
+
+class CommandApiAdapter:
+    """Реализация :class:`sdk.api.CommandApi` поверх шины команд."""
+
+    _sdk_api_kind = "commands"
+
+    def __init__(self, bus):
+        self._bus = bus
+
+    @classmethod
+    def wrap(cls, bus):
+        if getattr(bus, _SDK_API_MARKER, None) == cls._sdk_api_kind:
+            return bus
+        return cls(bus)
+
+    def register(self, name, handler):
+        return self._bus.register(name, handler)
+
+    def unregister(self, name):
+        return self._bus.unregister(name)
+
+    def has(self, name):
+        return self._bus.has(name)
+
+    def execute(self, name, *args, **kwargs):
+        return self._bus.execute(name, *args, **kwargs)
+
+
 # ---------------------------------------------------------------- tasks
 
 
@@ -358,6 +421,12 @@ class UiApiAdapter:
 
     def copy_to_clipboard(self, text):
         self._platform.clipboard_set(text)
+
+    def theme_color(self, name, fallback=None):
+        fn = getattr(self._platform, "theme_color", None)
+        if callable(fn):
+            return fn(name, fallback)
+        return fallback
 
     # --- команды платформы ------------------------------------------------
 

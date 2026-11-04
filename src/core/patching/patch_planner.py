@@ -15,17 +15,17 @@ from dataclasses import replace
 from pathlib import Path
 from typing import List, Optional
 
-from .document_diff import DocumentDiff, diff_documents
-from .document_model import (
+from ..documents.document_diff import DocumentDiff, diff_documents
+from ..documents.document_model import (
     LtxDocument,
     LtxEntry,
     LtxSectionModel,
     parse_ltx_document,
 )
-from .multiline_edit import analyze_multiline_edit
-from .single_line_edit import analyze_single_line_edit
+from ..documents.multiline_edit import analyze_multiline_edit
+from ..documents.single_line_edit import analyze_single_line_edit
 from .dltx_generator import DltxGenerator, PatchGenerationError
-from .fs import read_text_safe
+from ..fs import read_text_safe
 from .patch_models import PatchIssue, PatchOptions, PatchPlan, PatchTarget
 from .patch_targets import (
     choose_load_last_suffix,

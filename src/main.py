@@ -41,7 +41,8 @@ def main():
     from core.resolved_cache import ResolvedCache
     from core.xml_resolve_service import XmlResolveService
 
-    from sdk import SDK_VERSION, ModuleContext, ModuleLoader
+    from sdk import SDK_VERSION, ModuleContext
+    from ui.module_loader import ModuleLoader
     from sdk.events import Events
     from ui.bus import CommandBus, EventBus
     from ui.main_window import MainWindow
