@@ -512,7 +512,7 @@ class LtxLexer(QsciLexerCustom):
             tail = text[cursor:]
             self.setStyling(len(tail.encode("utf-8")), STYLE_DEFAULT)
 
-        if self._full_pass and self._total:
+        if self._total:
             self.progress.emit(min(chunk_end, self._total), self._total)
             editor.update()
 

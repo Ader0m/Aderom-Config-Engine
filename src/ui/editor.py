@@ -60,11 +60,13 @@ class _LexerScheduler(QObject):
         self._path = None
         self._generation = 0
         self._last_percent = -1
+        self._max_percent = -1
 
     def schedule(self, path):
         self._generation += 1
         self._path = str(path) if path is not None else None
         self._last_percent = -1
+        self._max_percent = -1
 
         if self._path is None:
             return
@@ -76,6 +78,7 @@ class _LexerScheduler(QObject):
         self._generation += 1
         self._path = None
         self._last_percent = -1
+        self._max_percent = -1
         self._set_lexer(None)
 
     def _apply(self, generation):
@@ -119,10 +122,18 @@ class _LexerScheduler(QObject):
             return
 
         percent = int(done * 100 / total) if total else 100
+
+        # Scintilla может запрашивать видимые диапазоны при прокрутке.
+        # Прогресс не должен откатываться назад, а «готово» — повторяться.
+        if percent < self._max_percent:
+            return
+        if percent == 100 and self._max_percent == 100:
+            return
         if percent < 100 and percent - self._last_percent < 2:
             return
 
         self._last_percent = percent
+        self._max_percent = max(self._max_percent, percent)
         name = Path(path).name
 
         if percent >= 100:
