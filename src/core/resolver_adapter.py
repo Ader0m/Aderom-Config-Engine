@@ -232,6 +232,100 @@ class LtxResolverAdapter:
 
         return "\n".join(lines), line_sources
 
+    def resolve_with_virtual_patch(
+        self,
+        root_path,
+        patch_filename: str,
+        patch_text: str,
+    ):
+        """Разрешить корень с виртуально подмешанным патчем.
+
+        Патч не записывается на диск: экземпляру резолвера подменяются
+        чтение файла, список файлов и загрузка include. Это позволяет
+        проверять патч тем же ``Resolver4``, который видит игра.
+
+        Returns:
+            dict: ``{section: {key: value}}`` для итогового состояния.
+        """
+        import os
+
+        from .fs import pattern_match
+
+        resolver = self._make(root_path)
+        root_path = Path(root_path)
+        patch_path = root_path.parent / patch_filename
+
+        patch_norm = os.path.normcase(os.path.abspath(str(patch_path)))
+        folder_norm = os.path.normcase(os.path.abspath(str(root_path.parent)))
+
+        original_read_lines = resolver._read_lines
+        original_load_file = resolver._load_file
+        original_file_list = resolver._file_list
+
+        def read_lines(path):
+            current = os.path.normcase(os.path.abspath(str(path)))
+            if current == patch_norm:
+                return str(patch_text).replace("\r\n", "\n").split("\n")
+            return original_read_lines(path)
+
+        def load_file(fn, inc_path, name, current_file_name, depth):
+            current = os.path.normcase(os.path.abspath(str(fn)))
+            if current == patch_norm:
+                previous = current_file_name[0]
+                current_file_name[0] = name
+                resolver._ltx_load(
+                    fn,
+                    inc_path,
+                    False,
+                    current_file_name,
+                    depth,
+                )
+                current_file_name[0] = previous
+                return
+            return original_load_file(
+                fn,
+                inc_path,
+                name,
+                current_file_name,
+                depth,
+            )
+
+        def file_list(folder, mask):
+            result = list(original_file_list(folder, mask))
+            current = os.path.normcase(os.path.abspath(str(folder)))
+            if current == folder_norm and pattern_match(
+                patch_filename,
+                mask,
+            ):
+                if patch_filename not in result:
+                    result.append(patch_filename)
+            return sorted(set(result), key=lambda value: value.lower())
+
+        resolver._read_lines = read_lines
+        resolver._load_file = load_file
+        resolver._file_list = file_list
+
+        resolver.load()
+
+        return self._to_section_dict(resolver)
+
+    @staticmethod
+    def _to_section_dict(resolver):
+        return {
+            section_name: {
+                item.first: item.second
+                for item in section.data
+                if getattr(item, "first", None)
+            }
+            for section_name, section in resolver.data
+        }
+
+    def resolve_sections(self, root_path):
+        """Разрешить корень и вернуть итоговые секции без патча."""
+        resolver = self._make(root_path)
+        resolver.load()
+        return self._to_section_dict(resolver)
+
     def assemble_to_file(self, root_path, out_dir, source_map=None) -> Path:
         """
         Собирает текст и записывает его во временный/служебный файл.

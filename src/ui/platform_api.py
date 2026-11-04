@@ -6,15 +6,26 @@ PlatformApi — сервисы UI-платформы и точка регист�
 """
 
 import os
+import re
 import time
+from dataclasses import replace
+from pathlib import Path
 
 from PyQt5.QtWidgets import QApplication, QFileDialog, QMessageBox
 
+from core.fs import read_text_safe, read_xml_text
 from sdk.events import Events
 
 from .file_open_router import FileOpenRouter
 from .input_bindings import MouseBindingManager, ShortcutManager
 from .module_windows import ModuleWindowManager
+from .project import ProjectError, ProjectService
+from .project_dialogs import (
+    ProjectCreateDialog,
+    ProjectLoadDialog,
+    ProjectPreviewDialog,
+    ProjectSettingsDialog,
+)
 
 
 def _path_key(path):
@@ -40,6 +51,16 @@ class PlatformApi:
         self._ctx_actions = []   # (label, handler(path), predicate(path)|None)
         self._log_buffer = []
 
+        projects_dir = getattr(paths, "projects_dir", None)
+        if projects_dir is None:
+            # Проекты лежат рядом с каталогом src, а не внутри него.
+            projects_dir = (
+                Path(getattr(paths, "app_dir", ".")).resolve().parent
+                / "projects"
+            )
+        self.project = ProjectService(projects_dir)
+        self._forest = None
+
         # Отложенная навигация: ключ — нормализованный путь файла.
         # Запрос живёт до события FILE_OPENED ровно для этого пути.
         self._pending_file_actions = {}
@@ -51,6 +72,10 @@ class PlatformApi:
         self._file_open_failed_sub = events.subscribe(
             Events.FILE_OPEN_FAILED,
             self._on_file_open_failed,
+        )
+        self._tree_ready_sub = events.subscribe(
+            Events.TREE_READY,
+            self._on_tree_ready,
         )
 
         commands.register("ui.open_file", self.request_open_file)
@@ -130,9 +155,455 @@ class PlatformApi:
         self._window_manager.bind_main_window(window)
         self._shortcut_manager.attach(window)
         self._mouse_manager.attach(window)
+
+        editor = getattr(window, "editor", None)
+        if editor is not None:
+            editor.document_changed.connect(self.on_document_changed)
+            editor.save_requested.connect(self.save_current_document)
+            editor.set_editable(self.can_edit_documents())
+
         buf, self._log_buffer = self._log_buffer, []
         for m in buf:
             window.log(m)
+
+        self._update_project_status()
+
+    # -------------------------------------------------- проект
+    def _on_tree_ready(self, forest):
+        self._forest = forest
+
+    def has_forest(self):
+        return self._forest is not None
+
+    def can_edit_documents(self):
+        return self.project.is_active
+
+    def document_text(self, path):
+        """Текст файла для редактора: черновик проекта или оригинал."""
+        path = Path(path)
+        if self.project.is_active:
+            text = self.project.get_text(path)
+            if text is not None:
+                return text
+        try:
+            if path.suffix.lower() == ".xml":
+                return read_xml_text(path)
+            return read_text_safe(path)
+        except OSError:
+            return ""
+
+    def on_document_changed(self, path, text):
+        if not self.project.is_active:
+            return
+        try:
+            self.project.update_draft(path, text)
+        except ProjectError as exc:
+            self.log("Проект: не удалось обновить черновик: %s" % exc)
+            return
+        self._update_project_status()
+
+    def on_resolved_changed(self, tab_id, view, text):
+        """Пользователь правит итоговый (resolved) текст."""
+        if not self.project.is_active:
+            return
+
+        title = "%s (resolved)" % Path(view.root_path).name
+
+        try:
+            self.project.update_resolved_draft(
+                tab_id,
+                view.root_path,
+                title,
+                view.baseline_text,
+                text,
+                line_sources=view.line_sources,
+            )
+        except ProjectError as exc:
+            self.log("Проект: не удалось обновить resolved-черновик: %s" % exc)
+            return
+
+        self._update_project_status()
+
+    def save_resolved_document(self, tab_id, view):
+        if not self.project.is_active:
+            self.set_status(
+                "Создайте проект, чтобы сохранять изменения",
+                7000,
+            )
+            return
+
+        try:
+            self.project.save_resolved_draft(tab_id, view.text())
+        except ProjectError as exc:
+            self.show_error(str(exc))
+            return
+
+        if self.window is not None:
+            self.window.editor.mark_tab_clean(tab_id)
+
+        self.set_status("Resolved сохранён в проекте", 5000)
+        self.log("Проект: сохранён resolved-черновик %s" % tab_id)
+        self._update_project_status()
+
+    def save_current_document(self, path=None, text=None):
+        if not self.project.is_active:
+            self.set_status(
+                "Создайте проект, чтобы сохранять изменения файлов",
+                7000,
+            )
+            return
+
+        if path is None or text is None:
+            editor = None
+            if self.window is not None:
+                editor = self.window.editor.current_editor()
+            if editor is None or not editor.current_file:
+                self.set_status("Нет активного текстового файла", 5000)
+                return
+            path = editor.current_file
+            text = editor.text()
+
+        try:
+            self.project.save_draft(path, text)
+        except ProjectError as exc:
+            self.show_error(str(exc))
+            return
+
+        if self.window is not None:
+            self.window.editor.mark_clean(path, text)
+
+        self.set_status(
+            "Сохранено в проекте: %s" % Path(path).name,
+            5000,
+        )
+        self.log("Проект: сохранён черновик %s" % Path(path).name)
+        self._update_project_status()
+
+    def create_project(self):
+        if self.window is None:
+            return
+
+        dialog = ProjectCreateDialog(self.window)
+        if not dialog.exec_():
+            return
+
+        name, modules, save_mode = dialog.values()
+
+        try:
+            project = self.project.create(name, modules, save_mode)
+        except ProjectError as exc:
+            self.show_error(str(exc))
+            return
+
+        self.window.editor.set_editable(True)
+        self._reload_open_documents()
+        self._update_project_status()
+        self.log("Проект создан: %s" % project.name)
+        self.set_status("Проект создан: %s" % project.name, 5000)
+
+    def load_project(self):
+        if self.window is None:
+            return
+
+        projects = self.project.list_projects()
+        if not projects:
+            QMessageBox.information(
+                self.window,
+                "Проект",
+                "Сохранённых проектов пока нет.",
+            )
+            return
+
+        dialog = ProjectLoadDialog(projects, self.window)
+        if not dialog.exec_():
+            return
+
+        project_id = dialog.selected_id()
+        if not project_id:
+            return
+
+        try:
+            project = self.project.load(project_id)
+        except ProjectError as exc:
+            self.show_error(str(exc))
+            return
+
+        self.window.editor.set_editable(True)
+        self._reload_open_documents()
+        self._update_project_status()
+        self.log("Проект загружен: %s" % project.name)
+        self.set_status("Проект загружен: %s" % project.name, 5000)
+
+    def _delete_project(self):
+        try:
+            self.project.delete_active_project()
+        except ProjectError as exc:
+            self.show_error(str(exc))
+            return False
+
+        if self.window is not None:
+            self.window.editor.set_editable(False)
+
+        self._update_project_status()
+        self.log("Проект удалён")
+        self.set_status("Проект удалён", 5000)
+        return True
+
+    def project_settings(self):
+        if self.window is None:
+            return
+
+        if not self.project.is_active:
+            QMessageBox.information(
+                self.window,
+                "Проект",
+                "Сначала создайте или загрузите проект.",
+            )
+            return
+
+        dialog = ProjectSettingsDialog(
+            self.project.active,
+            self.window,
+            on_delete=self._delete_project,
+        )
+        if not dialog.exec_():
+            return
+
+        if dialog.deleted:
+            return
+
+        try:
+            project = self.project.set_patch_mode(dialog.save_mode())
+        except ProjectError as exc:
+            self.show_error(str(exc))
+            return
+
+        self._update_project_status()
+        self.log(
+            "Проект: режим сохранения изменён на %s"
+            % project.save_mode
+        )
+        self.set_status(
+            "Режим проекта: %s"
+            % (
+                "all in one"
+                if project.save_mode == "all_in_one"
+                else "one by one"
+            ),
+            5000,
+        )
+
+    def _reload_open_documents(self):
+        if self.window is None:
+            return
+        editor = getattr(self.window, "editor", None)
+        if editor is None:
+            return
+
+        for path in editor.open_paths():
+            text = self.document_text(path)
+            editor.reload_path(path, text)
+            editor.mark_clean(path, text)
+
+        for tab_id, view in editor.resolved_tabs():
+            draft = self.project.get_resolved_draft(tab_id)
+            if draft is None:
+                continue
+            view.set_content(
+                draft.current_text,
+                view.line_sources,
+                view.root_path,
+            )
+            view.mark_clean(draft.saved_text)
+            editor.set_tab_dirty(tab_id, draft.is_dirty)
+
+    def autosave_project(self):
+        if not self.project.is_active:
+            return
+
+        try:
+            saved = self.project.autosave()
+        except Exception as exc:
+            self.log("Проект: ошибка автосохранения: %s" % exc)
+            return
+
+        if not saved:
+            return
+
+        if self.window is not None:
+            for event in saved:
+                if event.kind == "file":
+                    self.window.editor.mark_clean(event.path, event.text)
+                else:
+                    self.window.editor.mark_tab_clean(event.key)
+
+        self.set_status(
+            "Автосохранение проекта: %d файл(ов)" % len(saved),
+            4000,
+        )
+        self.log("Проект: автосохранено файлов %d" % len(saved))
+        self._update_project_status()
+
+    def on_app_close(self):
+        if not self.project.is_active:
+            return
+        try:
+            self.project.flush()
+        except Exception as exc:
+            self.log("Проект: ошибка сохранения при закрытии: %s" % exc)
+
+    def build_patch_preview(self):
+        if self.window is None:
+            return
+
+        if not self.project.is_active:
+            self.show_error("Создайте или загрузите проект.")
+            return
+
+        if self._forest is None:
+            self.show_error(
+                "Дерево не построено: сначала выполните «Чистый запуск»."
+            )
+            return
+
+        if not self.project.changed_drafts() and not (
+            self.project.changed_resolved_drafts()
+        ):
+            QMessageBox.information(
+                self.window,
+                "Проект",
+                "В проекте нет изменённых файлов.",
+            )
+            return
+
+        self.autosave_project()
+        self.set_status("Подготовка патча проекта…")
+        self.log("Проект: подготовка патча…")
+
+        forest = self._forest
+
+        def work(log):
+            return self.project.build_preview(
+                self.services,
+                forest,
+                log=log,
+            )
+
+        self.tasks.run(
+            work,
+            on_done=self._on_preview_ready,
+            on_log=self.log,
+        )
+
+    def _on_preview_ready(self, preview, err):
+        if err is not None:
+            self.set_status("Ошибка подготовки патча")
+            self.log("Проект: ошибка подготовки патча: %s" % err)
+            self.show_error(str(err))
+            return
+
+        if preview is None:
+            return
+
+        self.set_status(
+            "Патч подготовлен: %d файл(ов)" % len(preview.items),
+            5000,
+        )
+
+        dialog = ProjectPreviewDialog(
+            preview,
+            self.window,
+            on_write=self.write_preview,
+        )
+        dialog.exec_()
+
+    def write_preview(self, preview):
+        if self._forest is None:
+            self.show_error("Нет построенного дерева.")
+            return False
+
+        directory = QFileDialog.getExistingDirectory(
+            self.window,
+            "Выберите каталог, в котором будет создан патч-мод",
+            "",
+            QFileDialog.ShowDirsOnly,
+        )
+        if not directory:
+            return False
+
+        safe_name = re.sub(
+            r'[<>:"/\\|?*]+',
+            "_",
+            preview.project.name,
+        ).strip(" .") or "ACE Patch"
+
+        mod_dir = Path(directory) / ("ACE Patch - " + safe_name)
+        written = []
+        skipped = []
+
+        for item in preview.items:
+            if not item.ok:
+                skipped.append(item.title)
+                continue
+
+            plan = item.plan
+            if plan.needs_confirmation:
+                plan = replace(plan, confirmed=True)
+            generated = replace(item.generated, plan=plan)
+
+            try:
+                paths = self.services.write_patch(
+                    generated,
+                    mod_dir,
+                    forbidden_roots=[Path(self._forest.scan_dir)],
+                    overwrite=False,
+                )
+                written.extend(paths)
+            except Exception as exc:
+                self.show_error(
+                    "Не удалось записать %s:\n%s"
+                    % (item.title, exc)
+                )
+                return False
+
+        if not written:
+            self.show_error("Патчи не записаны.")
+            return False
+
+        self.set_status(
+            "Патч-мод создан: %s" % mod_dir.name,
+            7000,
+        )
+        self.log("Проект: записано файлов патча %d" % len(written))
+
+        if skipped:
+            QMessageBox.warning(
+                self.window,
+                "Проект",
+                "Записаны не все файлы. Пропущены:\n%s"
+                % "\n".join(skipped),
+            )
+        else:
+            QMessageBox.information(
+                self.window,
+                "Проект",
+                "Патч-мод создан:\n%s" % mod_dir,
+            )
+
+        return True
+
+    def _update_project_status(self):
+        if self.window is None:
+            return
+        setter = getattr(self.window, "set_project_status", None)
+        if callable(setter):
+            setter(self.project.status_text())
+
+        # Держим доступность «Сформировать патч» в актуальном состоянии,
+        # не дожидаясь повторного открытия меню.
+        updater = getattr(self.window, "_update_project_menu", None)
+        if callable(updater):
+            updater()
 
     # -------------------------------------------------- ui-сервисы
     def log(self, msg):
@@ -345,7 +816,18 @@ class PlatformApi:
 
         started = time.perf_counter()
         view = ResolvedView()
-        view.set_content(text, line_sources, root_path)
+        view.set_editable(self.can_edit_documents())
+
+        existing = (
+            self.project.get_resolved_draft(tab_id)
+            if self.project.is_active
+            else None
+        )
+        display_text = existing.current_text if existing is not None else text
+
+        view.set_content(display_text, line_sources, root_path)
+        if existing is not None:
+            view.mark_clean(existing.saved_text)
         content_elapsed = time.perf_counter() - started
 
         view.source_activated.connect(
@@ -353,6 +835,22 @@ class PlatformApi:
         )
         view.diagnostic.connect(lambda msg: self.log("[resolved] %s" % msg))
         view.diagnostic.connect(lambda msg: self.set_status(msg, 8000))
+        view.content_changed.connect(
+            lambda new_text, tid=tab_id, v=view: self.on_resolved_changed(
+                tid,
+                v,
+                new_text,
+            )
+        )
+        view.save_requested.connect(
+            lambda tid=tab_id, v=view: self.save_resolved_document(tid, v)
+        )
+        view.dirty_changed.connect(
+            lambda dirty, tid=tab_id: self.window.editor.set_tab_dirty(
+                tid,
+                dirty,
+            )
+        )
 
         started = time.perf_counter()
         self.window.editor.open_tab(
@@ -363,6 +861,9 @@ class PlatformApi:
         )
         tab_elapsed = time.perf_counter() - started
         self._log_slow_view("resolved", title, content_elapsed, tab_elapsed)
+
+        if existing is not None and existing.is_dirty:
+            self.window.editor.set_tab_dirty(tab_id, True)
 
         if line_number is not None:
             view.goto_line(int(line_number))
@@ -378,6 +879,7 @@ class PlatformApi:
         has_sources = any(src is not None for src in sources)
         started = time.perf_counter()
         view = ResolvedView()
+        view.set_editing_supported(False)
         view.set_content(
             text,
             sources,

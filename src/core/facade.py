@@ -13,6 +13,7 @@ CoreServices — тонкий фасад над сервисами ядра.
 специализированным сервисам ядра.
 """
 
+from dataclasses import replace
 from pathlib import Path
 
 from .external import open_in_notepad_pp, open_with_shell
@@ -20,6 +21,11 @@ from .fs import find_system_ltx, detect_config_dir
 from .tree_query_service import search_nodes, sort_nodes
 from .xml_resolve_service import XmlResolveService
 from .prebuild_service import PrebuildService
+from .patch_models import VerificationResult
+from .patch_planner import PatchPlanner
+from .dltx_generator import DltxGenerator
+from .patch_verifier import ModelPatchVerifier, ResolverPatchVerifier
+from .patch_writer import PatchWriter
 
 
 class CoreServices:
@@ -57,6 +63,17 @@ class CoreServices:
         self.generated_dir = Path(generated_dir)
         self.xml = xml_resolve_service or XmlResolveService()
         self.prebuild = PrebuildService(resolver_service, self.xml)
+
+        # Патч-конвейер: планирование, генерация, проверка и запись.
+        # Запись по умолчанию требует успешной проверки.
+        self.patch = PatchPlanner(resolver_service, cache)
+        self.dltx = DltxGenerator(resolver_service, cache)
+        self.patch_verifier = ModelPatchVerifier()
+        self.resolver_patch_verifier = ResolverPatchVerifier()
+        self.patch_writer = PatchWriter(
+            require_verification=True,
+            require_resolver=True,
+        )
 
         # Для обратной совместимости (модули пока используют старые имена)
         self._adapter = None  # Устаревшее, использовать через .resolver
@@ -279,3 +296,71 @@ class CoreServices:
         result = self.resolve_xml(path, config_dir, log=log, dxml=dxml)
         out = self.assembly.write_generated_xml(path, result.text)
         return out
+
+    # -------------------------------------------------- патч-конвейер
+
+    def plan_document_patch(
+        self,
+        source_path,
+        baseline_text,
+        draft_text,
+        forest,
+        options=None,
+    ):
+        """Построить план изменения документа (без записи)."""
+        return self.patch.plan_document_change(
+            source_path,
+            baseline_text,
+            draft_text,
+            forest,
+            options=options,
+        )
+
+    def generate_patch(self, plan):
+        """Сгенерировать патч и проверить доступными способами."""
+        generated = self.dltx.generate(plan)
+        resolver = self.verify_patch_with_resolver(generated)
+
+        # У объединённого плана нет одного документа-донора diff,
+        # поэтому модельная проверка неприменима. Его проверяет Resolver4.
+        if plan.diff is None:
+            return replace(generated, verification=resolver)
+
+        model = self.patch_verifier.verify(generated)
+
+        combined = VerificationResult(
+            ok=model.ok and resolver.ok,
+            checks=tuple(model.checks) + tuple(resolver.checks),
+            issues=tuple(model.issues) + tuple(resolver.issues),
+        )
+
+        return replace(generated, verification=combined)
+
+    def verify_patch(self, generated):
+        """Проверить уже сгенерированный патч моделью документа."""
+        return self.patch_verifier.verify(generated)
+
+    def verify_patch_with_resolver(self, generated):
+        """Проверить патч настоящим Resolver4 без записи в VFS."""
+        adapter = None
+        getter = getattr(self.resolver, "get_adapter", None)
+        if callable(getter):
+            adapter = getter()
+
+        verifier = ResolverPatchVerifier(adapter)
+        return verifier.verify(generated)
+
+    def write_patch(
+        self,
+        generated,
+        patch_mod_root,
+        forbidden_roots=(),
+        overwrite=False,
+    ):
+        """Записать проверенный патч в отдельный мод."""
+        return self.patch_writer.write(
+            generated,
+            patch_mod_root,
+            forbidden_roots=forbidden_roots,
+            overwrite=overwrite,
+        )

@@ -103,7 +103,11 @@ def main():
     events = EventBus()
     commands = CommandBus()
     tasks = TaskService()
-    paths = SimpleNamespace(app_dir=app_dir, generated_dir=services.generated_dir)
+    paths = SimpleNamespace(
+        app_dir=app_dir,
+        generated_dir=services.generated_dir,
+        projects_dir=app_dir.parent / "projects",
+    )
 
     api = PlatformApi(events, commands, tasks, services, paths)
 

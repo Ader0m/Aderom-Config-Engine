@@ -4,7 +4,7 @@
 import logging
 from pathlib import Path
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import QMenu, QTabWidget, QWidget
 
 from sdk.events import Events
@@ -19,7 +19,10 @@ DEFAULT_TAB_ID = "ui.editor"
 class EditorTabs(QTabWidget):
     """Контейнер вкладок. Содержимое вкладок создают модули."""
 
-    def __init__(self, events=None, commands=None, parent=None):
+    document_changed = pyqtSignal(str, str)
+    save_requested = pyqtSignal(str, str)
+
+    def __init__(self, events=None, commands=None, parent=None, can_edit=None):
         super().__init__(parent)
 
         self._events = events
@@ -27,6 +30,7 @@ class EditorTabs(QTabWidget):
         self._tab_ids = {}
         self._tab_source_paths = {}
         self._default_editor = None
+        self._can_edit = can_edit or (lambda: False)
 
         self.setTabsClosable(True)
         self.tabCloseRequested.connect(self._on_close_requested)
@@ -44,9 +48,110 @@ class EditorTabs(QTabWidget):
             return self._default_editor
 
         editor = CodeEditor()
+        editor.set_editable(self._can_edit())
+        editor.content_changed.connect(
+            lambda text, e=editor: self._on_editor_changed(e, text)
+        )
+        editor.save_requested.connect(
+            lambda e=editor: self._on_editor_save(e)
+        )
+        editor.dirty_changed.connect(
+            lambda dirty, e=editor: self._on_editor_dirty(e, dirty)
+        )
         self._default_editor = editor
         self._add_tab(DEFAULT_TAB_ID, "Редактор", editor)
         return editor
+
+    # -------------------------------------------------- проект и черновик
+    def _on_editor_changed(self, editor, text):
+        path = editor.current_file
+        if path:
+            self.document_changed.emit(str(path), text)
+
+    def _on_editor_save(self, editor):
+        path = editor.current_file
+        if path:
+            self.save_requested.emit(str(path), editor.text())
+
+    def _on_editor_dirty(self, editor, dirty):
+        tab_id = self._tab_id_for_widget(editor)
+        if tab_id is not None:
+            self.set_tab_dirty(tab_id, dirty)
+
+    def set_tab_dirty(self, tab_id, dirty):
+        widget = self._tab_ids.get(tab_id)
+        if widget is None:
+            return
+        index = self.indexOf(widget)
+        if index < 0:
+            return
+
+        title = self.tabText(index)
+        if dirty:
+            if not title.startswith("* "):
+                self.setTabText(index, "* " + title)
+        else:
+            if title.startswith("* "):
+                self.setTabText(index, title[2:])
+
+    def mark_tab_clean(self, tab_id):
+        widget = self._tab_ids.get(tab_id)
+        marker = getattr(widget, "mark_clean", None)
+        if callable(marker):
+            marker()
+        self.set_tab_dirty(tab_id, False)
+
+    def set_editable(self, editable):
+        """Применить режим редактирования ко всем текстовым вкладкам."""
+        for widget in self._tab_ids.values():
+            setter = getattr(widget, "set_editable", None)
+            if callable(setter):
+                setter(editable)
+
+    def mark_clean(self, path, text=None):
+        """Снять признак несохранённых изменений у вкладки файла."""
+        path = str(path)
+        for widget in self._tab_ids.values():
+            if not isinstance(widget, CodeEditor):
+                continue
+            if str(widget.current_file) != path:
+                continue
+            if text is not None and widget.text() != str(text):
+                continue
+            widget.mark_clean(text)
+
+    def reload_path(self, path, text):
+        """Перечитать открытую вкладку файла из проекта."""
+        path = str(path)
+        for widget in self._tab_ids.values():
+            if not isinstance(widget, CodeEditor):
+                continue
+            if str(widget.current_file) != path:
+                continue
+            widget.open_file(path, text=text)
+
+    def current_editor(self):
+        widget = self.currentWidget()
+        return widget if isinstance(widget, CodeEditor) else None
+
+    def open_paths(self):
+        """Пути, открытые в текстовых вкладках."""
+        result = []
+        for widget in self._tab_ids.values():
+            if isinstance(widget, CodeEditor) and widget.current_file:
+                result.append(widget.current_file)
+        return result
+
+    def resolved_tabs(self):
+        """Открытые resolved-вкладки: ``(tab_id, widget)``."""
+        result = []
+        for tab_id, widget in self._tab_ids.items():
+            if hasattr(widget, "root_path") and hasattr(
+                widget,
+                "line_sources",
+            ):
+                result.append((tab_id, widget))
+        return result
 
     # -------------------------------------------------- вкладки модулей
     def open_tab(self, tab_id, title, widget, source_path=None):
@@ -115,13 +220,14 @@ class EditorTabs(QTabWidget):
         editor = self._active_editor()
         return editor.current_file if editor is not None else None
 
-    def open_file(self, file_path):
+    def open_file(self, file_path, text=None):
         path = Path(file_path)
         editor = self._ensure_default_tab()
         self.setCurrentWidget(editor)
-        editor.open_file(file_path)
+        editor.set_editable(self._can_edit())
+        editor.open_file(file_path, text=text)
 
-        if path.is_file():
+        if path.is_file() or text is not None:
             self._present_default_tab(path.name, str(path), path)
 
     def show_text(self, text, label, readonly=True, source_path=None):

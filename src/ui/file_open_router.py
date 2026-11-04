@@ -19,7 +19,21 @@ class TextEditorHandler(FileOpenHandler):
 
     def open(self, path, api):
         api.log("Открытие файла: %s" % Path(path).name)
-        self.editor.open_file(str(path))
+        text = None
+        reader = getattr(api, "document_text", None)
+        if callable(reader):
+            text = reader(path)
+
+        can_edit = getattr(api, "can_edit_documents", None)
+        if callable(can_edit) and not can_edit():
+            setter = getattr(api, "set_status", None)
+            if callable(setter):
+                setter(
+                    "Проект не создан: файл открыт только для чтения",
+                    5000,
+                )
+
+        self.editor.open_file(str(path), text=text)
         return True
 
 

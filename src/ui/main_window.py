@@ -12,6 +12,7 @@ from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
     QAction,
     QDockWidget,
+    QLabel,
     QMainWindow,
     QMenu,
     QShortcut,
@@ -79,6 +80,7 @@ class MainWindow(QMainWindow):
         self.editor = EditorTabs(
             events=self.api.events,
             commands=self.api.commands,
+            can_edit=self.api.can_edit_documents,
         )
         self.api.router.set_default(TextEditorHandler(self.editor))
 
@@ -112,7 +114,12 @@ class MainWindow(QMainWindow):
 
     def _init_menu(self):
         menubar = self.menuBar()
-        menus = {}
+
+        # «Файл» и «Проект» стоят рядом и создаются первыми, чтобы
+        # регистрации модулей не меняли их порядок.
+        file_menu = menubar.addMenu("Файл")
+        project_menu = menubar.addMenu("Проект")
+        menus = {"Файл": file_menu, "Проект": project_menu}
 
         for title, label, callback, shortcut, action in self.api.menu_registrations:
             m = menus.get(title)
@@ -131,7 +138,6 @@ class MainWindow(QMainWindow):
             )
             m.addAction(a)
 
-        file_menu = menus.get("Файл") or menubar.addMenu("Файл")
         file_menu.addSeparator()
 
         exit_action = QAction("Выход", self)
@@ -139,8 +145,42 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
+        self.project_create_action = QAction("Создать проект...", self)
+        self.project_create_action.triggered.connect(
+            self.api.create_project
+        )
+        project_menu.addAction(self.project_create_action)
+
+        self.project_load_action = QAction("Загрузить проект...", self)
+        self.project_load_action.triggered.connect(self.api.load_project)
+        project_menu.addAction(self.project_load_action)
+
+        project_menu.addSeparator()
+
+        self.project_settings_action = QAction("Настройки проекта...", self)
+        self.project_settings_action.triggered.connect(
+            self.api.project_settings
+        )
+        self.project_settings_action.setEnabled(False)
+        self.project_settings_action.setVisible(False)
+        project_menu.addAction(self.project_settings_action)
+
+        project_menu.addSeparator()
+
+        self.project_patch_action = QAction("Сформировать патч...", self)
+        self.project_patch_action.triggered.connect(
+            self.api.build_patch_preview
+        )
+        self.project_patch_action.setEnabled(False)
+        project_menu.addAction(self.project_patch_action)
+
+        project_menu.aboutToShow.connect(self._update_project_menu)
+
     def _init_statusbar(self):
         self.statusBar().showMessage("Готов")
+
+        self.project_label = QLabel("Проект: не создан")
+        self.statusBar().addPermanentWidget(self.project_label)
 
         self.prebuild_panel = PrebuildPanel(self)
         self.statusBar().addPermanentWidget(self.prebuild_panel)
@@ -149,6 +189,29 @@ class MainWindow(QMainWindow):
         self._prebuild_timer.setInterval(250)
         self._prebuild_timer.timeout.connect(self._update_prebuild)
         self._prebuild_timer.start()
+
+        # Автосохранение черновиков проекта раз в минуту.
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setInterval(60_000)
+        self._autosave_timer.timeout.connect(self.api.autosave_project)
+        self._autosave_timer.start()
+
+    def set_project_status(self, text):
+        self.project_label.setText(str(text))
+
+    def _update_project_menu(self):
+        project = getattr(self.api, "project", None)
+        active = bool(getattr(project, "is_active", False))
+        has_changes = False
+
+        if active:
+            has_changes = bool(project.changed_drafts()) or bool(
+                project.changed_resolved_drafts()
+            )
+
+        self.project_settings_action.setVisible(active)
+        self.project_settings_action.setEnabled(active)
+        self.project_patch_action.setEnabled(active and has_changes)
 
     def _update_prebuild(self):
         services = getattr(self.api, "services", None)
@@ -225,6 +288,17 @@ class MainWindow(QMainWindow):
         self._tree_ready_sub.unsubscribe()
         if hasattr(self, "_prebuild_timer"):
             self._prebuild_timer.stop()
+        if hasattr(self, "_autosave_timer"):
+            self._autosave_timer.stop()
+
+        # Последнее автосохранение черновиков проекта.
+        closers = getattr(self.api, "on_app_close", None)
+        if callable(closers):
+            try:
+                closers()
+            except Exception:
+                pass
+
         services = getattr(self.api, "services", None)
         stop_fn = getattr(services, "stop_prebuild", None)
         if callable(stop_fn):

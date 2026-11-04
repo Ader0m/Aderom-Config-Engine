@@ -142,6 +142,10 @@ class EditorFindBar(QWidget):
 
 
 class CodeEditor(QWidget):
+    content_changed = pyqtSignal(str)
+    save_requested = pyqtSignal()
+    dirty_changed = pyqtSignal(bool)
+
     def __init__(self, parent=None):
         super().__init__(parent)
 
@@ -149,6 +153,11 @@ class CodeEditor(QWidget):
         # QScintilla не забирает владение Python-объектом лексера,
         # поэтому сильную ссылку нужно держать здесь.
         self._lexer = None
+        self._loading = False
+        self._editable = False
+        self._readonly_content = True
+        self._baseline_text = ""
+        self._dirty = False
 
         self._init_ui()
         self._init_shortcuts()
@@ -169,6 +178,7 @@ class CodeEditor(QWidget):
 
         self.editor = QsciScintilla()
         self._setup_editor()
+        self.editor.textChanged.connect(self._on_text_changed)
 
         self.find_bar = EditorFindBar(self.editor)
         layout.addWidget(self.find_bar)
@@ -197,6 +207,12 @@ class CodeEditor(QWidget):
             self,
             context=Qt.WidgetWithChildrenShortcut,
             activated=self.find_bar.find_prev,
+        )
+        QShortcut(
+            QKeySequence("Ctrl+S"),
+            self,
+            context=Qt.WidgetWithChildrenShortcut,
+            activated=self._request_save,
         )
 
     # -------------------------------------------------- оформление
@@ -230,6 +246,8 @@ class CodeEditor(QWidget):
         self.editor.setIndentationWidth(4)
         self.editor.setIndentationsUseTabs(False)
         self.editor.setWrapMode(QsciScintilla.WrapNone)
+        # До создания проекта файлы доступны только для чтения.
+        self.editor.setReadOnly(True)
 
     def _set_lexer(self, lexer):
         """Установить лексер, удержав его Python-ссылку.
@@ -281,30 +299,85 @@ class CodeEditor(QWidget):
         ``open_file``, и ``show_text`` делегируют сюда, поэтому оба пути
         получают одинаковую подсветку синтаксиса.
         """
+        text = str(text or "")
+        self._loading = True
+        self._readonly_content = bool(readonly)
+
         self.editor.setReadOnly(False)
         self.editor.setText(text)
-        self.editor.setReadOnly(bool(readonly))
+        self.editor.setReadOnly(
+            self._readonly_content or not self._editable
+        )
+
+        self._baseline_text = text
+        self._set_dirty(False)
 
         self.current_file = str(source_path) if source_path is not None else None
         self.file_label.setText(str(label))
         self._apply_lexer(source_path)
+        self._loading = False
 
         # Фокус в редактор: без этого внутренняя карта клавиш Scintilla
         # (undo/redo/копирование/поиск) "не работает" для пользователя.
         self.editor.setFocus(Qt.OtherFocusReason)
 
-    def open_file(self, file_path):
+    def open_file(self, file_path, text=None):
         path = Path(file_path)
 
-        if not path.is_file():
-            return
+        if text is None:
+            if not path.is_file():
+                return
+            text = self._read_text(path)
 
         self._show_content(
-            self._read_text(path),
+            text,
             str(path),
             source_path=path,
             readonly=False,
         )
+
+    # -------------------------------------------------- проект
+    def set_editable(self, editable):
+        """Разрешить или запретить редактирование текущего содержимого."""
+        self._editable = bool(editable)
+        self.editor.setReadOnly(
+            self._readonly_content or not self._editable
+        )
+
+    @property
+    def is_editable(self):
+        return self._editable and not self._readonly_content
+
+    @property
+    def is_dirty(self):
+        return self._dirty
+
+    def text(self) -> str:
+        return self.editor.text()
+
+    def mark_clean(self, text=None):
+        """Зафиксировать текущий текст как сохранённый в проекте."""
+        self._baseline_text = self.text() if text is None else str(text)
+        self._set_dirty(self.text() != self._baseline_text)
+
+    def _set_dirty(self, dirty):
+        dirty = bool(dirty)
+        if dirty == self._dirty:
+            return
+        self._dirty = dirty
+        self.dirty_changed.emit(dirty)
+
+    def _on_text_changed(self):
+        if self._loading:
+            return
+
+        text = self.text()
+        self.content_changed.emit(text)
+        self._set_dirty(text != self._baseline_text)
+
+    def _request_save(self):
+        if self.is_editable:
+            self.save_requested.emit()
 
     def goto_line(self, line_number):
         """Перейти к указанной строке (1-based)."""
@@ -545,6 +618,9 @@ class ResolvedView(QWidget):
     source_activated = pyqtSignal(object, str)  # (path, search_text)
     source_raw_activated = pyqtSignal(object, str)  # сырой файл (XML/script)
     diagnostic = pyqtSignal(str)
+    content_changed = pyqtSignal(str)
+    save_requested = pyqtSignal()
+    dirty_changed = pyqtSignal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -552,6 +628,11 @@ class ResolvedView(QWidget):
         self._line_sources = []
         self._syncing = False
         self._source_visible = True
+        self._loading = False
+        self._editable = False
+        self._editing_supported = True
+        self._baseline_text = ""
+        self._dirty = False
         self._init_ui()
         self._init_shortcuts()
 
@@ -594,6 +675,7 @@ class ResolvedView(QWidget):
 
         self.editor = QsciScintilla()
         self._setup_editor()
+        self.editor.textChanged.connect(self._on_text_changed)
 
         self.source_list = SourceListView()
         self.source_list.lineActivated.connect(self._on_source_activated)
@@ -647,6 +729,12 @@ class ResolvedView(QWidget):
             context=Qt.WidgetWithChildrenShortcut,
             activated=self.find_bar.find_prev,
         )
+        QShortcut(
+            QKeySequence("Ctrl+S"),
+            self,
+            context=Qt.WidgetWithChildrenShortcut,
+            activated=self._request_save,
+        )
 
     def _setup_editor(self):
         font = QFont(PALETTE.editor_font_family, PALETTE.editor_font_size_pt)
@@ -680,6 +768,58 @@ class ResolvedView(QWidget):
         self.editor.setLexer(self._lexer)
 
     # -------------------------------------------------- публичные API
+    @property
+    def root_path(self):
+        return self._root_path
+
+    @property
+    def line_sources(self):
+        return tuple(self._line_sources)
+
+    @property
+    def baseline_text(self):
+        return self._baseline_text
+
+    @property
+    def is_dirty(self):
+        return self._dirty
+
+    def text(self):
+        return self.editor.text()
+
+    def set_editing_supported(self, supported):
+        """Разрешить или запретить правку этого вида в принципе."""
+        self._editing_supported = bool(supported)
+        if not self._editing_supported:
+            self._editable = False
+            self.editor.setReadOnly(True)
+
+    def set_editable(self, editable):
+        self._editable = bool(editable) and self._editing_supported
+        self.editor.setReadOnly(not self._editable)
+
+    def mark_clean(self, text=None):
+        self._baseline_text = self.text() if text is None else str(text)
+        self._set_dirty(self.text() != self._baseline_text)
+
+    def _set_dirty(self, dirty):
+        dirty = bool(dirty)
+        if dirty == self._dirty:
+            return
+        self._dirty = dirty
+        self.dirty_changed.emit(dirty)
+
+    def _on_text_changed(self):
+        if self._loading:
+            return
+        text = self.text()
+        self.content_changed.emit(text)
+        self._set_dirty(text != self._baseline_text)
+
+    def _request_save(self):
+        if self._editable:
+            self.save_requested.emit()
+
     def set_sources_visible(self, visible):
         self._source_visible = bool(visible)
         self.source_header.setVisible(self._source_visible)
@@ -693,9 +833,14 @@ class ResolvedView(QWidget):
 
         self.set_sources_visible(sources_visible)
 
+        text = str(text or "")
+        self._loading = True
         self.editor.setReadOnly(False)
         self.editor.setText(text)
-        self.editor.setReadOnly(True)
+        self.editor.setReadOnly(not self._editable)
+        self._baseline_text = text
+        self._set_dirty(False)
+        self._loading = False
 
         # beginResetModel/endResetModel внутри set_sources полностью
         # заменяют данные панели; clear() не нужен (и у QListView его нет).
