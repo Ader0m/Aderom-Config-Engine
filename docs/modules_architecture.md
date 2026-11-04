@@ -193,11 +193,16 @@ include-дерево, подпись `dxml_core.script`/`modxml_*.script` и в�
 для сырых/VFS-узлов.
 Для ссылок на ресурсы секции (`icons_texture` → `.dds`, `visual` →
 `.ogf`) узел дополнительно содержит `target_path` — полный путь к
-файлу от корня VFS (`textures/` или `meshes/`). Такие узлы
-открываются приложением Windows через `ctx.services.open_with_shell`;
-если ассоциация не настроена, оболочка показывает диалог «Открыть с
-помощью…». Тип каждой связи (`declaration`, `inheritance`,
-`ltx_reference`, `script_reference`, `xml_reference`,
+файлу от корня VFS (`textures/` или `meshes/`). Текстуры открываются
+приложением Windows через `ctx.services.open_with_shell`; для запуска
+используется `physical_path`: ядро разрешает VFS-путь в реальный через
+`GetFinalPathNameByHandle`/`Path.resolve`, а при активном MO2/usvfs и
+недоступности реального пути создаёт временную копию. Если ассоциация
+не настроена, оболочка показывает диалог «Открыть с помощью…».
+Визуальные модели `.ogf` обычно упакованы в игровые архивы, поэтому
+открытие для них заменено заглушкой: показывается сообщение, внешняя
+программа не запускается. Тип каждой связи (`declaration`,
+`inheritance`, `ltx_reference`, `script_reference`, `xml_reference`,
 `texture_reference`, `visual_reference`) показывается маркером в
 начале строки и цветом из `ui.theme.PALETTE`; файл выводится только
 именем, полный путь остаётся в tooltip и в узле.

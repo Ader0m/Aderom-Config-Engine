@@ -236,11 +236,13 @@ class ReferenceGraphTest(unittest.TestCase):
         tex_node = by_type["texture_reference"]
         self.assertEqual(tex_node.display_name, "ui_icon.dds")
         self.assertEqual(tex_node.target_path, texture)
+        self.assertEqual(tex_node.physical_path, texture)
         self.assertEqual(tex_node.first_match_line, 2)
 
         visual_node = by_type["visual_reference"]
         self.assertEqual(visual_node.display_name, "mili_maps.ogf")
         self.assertEqual(visual_node.target_path, model)
+        self.assertIsNone(visual_node.physical_path)
         self.assertEqual(visual_node.first_match_line, 3)
 
     def test_asset_without_disk_file_keeps_reference(self):

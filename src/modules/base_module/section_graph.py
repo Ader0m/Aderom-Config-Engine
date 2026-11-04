@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Граф связей секции: построение через ядро и собственное окно модуля."""
 
+import tempfile
 from pathlib import Path
 
 from PyQt5.QtCore import Qt
@@ -66,6 +67,15 @@ def _node_file_name(node):
     if getattr(node, "file_path", None) is not None:
         return Path(node.file_path).name
     return getattr(node, "display_name", None) or "—"
+
+
+def _is_materialized(path) -> bool:
+    """Путь лежит во временном каталоге копий VFS-ассетов."""
+    try:
+        root = Path(tempfile.gettempdir()) / "ace_assets"
+        return str(path).lower().startswith(str(root).lower())
+    except Exception:
+        return False
 
 
 class SectionGraphFeature:
@@ -173,9 +183,10 @@ class SectionGraphFeature:
         self._request_graph(self._current_section, bool(checked))
 
     def _on_window_message(self, message):
-        """Сообщение окна графа: в журнал и, если ошибка, диалогом."""
+        """Сообщение окна графа: в журнал, статус и диалог при ошибке."""
         message = str(message)
         self.ctx.ui.log(message)
+        self.ctx.ui.set_status(message.splitlines()[0], 5000)
         low = message.lower()
         if "не найден" in low or "не удалось" in low:
             self.ctx.ui.show_error(message)
@@ -433,15 +444,30 @@ class SectionGraphWindow(QDialog):
             getattr(node, "first_match_line", "—"),
         )
         target = getattr(node, "target_path", None)
+        physical = getattr(node, "physical_path", None)
         raw_ref = getattr(node, "raw_ref", None)
 
         if getattr(node, "is_asset", False):
             lines = []
             if target is not None:
-                lines.append("Файл: %s" % target)
-            else:
+                lines.append("Файл (VFS): %s" % target)
+            if physical is not None:
+                if target is None or (
+                    str(physical).lower() != str(target).lower()
+                ):
+                    label = (
+                        "Временная копия (usvfs)"
+                        if _is_materialized(physical)
+                        else "Реальный путь"
+                    )
+                    lines.append("%s: %s" % (label, physical))
+            if target is None and physical is None:
                 lines.append(
                     "Файл не найден по ссылке: %s" % (raw_ref or "—")
+                )
+            if getattr(node, "is_visual", False):
+                lines.append(
+                    "Модель .ogf запакована в игру — открытие недоступно."
                 )
             lines.append("Объявлено: %s" % source)
             if raw_ref:
@@ -459,11 +485,28 @@ class SectionGraphWindow(QDialog):
         if node is None:
             return
 
-        # Текстуры (.dds) и модели (.ogf) — бинарные ресурсы: открываем
-        # приложением Windows. Если ассоциации нет, оболочка покажет
-        # диалог «Открыть с помощью…».
+        # Визуальные модели (.ogf) обычно лежат в игровых архивах и
+        # недоступны для внешнего просмотра — оставляем заглушку.
+        if getattr(node, "is_visual", False):
+            self._notify(
+                "Модель .ogf запакована в игру и недоступна для открытия.\n"
+                "Ссылка: %s\nОбъявлено в %s, строка %s"
+                % (
+                    getattr(node, "raw_ref", None) or node.display_name,
+                    _path_text(node.file_path),
+                    node.first_match_line,
+                )
+            )
+            return
+
+        # Текстуры (.dds) — бинарные ресурсы: открываем приложением
+        # Windows. Если ассоциации нет, оболочка покажет диалог
+        # «Открыть с помощью…».
         if getattr(node, "is_asset", False):
-            target = getattr(node, "target_path", None)
+            target = (
+                getattr(node, "physical_path", None)
+                or getattr(node, "target_path", None)
+            )
             if target is not None:
                 if self._open_with_shell is not None:
                     ok, message = self._open_with_shell(target)

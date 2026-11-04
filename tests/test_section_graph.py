@@ -83,6 +83,9 @@ class SectionGraphWindowTest(unittest.TestCase):
 
         ltx_path = Path("C:/game/gamedata/configs/items/weapons.ltx")
         texture_path = Path("C:/game/gamedata/textures/ui/ui_icon.dds")
+        physical_texture = Path(
+            "C:/MO2/mods/Interface/textures/ui/ui_icon.dds"
+        )
         root = GraphNode(
             display_name="weapon",
             file_path=ltx_path,
@@ -102,6 +105,7 @@ class SectionGraphWindowTest(unittest.TestCase):
             ),
             raw_ref="ui\\ui_icon",
             target_path=texture_path,
+            physical_path=physical_texture,
         )
 
         window.update_graph(
@@ -122,10 +126,64 @@ class SectionGraphWindowTest(unittest.TestCase):
         self.assertEqual(root_item.text(1), "1")
         self.assertEqual(root_item.text(2), "10")
         self.assertIn(str(texture_path), texture_item.toolTip(0))
+        self.assertIn(str(physical_texture), texture_item.toolTip(0))
 
         window._on_item_double_clicked(texture_item)
-        self.assertEqual(opened, [texture_path])
+        self.assertEqual(opened, [physical_texture])
         self.assertEqual(messages, [])
+        window.close()
+
+    def test_visual_node_is_a_stub(self):
+        opened = []
+        messages = []
+        window = SectionGraphWindow(
+            lambda path, line: None,
+            open_with_shell=lambda path: (
+                opened.append(path) or (True, "")
+            ),
+            on_message=messages.append,
+        )
+
+        ltx_path = Path("C:/game/configs/test.ltx")
+        model_path = Path("C:/game/gamedata/meshes/trade/model.ogf")
+        root = GraphNode(
+            display_name="test",
+            file_path=ltx_path,
+            first_match_line=1,
+            matches=(GraphMatch("declaration", 1, "[test]"),),
+        )
+        visual = GraphNode(
+            display_name="model.ogf",
+            file_path=ltx_path,
+            first_match_line=3,
+            matches=(
+                GraphMatch(
+                    "visual_reference",
+                    3,
+                    "visual = trade\\model.ogf",
+                ),
+            ),
+            raw_ref="trade\\model.ogf",
+            target_path=model_path,
+        )
+
+        window.update_graph(
+            SectionGraph(
+                section_name="test",
+                root=root,
+                children=(visual,),
+            )
+        )
+
+        item = window.list_widget.topLevelItem(1)
+        self.assertEqual(item.text(0), "[Модель] model.ogf")
+        self.assertIn("запакована", item.toolTip(0))
+
+        window._on_item_double_clicked(item)
+
+        self.assertEqual(opened, [])
+        self.assertTrue(messages)
+        self.assertIn("запакована", messages[0])
         window.close()
 
     def test_missing_asset_reports_and_opens_declaration(self):
@@ -147,31 +205,31 @@ class SectionGraphWindowTest(unittest.TestCase):
             first_match_line=1,
             matches=(GraphMatch("declaration", 1, "[test]"),),
         )
-        visual = GraphNode(
-            display_name="model.ogf",
+        texture = GraphNode(
+            display_name="ui_icon.dds",
             file_path=ltx_path,
             first_match_line=3,
             matches=(
                 GraphMatch(
-                    "visual_reference",
+                    "texture_reference",
                     3,
-                    "visual = no\\such\\model",
+                    "icons_texture = no\\such\\icon",
                 ),
             ),
-            raw_ref="no\\such\\model",
+            raw_ref="no\\such\\icon",
         )
 
         window.update_graph(
             SectionGraph(
                 section_name="test",
                 root=root,
-                children=(visual,),
+                children=(texture,),
             )
         )
 
         window._on_item_double_clicked(window.list_widget.topLevelItem(1))
         self.assertTrue(messages)
-        self.assertIn("no\\such\\model", messages[0])
+        self.assertIn("no\\such\\icon", messages[0])
         self.assertEqual(calls, [("raw", ltx_path, 3)])
         window.close()
 

@@ -12,6 +12,7 @@ from .fs import (
     read_text_safe,
     scan_files,
 )
+from .vfs_paths import resolve_physical_path
 
 
 # ------------------------------------------------------------ типы
@@ -47,6 +48,10 @@ class GraphNode:
     # разрешить от корня VFS. file_path при этом остаётся файлом,
     # в котором записана ссылка (icons_texture/visual).
     target_path: Optional[Path] = None
+    # Реальный путь для запуска внешнего приложения. target_path —
+    # VFS-путь (идентичность/отображение), physical_path — путь на
+    # диске после раскрытия junction/usvfs или временная копия.
+    physical_path: Optional[Path] = None
 
 @dataclass
 class SectionGraph:
@@ -533,6 +538,7 @@ class ReferenceGraphBuilder:
                 matches=matches,
                 raw_ref=node.raw_ref,
                 target_path=getattr(node, "target_path", None),
+                physical_path=getattr(node, "physical_path", None),
             ))
 
         return lost
@@ -669,6 +675,13 @@ class ReferenceGraphBuilder:
                          file_path, resolved=False) -> GraphNode:
         """Узел ресурса секции: текстура (.dds) или визуальная модель (.ogf)."""
         target = self._resolve_asset_path(forest, kind, raw_ref)
+        # .ogf-модели обычно упакованы в игровые архивы и не открываются
+        # внешней программой, поэтому физический путь для них не ищем.
+        physical = (
+            resolve_physical_path(target)
+            if target is not None and kind != "visual"
+            else None
+        )
         return GraphNode(
             display_name=self._asset_display_name(kind, raw_ref, target),
             file_path=file_path,
@@ -677,6 +690,7 @@ class ReferenceGraphBuilder:
             raw_ref=raw_ref,
             resolved=resolved,
             target_path=target,
+            physical_path=physical,
         )
 
     @staticmethod

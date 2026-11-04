@@ -39,6 +39,7 @@ from .fs import (
 )
 
 from .external import open_in_notepad_pp, open_with_shell
+from .vfs_paths import resolve_physical_path
 
 from .file_cache import FileCacheSystem
 from .resolved_cache import ResolvedCache, invalidate_forest_signatures
@@ -109,6 +110,7 @@ __all__ = [
     # external
     "open_in_notepad_pp",
     "open_with_shell",
+    "resolve_physical_path",
 
     # cache
     "FileCacheSystem",

@@ -65,6 +65,10 @@ class GraphNode:
     # Полный путь к бинарному ресурсу (dds/ogf). file_path при этом
     # указывает на файл, где записана ссылка (icons_texture/visual).
     target_path: Optional[Path] = None
+    # Реальный путь на диске для запуска внешней программы. Может
+    # отличаться от target_path, если тот получен через VFS (MO2/usvfs)
+    # или собран junction-ами.
+    physical_path: Optional[Path] = None
 
     @property
     def matches_count(self) -> int:

@@ -431,6 +431,10 @@ def _to_graph_node_view(node) -> GraphNode:
     if target_path is not None:
         target_path = Path(target_path)
 
+    physical_path = getattr(node, "physical_path", None)
+    if physical_path is not None:
+        physical_path = Path(physical_path)
+
     return GraphNode(
         display_name=str(getattr(node, "display_name", "")),
         file_path=file_path,
@@ -439,6 +443,7 @@ def _to_graph_node_view(node) -> GraphNode:
         raw_ref=getattr(node, "raw_ref", None),
         resolved=bool(getattr(node, "resolved", False)),
         target_path=target_path,
+        physical_path=physical_path,
     )
 
 
