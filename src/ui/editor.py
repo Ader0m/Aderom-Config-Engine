@@ -11,7 +11,16 @@
 
 from pathlib import Path
 
-from PyQt5.QtCore import Qt, pyqtSignal, QAbstractListModel, QModelIndex, QPoint, QEvent
+from PyQt5.QtCore import (
+    Qt,
+    pyqtSignal,
+    QAbstractListModel,
+    QModelIndex,
+    QObject,
+    QPoint,
+    QEvent,
+    QTimer,
+)
 from PyQt5.QtGui import QColor, QFont, QKeySequence
 from PyQt5.QtWidgets import (
     QHBoxLayout,
@@ -37,6 +46,89 @@ try:  # запуск с корня проекта (src в sys.path)
 except ImportError:  # запуск как пакета
     from .theme import PALETTE
     from .lexers import create_lexer
+
+
+class _LexerScheduler(QObject):
+    """Откладывает покраску файла и обновляет статус прогресса."""
+
+    status = pyqtSignal(str)
+
+    def __init__(self, editor, set_lexer, parent=None):
+        super().__init__(parent)
+        self._editor = editor
+        self._set_lexer = set_lexer
+        self._path = None
+        self._generation = 0
+        self._last_percent = -1
+
+    def schedule(self, path):
+        self._generation += 1
+        self._path = str(path) if path is not None else None
+        self._last_percent = -1
+
+        if self._path is None:
+            return
+
+        generation = self._generation
+        QTimer.singleShot(0, lambda: self._apply(generation))
+
+    def stop(self):
+        self._generation += 1
+        self._path = None
+        self._last_percent = -1
+        self._set_lexer(None)
+
+    def _apply(self, generation):
+        if generation != self._generation or self._path is None:
+            return
+
+        path = self._path
+        name = Path(path).name
+        self.status.emit("Покраска: %s…" % name)
+
+        try:
+            lexer = create_lexer(path)
+        except Exception as exc:
+            self.status.emit("Покраска: %s — ошибка: %s" % (name, exc))
+            return
+
+        if lexer is None:
+            self.status.emit("Покраска: %s — готово" % name)
+            return
+
+        progress = getattr(lexer, "progress", None)
+        if progress is not None:
+            progress.connect(
+                lambda done, total, p=path: self._on_progress(p, done, total)
+            )
+
+        try:
+            self._set_lexer(lexer)
+        except Exception as exc:
+            self.status.emit("Покраска: %s — ошибка: %s" % (name, exc))
+            return
+
+        length = getattr(self._editor, "length", None)
+        empty = not length() if callable(length) else False
+
+        if progress is None or empty:
+            self.status.emit("Покраска: %s — готово" % name)
+
+    def _on_progress(self, path, done, total):
+        if path != self._path:
+            return
+
+        percent = int(done * 100 / total) if total else 100
+        if percent < 100 and percent - self._last_percent < 2:
+            return
+
+        self._last_percent = percent
+        name = Path(path).name
+
+        if percent >= 100:
+            self.status.emit("Покраска: %s — готово" % name)
+        else:
+            self.status.emit("Покраска: %s — %d%%" % (name, percent))
 
 
 class EditorFindBar(QWidget):
@@ -145,6 +237,7 @@ class CodeEditor(QWidget):
     content_changed = pyqtSignal(str)
     save_requested = pyqtSignal()
     dirty_changed = pyqtSignal(bool)
+    lexer_status = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -161,6 +254,12 @@ class CodeEditor(QWidget):
 
         self._init_ui()
         self._init_shortcuts()
+        self._lexer_scheduler = _LexerScheduler(
+            self.editor,
+            self._set_lexer,
+            self,
+        )
+        self._lexer_scheduler.status.connect(self.lexer_status.emit)
 
     def _init_ui(self):
         layout = QVBoxLayout()
@@ -256,12 +355,15 @@ class CodeEditor(QWidget):
         владельцем Python-обёртки. Без ``self._lexer`` сборщик мусора
         удаляет лексер сразу после выхода из метода, и подсветка пропадает.
         """
+        old = self._lexer
+        if old is not None and old is not lexer:
+            stop = getattr(old, "stop", None)
+            if callable(stop):
+                stop()
+
         self._lexer = lexer
         self.editor.setLexer(lexer)
         self.editor.setTabWidth(4)
-
-    def _apply_lexer(self, path):
-        self._set_lexer(create_lexer(path))
 
     # -------------------------------------------------- публичные действия
     def show_find(self):
@@ -303,6 +405,10 @@ class CodeEditor(QWidget):
         self._loading = True
         self._readonly_content = bool(readonly)
 
+        # Старый лексер может начать разбор нового текста — сначала
+        # останавливаем его, затем показываем содержимое без покраски.
+        self._lexer_scheduler.stop()
+
         self.editor.setReadOnly(False)
         self.editor.setText(text)
         self.editor.setReadOnly(
@@ -314,8 +420,11 @@ class CodeEditor(QWidget):
 
         self.current_file = str(source_path) if source_path is not None else None
         self.file_label.setText(str(label))
-        self._apply_lexer(source_path)
         self._loading = False
+
+        # Покраска — отдельная отложенная задача. Файл уже доступен
+        # для просмотра, прокрутки и редактирования.
+        self._lexer_scheduler.schedule(source_path)
 
         # Фокус в редактор: без этого внутренняя карта клавиш Scintilla
         # (undo/redo/копирование/поиск) "не работает" для пользователя.
@@ -621,11 +730,13 @@ class ResolvedView(QWidget):
     content_changed = pyqtSignal(str)
     save_requested = pyqtSignal()
     dirty_changed = pyqtSignal(bool)
+    lexer_status = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._root_path = None
         self._line_sources = []
+        self._lexer = None
         self._syncing = False
         self._source_visible = True
         self._loading = False
@@ -635,6 +746,12 @@ class ResolvedView(QWidget):
         self._dirty = False
         self._init_ui()
         self._init_shortcuts()
+        self._lexer_scheduler = _LexerScheduler(
+            self.editor,
+            self._set_lexer,
+            self,
+        )
+        self._lexer_scheduler.status.connect(self.lexer_status.emit)
 
     # -------------------------------------------------- UI
     def _init_ui(self):
@@ -760,12 +877,20 @@ class ResolvedView(QWidget):
 
         self._apply_lexer(None)
 
+    def _set_lexer(self, lexer):
+        """Установить лексер, удержав Python-ссылку и остановив старый."""
+        old = self._lexer
+        if old is not None and old is not lexer:
+            stop = getattr(old, "stop", None)
+            if callable(stop):
+                stop()
+
+        self._lexer = lexer
+        self.editor.setLexer(lexer)
+
     def _apply_lexer(self, path):
-        """Подсветка: XML, LTX/DLTX или Lua в зависимости от расширения."""
-        # Ссылка обязательна: иначе лексер удаляется сборщиком мусора
-        # сразу после выхода из метода.
-        self._lexer = create_lexer(path)
-        self.editor.setLexer(self._lexer)
+        """Совместимость: применить лексер сразу (без отложенного запуска)."""
+        self._set_lexer(create_lexer(path))
 
     # -------------------------------------------------- публичные API
     @property
@@ -835,6 +960,7 @@ class ResolvedView(QWidget):
 
         text = str(text or "")
         self._loading = True
+        self._lexer_scheduler.stop()
         self.editor.setReadOnly(False)
         self.editor.setText(text)
         self.editor.setReadOnly(not self._editable)
@@ -846,11 +972,12 @@ class ResolvedView(QWidget):
         # заменяют данные панели; clear() не нужен (и у QListView его нет).
         self.source_list.set_sources(self._line_sources)
 
-        self._apply_lexer(root_path)
-
         rel = str(root_path)
         self.file_label.setText("RESOLVED: %s" % rel)
         self.editor.setCursorPosition(0, 0)
+
+        # Покраска запускается после отображения текста.
+        self._lexer_scheduler.schedule(root_path)
 
     def find_first(self, text):
         if not text:

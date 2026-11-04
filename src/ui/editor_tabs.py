@@ -21,6 +21,7 @@ class EditorTabs(QTabWidget):
 
     document_changed = pyqtSignal(str, str)
     save_requested = pyqtSignal(str, str)
+    lexer_status = pyqtSignal(str)
 
     def __init__(self, events=None, commands=None, parent=None, can_edit=None):
         super().__init__(parent)
@@ -58,6 +59,7 @@ class EditorTabs(QTabWidget):
         editor.dirty_changed.connect(
             lambda dirty, e=editor: self._on_editor_dirty(e, dirty)
         )
+        editor.lexer_status.connect(self.lexer_status.emit)
         self._default_editor = editor
         self._add_tab(DEFAULT_TAB_ID, "Редактор", editor)
         return editor

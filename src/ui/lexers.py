@@ -28,11 +28,13 @@
 
 import re
 
+from PyQt5.QtCore import QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QFont
 from PyQt5.Qsci import (
     QsciLexerCustom,
     QsciLexerLua,
     QsciLexerXML,
+    QsciScintilla,
 )
 
 try:  # запуск с корня проекта (src в sys.path)
@@ -355,10 +357,25 @@ def tokenize_line(line):
 
 
 class LtxLexer(QsciLexerCustom):
-    """Кастомный лексер LTX/DLTX для QScintilla."""
+    """Кастомный лексер LTX/DLTX для QScintilla.
+
+    Большие файлы размечаются порциями. После каждой порции управление
+    возвращается циклу событий Qt, поэтому файл можно прокручивать и
+    редактировать до окончания покраски.
+    """
+
+    progress = pyqtSignal(int, int)
+    CHUNK_BYTES = 64 * 1024
 
     def __init__(self, parent=None):
         super().__init__(parent)
+
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self._continue_styling)
+        self._next = None
+        self._total = 0
+        self._full_pass = False
 
         self.setDefaultColor(QColor(PALETTE.syn_default))
         self.setDefaultPaper(QColor(PALETTE.bg_main))
@@ -405,18 +422,70 @@ class LtxLexer(QsciLexerCustom):
     def defaultFont(self, style):
         return self._font(style)
 
+    def stop(self):
+        """Остановить отложенную покраску (перед сменой текста/лексера)."""
+        self._timer.stop()
+        self._next = None
+
     def styleText(self, start, end):
         editor = self.editor()
         if editor is None:
             return
 
-        # Scintilla передаёт байтовые позиции; QsciScintilla.bytes() даёт
-        # ровно тот же диапазон. Переводим его в Python-строку.
-        raw = bytes(editor.bytes(start, end))
+        total = int(
+            editor.SendScintilla(QsciScintilla.SCI_GETLENGTH)
+        )
+        start = max(0, int(start))
+        end = total if end < 0 else min(int(end), total)
+        if end <= start:
+            return
+
+        self._timer.stop()
+        self._next = None
+        self._total = total
+        self._full_pass = start <= 0 and end >= total
+
+        self._style_chunk(editor, start, end)
+
+    def _continue_styling(self):
+        if self._next is None:
+            return
+
+        editor = self.editor()
+        if editor is None:
+            return
+
+        current_length = int(
+            editor.SendScintilla(QsciScintilla.SCI_GETLENGTH)
+        )
+        if current_length != self._total:
+            self.stop()
+            return
+
+        start, end = self._next
+        self._next = None
+        self._style_chunk(editor, start, end)
+
+    def _style_chunk(self, editor, start, end):
+        chunk_end = min(end, start + self.CHUNK_BYTES)
+        raw = bytes(editor.bytes(start, chunk_end))
+
+        # Не разрезаем строку посередине, если это возможно.
+        if chunk_end < end:
+            last_newline = raw.rfind(b"\n")
+            if last_newline >= 0:
+                raw = raw[:last_newline + 1]
+                chunk_end = start + len(raw)
+
         if raw.endswith(b"\x00"):
             raw = raw[:-1]
+            chunk_end = max(start, chunk_end - 1)
+
         text = raw.decode("utf-8", errors="replace")
         if not text:
+            self._next = None
+            if self._full_pass and self._total:
+                self.progress.emit(self._total, self._total)
             return
 
         self.startStyling(start)
@@ -442,6 +511,16 @@ class LtxLexer(QsciLexerCustom):
         if cursor < len(text):
             tail = text[cursor:]
             self.setStyling(len(tail.encode("utf-8")), STYLE_DEFAULT)
+
+        if self._full_pass and self._total:
+            self.progress.emit(min(chunk_end, self._total), self._total)
+            editor.update()
+
+        if chunk_end < end:
+            self._next = (chunk_end, end)
+            self._timer.start(0)
+        else:
+            self._next = None
 
     # -------------------------------------------------- служебное
     @staticmethod

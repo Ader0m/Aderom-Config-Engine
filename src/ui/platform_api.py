@@ -160,6 +160,7 @@ class PlatformApi:
         if editor is not None:
             editor.document_changed.connect(self.on_document_changed)
             editor.save_requested.connect(self.save_current_document)
+            editor.lexer_status.connect(self.on_lexer_status)
             editor.set_editable(self.can_edit_documents())
 
         buf, self._log_buffer = self._log_buffer, []
@@ -606,6 +607,12 @@ class PlatformApi:
             updater()
 
     # -------------------------------------------------- ui-сервисы
+    def on_lexer_status(self, message):
+        """Обновляемая строка покраски файла в диагностике."""
+        self.log_status("ui.lexer", message)
+        if message.endswith("готово") or message.endswith("…"):
+            self.set_status(message, 5000)
+
     def log(self, msg):
         if self.window is not None:
             self.window.log(msg)
@@ -840,6 +847,7 @@ class PlatformApi:
         )
         view.diagnostic.connect(lambda msg: self.log("[resolved] %s" % msg))
         view.diagnostic.connect(lambda msg: self.set_status(msg, 8000))
+        view.lexer_status.connect(self.on_lexer_status)
         view.content_changed.connect(
             lambda new_text, tid=tab_id, v=view: self.on_resolved_changed(
                 tid,
@@ -901,6 +909,7 @@ class PlatformApi:
         )
         view.diagnostic.connect(lambda msg: self.log("[xml-resolved] %s" % msg))
         view.diagnostic.connect(lambda msg: self.set_status(msg, 8000))
+        view.lexer_status.connect(self.on_lexer_status)
 
         started = time.perf_counter()
         self.window.editor.open_tab(
