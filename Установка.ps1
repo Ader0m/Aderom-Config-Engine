@@ -1,3 +1,4 @@
+# Runs the numbered install scripts in the install folder in order (1, 2, 3).
 param(
     [string]$ProjectRoot = '',
     [string]$InstallDir = ''
@@ -13,6 +14,11 @@ function Write-Info {
 function Write-Success {
     param([string]$Message)
     Write-Host $Message -ForegroundColor Green
+}
+
+function Write-Warn {
+    param([string]$Message)
+    Write-Host $Message -ForegroundColor Yellow
 }
 
 function Get-NumberedScript {
@@ -84,14 +90,14 @@ try {
         $psExe = [System.Diagnostics.Process]::GetCurrentProcess().Path
     }
 
-    $script1 = Get-NumberedScript -Dir $InstallDir -Number '1'
-    $script2 = Get-NumberedScript -Dir $InstallDir -Number '2'
-    $script3 = Get-NumberedScript -Dir $InstallDir -Number '3'
-
-    $scripts = @($script1, $script2, $script3)
+    $scripts = @(
+        Get-NumberedScript -Dir $InstallDir -Number '1'
+        Get-NumberedScript -Dir $InstallDir -Number '2'
+        Get-NumberedScript -Dir $InstallDir -Number '3'
+    )
 
     Write-Info "Project root: $ProjectRoot"
-    Write-Info "Scripts to run:"
+    Write-Info 'Scripts to run:'
 
     foreach ($script in $scripts) {
         Write-Info "  $script"
@@ -117,7 +123,8 @@ try {
         Pop-Location
     }
 
-    Write-Success "All install scripts completed successfully."
+    Write-Success 'All install scripts completed successfully.'
+    exit 0
 }
 catch {
     $msg = $_.Exception.Message

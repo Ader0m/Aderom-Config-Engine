@@ -1,9 +1,13 @@
+# Step 2: create the project virtual environment and install dependencies.
+# Install creates .venv and installs requirements.txt into it.
+# Run with -Uninstall to remove .venv. Python itself is not uninstalled.
 param(
     [string]$ProjectRoot,
     [string]$RequirementsFile,
     [string]$PythonExe,
     [switch]$ForceVenv,
-    [switch]$ForceInstallPython
+    [switch]$ForceInstallPython,
+    [switch]$Uninstall
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,6 +24,25 @@ function Write-Info {
 function Write-Success {
     param([string]$Message)
     Write-Host $Message -ForegroundColor Green
+}
+
+function Write-Warn {
+    param([string]$Message)
+    Write-Host $Message -ForegroundColor Yellow
+}
+
+function Get-ProjectRoot {
+    param([string]$ScriptRoot)
+
+    if (-not $ScriptRoot) {
+        return (Get-Location).Path
+    }
+
+    if ((Split-Path -Leaf $ScriptRoot) -ieq 'install') {
+        return (Split-Path -Parent $ScriptRoot)
+    }
+
+    return $ScriptRoot
 }
 
 function Get-CommandList {
@@ -220,16 +243,39 @@ function Install-Python3106 {
 }
 
 try {
-    Write-Info "Checking project paths..."
+    Write-Info 'Checking project paths...'
 
     if (-not $ProjectRoot) {
         $ProjectRoot = (Get-Location).Path
 
-        if ($PSScriptRoot -and
-            -not (Test-Path -LiteralPath (Join-Path $ProjectRoot 'requirements.txt') -PathType Leaf) -and
-            (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'requirements.txt') -PathType Leaf)) {
-            $ProjectRoot = $PSScriptRoot
+        if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot 'requirements.txt') -PathType Leaf)) {
+            $fallback = Get-ProjectRoot -ScriptRoot $PSScriptRoot
+
+            if (Test-Path -LiteralPath (Join-Path $fallback 'requirements.txt') -PathType Leaf) {
+                $ProjectRoot = $fallback
+            }
         }
+    }
+
+    if (Test-Path -LiteralPath $ProjectRoot -PathType Container) {
+        $ProjectRoot = (Resolve-Path -LiteralPath $ProjectRoot).ProviderPath
+    }
+
+    $venvDir = Join-Path $ProjectRoot $VenvDirName
+    $venvPython = Join-Path $venvDir 'Scripts\python.exe'
+
+    if ($Uninstall) {
+        if (Test-Path -LiteralPath $venvDir) {
+            Write-Info "Removing virtual environment: $venvDir"
+            Remove-Item -LiteralPath $venvDir -Recurse -Force
+            Write-Success "Removed: $venvDir"
+        }
+        else {
+            Write-Info "Virtual environment not found, nothing to remove: $venvDir"
+        }
+
+        Write-Success 'Uninstall completed.'
+        exit 0
     }
 
     if (-not $RequirementsFile) {
@@ -239,9 +285,6 @@ try {
     if (-not (Test-Path -LiteralPath $RequirementsFile -PathType Leaf)) {
         throw "requirements.txt not found: $RequirementsFile"
     }
-
-    $venvDir = Join-Path $ProjectRoot $VenvDirName
-    $venvPython = Join-Path $venvDir 'Scripts\python.exe'
 
     Write-Info "Checking Python $RequiredVersion..."
 
@@ -274,7 +317,7 @@ try {
     Write-Info "Using Python $RequiredVersion : $python"
 
     if ($ForceVenv -and (Test-Path -LiteralPath $venvDir)) {
-        Write-Info "Removing existing .venv because -ForceVenv was specified."
+        Write-Info 'Removing existing .venv because -ForceVenv was specified.'
         Remove-Item -LiteralPath $venvDir -Recurse -Force
     }
 
@@ -292,7 +335,7 @@ try {
             $items = Get-ChildItem -LiteralPath $venvDir -Force | Measure-Object
 
             if ($items.Count -gt 0) {
-                throw ".venv already exists but python.exe is missing. Run again with -ForceVenv to recreate .venv."
+                throw '.venv already exists but python.exe is missing. Run again with -ForceVenv to recreate .venv.'
             }
         }
 
@@ -301,7 +344,7 @@ try {
         & $python -m venv "$venvDir"
 
         if ($LASTEXITCODE -ne 0) {
-            throw "Failed to create virtual environment."
+            throw 'Failed to create virtual environment.'
         }
 
         if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
@@ -309,28 +352,28 @@ try {
         }
     }
 
-    Write-Info "Ensuring pip is available..."
+    Write-Info 'Ensuring pip is available...'
     & $venvPython -m ensurepip --upgrade
 
     if ($LASTEXITCODE -ne 0) {
-        throw "Failed to ensure pip."
+        throw 'Failed to ensure pip.'
     }
 
-    Write-Info "Upgrading pip..."
+    Write-Info 'Upgrading pip...'
     & $venvPython -m pip install --upgrade pip
 
     if ($LASTEXITCODE -ne 0) {
-        throw "Failed to upgrade pip."
+        throw 'Failed to upgrade pip.'
     }
 
     Write-Info "Installing dependencies from: $RequirementsFile"
     & $venvPython -m pip install -r "$RequirementsFile"
 
     if ($LASTEXITCODE -ne 0) {
-        throw "Failed to install dependencies."
+        throw 'Failed to install dependencies.'
     }
 
-    Write-Success "Done."
+    Write-Success 'Done.'
     Write-Info "Virtual environment Python: $venvPython"
 }
 catch {
