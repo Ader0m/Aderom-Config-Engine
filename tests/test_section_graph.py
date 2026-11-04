@@ -186,6 +186,63 @@ class SectionGraphWindowTest(unittest.TestCase):
         self.assertIn("запакована", messages[0])
         window.close()
 
+    def test_inheritance_rows_show_related_section(self):
+        calls = []
+        window = SectionGraphWindow(
+            lambda path, line: calls.append(("bus", path, line)),
+            open_raw_at_line=lambda path, line: calls.append(
+                ("raw", path, line)
+            ),
+        )
+
+        ltx_path = Path("C:/game/configs/items/weapons.ltx")
+        parent_path = Path("C:/game/configs/items/parents.ltx")
+        root = GraphNode(
+            display_name="weapon",
+            file_path=ltx_path,
+            first_match_line=10,
+            matches=(GraphMatch("declaration", 10, "[weapon]"),),
+        )
+        parent = GraphNode(
+            display_name="base_weapon",
+            file_path=ltx_path,
+            first_match_line=10,
+            matches=(
+                GraphMatch(
+                    "inheritance",
+                    10,
+                    "[weapon]:base_weapon,weapon_common",
+                    related="base_weapon",
+                ),
+            ),
+            resolved=True,
+            related_file_path=parent_path,
+            related_line=42,
+            related_resolved=True,
+        )
+
+        window.update_graph(
+            SectionGraph(
+                section_name="weapon",
+                root=root,
+                children=(parent,),
+            )
+        )
+
+        item = window.list_widget.topLevelItem(1)
+        self.assertEqual(item.text(0), "[Наследование] base_weapon")
+        self.assertEqual(item.text(1), "1")
+        self.assertEqual(item.text(2), "10")
+        tooltip = item.toolTip(0)
+        self.assertIn("Связь: base_weapon", tooltip)
+        self.assertIn("base_weapon,weapon_common", tooltip)
+        self.assertIn(str(ltx_path), tooltip)
+        self.assertIn(str(parent_path), tooltip)
+
+        window._on_item_double_clicked(item)
+        self.assertEqual(calls, [("bus", parent_path, 42)])
+        window.close()
+
     def test_missing_asset_reports_and_opens_declaration(self):
         calls = []
         messages = []

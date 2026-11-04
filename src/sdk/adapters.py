@@ -419,6 +419,7 @@ def _to_graph_node_view(node) -> GraphNode:
             edge_type=_edge_type(match),
             line_number=int(getattr(match, "line_number", 0) or 0),
             line_text=str(getattr(match, "line_text", "") or ""),
+            related=getattr(match, "related", None),
         )
         for match in (getattr(node, "matches", ()) or ())
     )
@@ -435,6 +436,14 @@ def _to_graph_node_view(node) -> GraphNode:
     if physical_path is not None:
         physical_path = Path(physical_path)
 
+    related_file_path = getattr(node, "related_file_path", None)
+    if related_file_path is not None:
+        related_file_path = Path(related_file_path)
+
+    related_line = getattr(node, "related_line", None)
+    if related_line is not None:
+        related_line = int(related_line)
+
     return GraphNode(
         display_name=str(getattr(node, "display_name", "")),
         file_path=file_path,
@@ -444,6 +453,11 @@ def _to_graph_node_view(node) -> GraphNode:
         resolved=bool(getattr(node, "resolved", False)),
         target_path=target_path,
         physical_path=physical_path,
+        related_file_path=related_file_path,
+        related_line=related_line,
+        related_resolved=bool(
+            getattr(node, "related_resolved", False)
+        ),
     )
 
 

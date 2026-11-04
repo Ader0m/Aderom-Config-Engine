@@ -61,6 +61,10 @@ class GraphTree(QTreeWidget):
 
 def _node_file_name(node):
     """Только имя файла: полный путь остаётся в tooltip и в node."""
+    if getattr(node, "primary_edge_type", "") == "inheritance":
+        related = getattr(node, "related_name", None)
+        if related:
+            return related
     target = getattr(node, "target_path", None)
     if target is not None:
         return Path(target).name
@@ -316,7 +320,7 @@ class SectionGraphWindow(QDialog):
         """Плоский список связей с колонками совпадений и первой строки."""
         tree = GraphTree()
         tree.setColumnCount(3)
-        tree.setHeaderLabels(["Файл", "Совпадений", "Строка"])
+        tree.setHeaderLabels(["Файл / связь", "Совпадений", "Строка"])
         tree.setRootIsDecorated(False)
         tree.setAlternatingRowColors(True)
         tree.setUniformRowHeights(True)
@@ -446,6 +450,26 @@ class SectionGraphWindow(QDialog):
         target = getattr(node, "target_path", None)
         physical = getattr(node, "physical_path", None)
         raw_ref = getattr(node, "raw_ref", None)
+        related = getattr(node, "related_name", None)
+
+        if (
+            getattr(node, "primary_edge_type", "") == "inheritance"
+            and related
+        ):
+            line_text = ""
+            if getattr(node, "matches", None):
+                line_text = str(node.matches[0].line_text or "").strip()
+            parts = ["Связь: %s" % related]
+            if line_text:
+                parts.append("Запись: %s" % line_text)
+            parts.append("Файл: %s" % source)
+            related_file = getattr(node, "related_file_path", None)
+            if related_file is not None:
+                parts.append(
+                    "Объявление родителя: %s:%s"
+                    % (related_file, getattr(node, "related_line", "—"))
+                )
+            return "\n".join(parts)
 
         if getattr(node, "is_asset", False):
             lines = []
@@ -530,6 +554,16 @@ class SectionGraphWindow(QDialog):
         if node.file_path is None:
             return
 
+        related_path = getattr(node, "related_file_path", None)
+        if related_path is not None:
+            line_number = int(getattr(node, "related_line", None) or 0)
+            resolved = bool(getattr(node, "related_resolved", False))
+            if resolved or self._open_raw_at_line is None:
+                self._open_at_line(related_path, line_number)
+            else:
+                self._open_raw_at_line(related_path, line_number)
+            return
+
         self._open_node_source(node)
 
     def _open_node_source(self, node):
@@ -562,6 +596,7 @@ def _node_key(node):
         getattr(node, "first_match_line", None),
         getattr(node, "raw_ref", None),
         getattr(node, "display_name", None),
+        getattr(node, "related_name", None),
     )
 
 

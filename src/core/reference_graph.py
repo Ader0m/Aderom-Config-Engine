@@ -32,6 +32,13 @@ class MatchInfo:
     edge_type: EdgeType
     line_number: int
     line_text: str
+    # Второй участник связи: для наследования — имя родителя
+    # (если искали дочернюю секцию) или имя дочерней секции
+    # (если искали родителя).
+    related: Optional[str] = None
+    # True — related является родителем искомой секции, поэтому
+    # двойной клик должен открыть объявление родителя.
+    related_is_parent: bool = False
 
 
 @dataclass
@@ -52,6 +59,27 @@ class GraphNode:
     # VFS-путь (идентичность/отображение), physical_path — путь на
     # диске после раскрытия junction/usvfs или временная копия.
     physical_path: Optional[Path] = None
+    # Объявление связанной секции (родителя) — куда переходить по
+    # двойному клику на строке [Наследование].
+    related_file_path: Optional[Path] = None
+    related_line: Optional[int] = None
+    related_resolved: bool = False
+
+    @property
+    def related_name(self) -> Optional[str]:
+        """Имя второго участника связи (родитель/дочерняя секция)."""
+        for match in self.matches:
+            related = getattr(match, "related", None)
+            if related:
+                return related
+        return None
+
+    @property
+    def primary_edge_type(self) -> str:
+        """Тип связи первой строки совпадения."""
+        if self.matches:
+            return self.matches[0].edge_type.value
+        return "declaration"
 
 @dataclass
 class SectionGraph:
@@ -152,19 +180,39 @@ class ReferenceGraphBuilder:
                 resolved=False,
             ))
 
-        # 2. Сканируем .ltx файлы из леса (кроме файла объявления)
+        # 1.2. Индекс объявлений нужен, чтобы по двойному клику на
+        # родителе открыть именно его файл/строку.
+        declaration_index = {
+            section: (root_node.file_path, root_node.first_match_line)
+        }
+        pending = []
         for file_path in forest.files:
+            text = self._read_file(file_path)
+            self._index_declarations(text, file_path, declaration_index)
             if file_path == root_node.file_path:
                 continue
+            matches = self._scan_ltx_text(text, section)
+            pending.append((file_path, matches))
 
-            matches = self._scan_ltx_file(file_path, section)
-            if matches:
-                children.append(GraphNode(
-                    display_name=file_path.name,
-                    file_path=file_path,
-                    first_match_line=matches[0].line_number,
-                    matches=matches,
-                ))
+        # 1.3. Родители самой секции: [секция]:p1,p2
+        self._append_ltx_matches(
+            children,
+            root_node.file_path,
+            self._root_inheritance_matches(root_node, section),
+            resolved=False,
+            declaration_index=declaration_index,
+            related_resolved=False,
+        )
+
+        # 2. Остальные .ltx файлы из леса
+        for file_path, matches in pending:
+            self._append_ltx_matches(
+                children,
+                file_path,
+                matches,
+                declaration_index=declaration_index,
+                related_resolved=False,
+            )
 
         # 3. Сканируем .script файлы в scan_dir
         self._append_script_children(children, forest, section)
@@ -228,7 +276,15 @@ class ReferenceGraphBuilder:
         )
         children = []
 
+        declaration_index = {}
+        for path, text, _sources in items:
+            self._index_declarations(text, path, declaration_index)
+
         if root_node is not None:
+            declaration_index[section] = (
+                root_node.file_path,
+                root_node.first_match_line,
+            )
             for kind, raw_ref, asset_match in assets:
                 children.append(self._make_asset_node(
                     forest,
@@ -238,19 +294,26 @@ class ReferenceGraphBuilder:
                     file_path=root_node.file_path,
                     resolved=True,
                 ))
+            # Родители самой секции из итогового текста резолва.
+            self._append_ltx_matches(
+                children,
+                root_node.file_path,
+                self._root_inheritance_matches(root_node, section),
+                resolved=True,
+                declaration_index=declaration_index,
+                related_resolved=True,
+            )
 
         for root, text, line_sources in items:
             matches = self._scan_ltx_text(text, section)
 
             if root_node is not None and root == root_node.file_path:
-                # Объявление уже показано корневым узлом; остальные
-                # вхождения в том же итоговом файле оставляем детьми.
+                # Объявление и его родители уже показаны корневым узлом
+                # и отдельными связями; остальные вхождения в том же
+                # итоговом файле оставляем детьми.
                 matches = [
                     match for match in matches
-                    if not (
-                        match.line_number == root_node.first_match_line
-                        and match.edge_type == EdgeType.DECLARATION
-                    )
+                    if match.line_number != root_node.first_match_line
                 ]
 
             if not matches:
@@ -261,13 +324,15 @@ class ReferenceGraphBuilder:
                 matches[0].line_number,
                 root.name,
             )
-            children.append(GraphNode(
-                display_name=display,
-                file_path=root,
-                first_match_line=matches[0].line_number,
-                matches=matches,
+            self._append_ltx_matches(
+                children,
+                root,
+                matches,
                 resolved=True,
-            ))
+                display_name=display,
+                declaration_index=declaration_index,
+                related_resolved=True,
+            )
 
         # Скрипты не проходят через LTX-резолвер — их ищем по исходникам.
         self._append_script_children(children, forest, section)
@@ -394,6 +459,79 @@ class ReferenceGraphBuilder:
             pass
         return fallback
 
+    # ------------------------------------------------------------ наследование
+
+    def _root_inheritance_matches(self, root: GraphNode, section: str):
+        """Связи с родителями из заголовка ``[секция]:p1,p2``."""
+        if not root.matches:
+            return []
+        line = root.matches[0].line_text
+        child, parents = self._parse_inheritance(line)
+        if child != section:
+            return []
+        return [
+            MatchInfo(
+                edge_type=EdgeType.INHERITANCE,
+                line_number=root.first_match_line,
+                line_text=line,
+                related=parent,
+                related_is_parent=True,
+            )
+            for parent in parents
+        ]
+
+    def _append_ltx_matches(self, children, file_path, matches,
+                            resolved=False, display_name=None,
+                            declaration_index=None,
+                            related_resolved=False):
+        """Добавить совпадения, развернув наследование в отдельные связи.
+
+        Обычные совпадения по-прежнему агрегируются в один узел файла,
+        а каждый родитель из ``[секция]:p1,p2`` становится отдельной
+        строкой ``[Наследование]``. Если известен ``declaration_index``,
+        для родителя сохраняется файл и строка его объявления.
+        """
+        if not matches:
+            return
+
+        regular = []
+        for match in matches:
+            if match.edge_type == EdgeType.INHERITANCE:
+                related = getattr(match, "related", None) or file_path.name
+                related_target = {}
+                if (
+                    getattr(match, "related_is_parent", False)
+                    and declaration_index
+                ):
+                    location = declaration_index.get(
+                        str(related).lower()
+                    )
+                    if location is not None:
+                        related_target = {
+                            "related_file_path": location[0],
+                            "related_line": location[1],
+                            "related_resolved": related_resolved,
+                        }
+                children.append(GraphNode(
+                    display_name=related,
+                    file_path=file_path,
+                    first_match_line=match.line_number,
+                    matches=[match],
+                    resolved=resolved,
+                    **related_target,
+                ))
+            else:
+                regular.append(match)
+
+        if regular:
+            children.append(GraphNode(
+                display_name=display_name or file_path.name,
+                file_path=file_path,
+                first_match_line=regular[0].line_number,
+                matches=regular,
+                resolved=resolved,
+            ))
+
     # ------------------------------------------------------------ режим VFS
 
     def build_for_section_vfs(self, forest, section_name: str,
@@ -437,18 +575,36 @@ class ReferenceGraphBuilder:
                 resolved=False,
             ))
 
+        # Родители самой секции из сырого заголовка [секция]:p1,p2.
+        declaration_index = {
+            section: (root_node.file_path, root_node.first_match_line)
+        }
+        pending = []
         for file_path in files:
+            text = self._read_file(file_path)
+            self._index_declarations(text, file_path, declaration_index)
             if file_path == root_node.file_path:
                 continue
+            matches = self._scan_text(file_path, text, section)
+            pending.append((file_path, matches))
 
-            matches = self._scan_vfs_file(file_path, section)
-            if matches:
-                children.append(GraphNode(
-                    display_name=file_path.name,
-                    file_path=file_path,
-                    first_match_line=matches[0].line_number,
-                    matches=matches,
-                ))
+        self._append_ltx_matches(
+            children,
+            root_node.file_path,
+            self._root_inheritance_matches(root_node, section),
+            resolved=False,
+            declaration_index=declaration_index,
+            related_resolved=False,
+        )
+
+        for file_path, matches in pending:
+            self._append_ltx_matches(
+                children,
+                file_path,
+                matches,
+                declaration_index=declaration_index,
+                related_resolved=False,
+            )
 
         graph = SectionGraph(
             section_name=section,
@@ -461,14 +617,22 @@ class ReferenceGraphBuilder:
 
     def _scan_vfs_file(self, file_path: Path, section: str) -> list[MatchInfo]:
         """Просканировать один текстовый файл VFS."""
+        text = self._read_file(file_path)
+        if not text:
+            return []
+        return self._scan_text(file_path, text, section)
+
+    def _scan_text(self, file_path: Path, text: str,
+                   section: str) -> list[MatchInfo]:
+        """Просканировать уже прочитанный текст по типу файла."""
         suffix = file_path.suffix.lower()
 
         if suffix == ".ltx":
-            return self._scan_ltx_file(file_path, section)
+            return self._scan_ltx_text(text, section)
         if suffix in (".script", ".lua"):
-            return self._scan_script_file(file_path, section)
+            return self._scan_script_text(text, section)
         if suffix == ".xml":
-            return self._scan_xml_file(file_path, section)
+            return self._scan_xml_text(text, section)
 
         return []
 
@@ -539,6 +703,11 @@ class ReferenceGraphBuilder:
                 raw_ref=node.raw_ref,
                 target_path=getattr(node, "target_path", None),
                 physical_path=getattr(node, "physical_path", None),
+                related_file_path=getattr(node, "related_file_path", None),
+                related_line=getattr(node, "related_line", None),
+                related_resolved=bool(
+                    getattr(node, "related_resolved", False)
+                ),
             ))
 
         return lost
@@ -550,6 +719,7 @@ class ReferenceGraphBuilder:
             path,
             int(match.line_number),
             match.edge_type,
+            getattr(match, "related", None),
             match.line_text.strip(),
         )
 
@@ -785,6 +955,38 @@ class ReferenceGraphBuilder:
             if self._is_asset_line(line):
                 continue
 
+            child, parents = self._parse_inheritance(line)
+
+            if child is not None:
+                if child == section:
+                    # [секция]:родитель1,родитель2 — сама секция
+                    # объявлена здесь; каждый родитель — отдельная связь.
+                    matches.append(MatchInfo(
+                        edge_type=EdgeType.DECLARATION,
+                        line_number=line_num,
+                        line_text=line,
+                    ))
+                    for parent in parents:
+                        matches.append(MatchInfo(
+                            edge_type=EdgeType.INHERITANCE,
+                            line_number=line_num,
+                            line_text=line,
+                            related=parent,
+                            related_is_parent=True,
+                        ))
+                    continue
+
+                if section in parents:
+                    # [ребенок]:родитель1,секция,родитель2 — искали
+                    # родителя; показываем связь с ребенком.
+                    matches.append(MatchInfo(
+                        edge_type=EdgeType.INHERITANCE,
+                        line_number=line_num,
+                        line_text=line,
+                        related=child,
+                    ))
+                    continue
+
             edge_type = self._classify_ltx_line(line, section)
             matches.append(MatchInfo(
                 edge_type=edge_type,
@@ -818,16 +1020,57 @@ class ReferenceGraphBuilder:
         """
         Проверяет наследование: [ребенок]:родитель1,секция,родитель2
         """
-        if not line.startswith("["):
-            return False
-
-        bracket_end = line.find("]:")
-        if bracket_end == -1:
-            return False
-
-        parents_part = line[bracket_end + 2:]
-        parents = [p.strip().lower() for p in parents_part.split(",")]
+        _child, parents = self._parse_inheritance(line)
         return section in parents
+
+    @staticmethod
+    def _parse_inheritance(line: str):
+        """Разобрать заголовок ``[ребенок]:родитель1,родитель2``.
+
+        Возвращает ``(child, parents)`` или ``(None, [])``, если строка
+        не является заголовком с наследованием. Имена приводятся к
+        нижнему регистру; комментарии после списка отбрасываются.
+        """
+        stripped = line.strip()
+        if not stripped.startswith("["):
+            return None, []
+
+        bracket_end = stripped.find("]:")
+        if bracket_end == -1:
+            return None, []
+
+        child = stripped[1:bracket_end].strip().lower()
+        parents_part = stripped[bracket_end + 2:]
+        parents_part = parents_part.split(";", 1)[0]
+        parents_part = parents_part.split("//", 1)[0]
+        parents = [
+            parent.strip().lower()
+            for parent in parents_part.split(",")
+            if parent.strip()
+        ]
+        return child, parents
+
+    @staticmethod
+    def _index_declarations(text: str, file_path, index: dict):
+        """Добавить в индекс объявления секций из текста.
+
+        Индекс: ``имя секции -> (файл, строка)``. Первое объявление
+        побеждает — как и в :meth:`_find_declaration_in_items`.
+        """
+        if not text:
+            return
+        for line_num, line in enumerate(text.splitlines(), 1):
+            stripped = line.strip()
+            while stripped.startswith(("!", "@")):
+                stripped = stripped[1:].lstrip()
+            if not stripped.startswith("["):
+                continue
+            end = stripped.find("]")
+            if end == -1:
+                continue
+            name = stripped[1:end].strip().lower()
+            if name and name not in index:
+                index[name] = (file_path, line_num)
 
     # ------------------------------------------------------------ сканирование .script
 
@@ -836,7 +1079,10 @@ class ReferenceGraphBuilder:
         text = self._read_file(file_path)
         if not text:
             return []
+        return self._scan_script_text(text, section)
 
+    def _scan_script_text(self, text: str, section: str) -> list[MatchInfo]:
+        """Сканирует текст .script/.lua на совпадения."""
         matches = []
         for line_num, line in enumerate(text.splitlines(), 1):
             if section in line.lower():

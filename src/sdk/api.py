@@ -50,6 +50,9 @@ class GraphMatch:
     edge_type: str
     line_number: int
     line_text: str = ""
+    # Второй участник связи: для наследования — имя родителя или
+    # дочерней секции.
+    related: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +72,11 @@ class GraphNode:
     # отличаться от target_path, если тот получен через VFS (MO2/usvfs)
     # или собран junction-ами.
     physical_path: Optional[Path] = None
+    # Объявление связанной секции (родителя): файл, строка и признак
+    # того, что строка относится к результату резолва.
+    related_file_path: Optional[Path] = None
+    related_line: Optional[int] = None
+    related_resolved: bool = False
 
     @property
     def matches_count(self) -> int:
@@ -84,6 +92,15 @@ class GraphNode:
         if self.matches:
             return self.matches[0].edge_type
         return "declaration"
+
+    @property
+    def related_name(self) -> Optional[str]:
+        """Имя второго участника связи (родитель/дочерняя секция)."""
+        for match in self.matches:
+            related = getattr(match, "related", None)
+            if related:
+                return related
+        return None
 
     @property
     def is_texture(self) -> bool:

@@ -298,6 +298,126 @@ class ReferenceGraphTest(unittest.TestCase):
         self.assertIn("visual_reference", edge_types)
         self.assertNotIn("ltx_reference", edge_types)
 
+    def test_section_parents_are_split_into_separate_links(self):
+        self.system.write_text(
+            "[test]:base_a, base_b\nx=1\n",
+            encoding="utf-8",
+        )
+        parents_file = self.root / "parents.ltx"
+        parents_file.write_text(
+            "[base_a]\nx=1\n[base_b]\nx=1\n",
+            encoding="utf-8",
+        )
+        forest = FakeForest(
+            roots=[self.system, parents_file],
+            files=[self.system, parents_file],
+            xml_files=[],
+            scan_dir=self.root,
+        )
+
+        graph = ReferenceGraphBuilder().build_for_section(forest, "test")
+
+        parents = [
+            node for node in graph.children
+            if node.related_name
+        ]
+        self.assertEqual(
+            sorted(node.related_name for node in parents),
+            ["base_a", "base_b"],
+        )
+        expected_lines = {"base_a": 1, "base_b": 3}
+        for node in parents:
+            self.assertEqual(
+                node.matches[0].edge_type.value,
+                "inheritance",
+            )
+            self.assertEqual(node.file_path, self.system)
+            self.assertEqual(node.first_match_line, 1)
+            self.assertEqual(node.related_file_path, parents_file)
+            self.assertEqual(
+                node.related_line,
+                expected_lines[node.related_name],
+            )
+            self.assertFalse(node.related_resolved)
+
+    def test_vfs_reports_lost_parent_link(self):
+        self.system.write_text("[test]\nx=1\n", encoding="utf-8")
+        other = self.root / "other.ltx"
+        other.write_text("[test]:base_parent\n", encoding="utf-8")
+        parents_file = self.root / "parents.ltx"
+        parents_file.write_text("[base_parent]\nx=1\n", encoding="utf-8")
+
+        forest = FakeForest(
+            roots=[self.system],
+            files=[self.system],
+            xml_files=[],
+            scan_dir=self.root,
+        )
+
+        graph = ReferenceGraphBuilder().build_for_section(
+            forest,
+            "test",
+            vfs_mode=True,
+        )
+
+        lost_parents = [
+            node for node in graph.lost_children
+            if node.related_name
+        ]
+        self.assertEqual(
+            [node.related_name for node in lost_parents],
+            ["base_parent"],
+        )
+        lost = lost_parents[0]
+        self.assertEqual(lost.related_file_path, parents_file)
+        self.assertEqual(lost.related_line, 1)
+        self.assertFalse(lost.related_resolved)
+
+    def test_resolved_graph_shows_section_parents(self):
+        text = "[test]:base_a,base_b\nx=1\n"
+        sources = [
+            LineSource(kind="original") for _ in text.splitlines()
+        ]
+        parents_file = self.root / "parents.ltx"
+        parents_text = "[base_a]\nx=1\n[base_b]\nx=1\n"
+        parents_sources = [
+            LineSource(kind="original")
+            for _ in parents_text.splitlines()
+        ]
+        forest = FakeForest(
+            roots=[self.system, parents_file],
+            files=[self.system, parents_file],
+            xml_files=[],
+            scan_dir=self.root,
+        )
+        texts = {
+            self.system: (text, sources),
+            parents_file: (parents_text, parents_sources),
+        }
+
+        graph = ReferenceGraphBuilder().build_for_section(
+            forest,
+            "test",
+            resolved_provider=lambda path: texts.get(path),
+        )
+
+        parents = [
+            node for node in graph.children
+            if node.related_name
+        ]
+        self.assertEqual(
+            sorted(node.related_name for node in parents),
+            ["base_a", "base_b"],
+        )
+        expected_lines = {"base_a": 1, "base_b": 3}
+        for node in parents:
+            self.assertEqual(node.related_file_path, parents_file)
+            self.assertEqual(
+                node.related_line,
+                expected_lines[node.related_name],
+            )
+            self.assertTrue(node.related_resolved)
+
 
 if __name__ == "__main__":
     unittest.main()
