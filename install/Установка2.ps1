@@ -248,10 +248,10 @@ try {
     if (-not $ProjectRoot) {
         $ProjectRoot = (Get-Location).Path
 
-        if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot 'requirements.txt') -PathType Leaf)) {
+        if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot 'src\requirements.txt') -PathType Leaf)) {
             $fallback = Get-ProjectRoot -ScriptRoot $PSScriptRoot
 
-            if (Test-Path -LiteralPath (Join-Path $fallback 'requirements.txt') -PathType Leaf) {
+            if (Test-Path -LiteralPath (Join-Path $fallback 'src\requirements.txt') -PathType Leaf) {
                 $ProjectRoot = $fallback
             }
         }
@@ -279,7 +279,7 @@ try {
     }
 
     if (-not $RequirementsFile) {
-        $RequirementsFile = Join-Path $ProjectRoot 'requirements.txt'
+        $RequirementsFile = Join-Path $ProjectRoot 'src\requirements.txt'
     }
 
     if (-not (Test-Path -LiteralPath $RequirementsFile -PathType Leaf)) {
