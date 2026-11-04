@@ -36,7 +36,11 @@ class XmlFileOpener:
         return True
 
     # -------------------------------------------------- XmlResolver
-    def open_resolved(self, path) -> bool:
+    def open_resolved_at_line(self, path, line_number) -> bool:
+        """Открыть XML после резолва и перейти к строке (для графа)."""
+        return self.open_resolved(path, line_number=line_number)
+
+    def open_resolved(self, path, line_number=None) -> bool:
         path = Path(path)
 
         if not self._check_session(path):
@@ -61,6 +65,7 @@ class XmlFileOpener:
                     path,
                     result,
                     err,
+                    line_number,
                 ),
                 on_log=self.ctx.ui.log,
             )
@@ -133,7 +138,7 @@ class XmlFileOpener:
                 pass
         return Path(path).name
 
-    def _on_resolved(self, path, result, err):
+    def _on_resolved(self, path, result, err, line_number=None):
         if err is not None:
             self.ctx.ui.set_status("Ошибка")
             self.ctx.ui.log("Ошибка XML-резолва %s: %s" % (Path(path).name, err))
@@ -154,6 +159,7 @@ class XmlFileOpener:
             result.text,
             str(path),
             line_sources=getattr(result, "line_sources", ()) or (),
+            line_number=line_number,
         )
         self.ctx.ui.set_status(
             "Открыт XML-резолв%s: %s" % (mode, rel),

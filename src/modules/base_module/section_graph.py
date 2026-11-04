@@ -73,9 +73,10 @@ class SectionGraphFeature:
         )
 
         def work(log):
-            # Граф не должен конкурировать с фоновой сборкой и не
-            # перезапускать её: ждём завершения, затем идём по кэшу.
-            self.ctx.services.wait_prebuild(log)
+            # Обычный граф идёт по кэшу резолвера, поэтому ждём фоновую
+            # сборку. VFS-режим читает сырые файлы и в резолве не нуждается.
+            if not vfs_mode:
+                self.ctx.services.wait_prebuild(log)
             return self.ctx.services.build_section_graph(
                 forest,
                 section_name,
@@ -103,6 +104,7 @@ class SectionGraphFeature:
         message = str(message)
         if (
             message.startswith("resolved graph")
+            or message.startswith("resolved xml")
             or message.startswith("resolve cache:")
             or message.startswith("Ожидание фоновой сборки")
             or message.startswith("Фоновая сборка завершена")
@@ -155,32 +157,21 @@ class SectionGraphFeature:
             self._window = SectionGraphWindow(
                 self.ctx.ui.open_at_line,
                 open_raw_at_line=self.ctx.ui.open_raw_at_line,
-                open_resolved_at_line=self._open_resolved_at_line,
                 on_vfs_toggled=self._on_vfs_toggled,
             )
 
         self._window.update_graph(graph, vfs_mode=vfs_mode)
         self.ctx.ui.show_module_window(self.WINDOW_KEY, self._window)
 
-    def _open_resolved_at_line(self, path, line_number):
-        """Открыть итоговый файл резолвера на строке совпадения."""
-        self.ctx.commands.execute(
-            "base.open_ltx_resolved_at_line",
-            path,
-            line_number,
-        )
-
 
 class SectionGraphWindow(QDialog):
     """Немодальное окно графа. Создаётся и наполняется модулем."""
 
     def __init__(self, open_at_line, open_raw_at_line=None,
-                 open_resolved_at_line=None, on_vfs_toggled=None,
-                 parent=None):
+                 on_vfs_toggled=None, parent=None):
         super().__init__(parent)
         self._open_at_line = open_at_line
         self._open_raw_at_line = open_raw_at_line
-        self._open_resolved_at_line = open_resolved_at_line
         self._on_vfs_toggled = on_vfs_toggled
         self._graph = None
         self._vfs_mode = False
@@ -385,14 +376,13 @@ class SectionGraphWindow(QDialog):
 
         resolved = bool(getattr(node, "resolved", False))
 
-        if resolved and self._open_resolved_at_line is not None:
-            # Строка относится к итоговому файлу после резолва.
-            self._open_resolved_at_line(node.file_path, node.first_match_line)
-        elif self._open_raw_at_line is not None:
+        if resolved or self._open_raw_at_line is None:
+            # Итоговый файл резолвера: открываем через общую шину —
+            # обработчик сам выберет резолв и кэш.
+            self._open_at_line(node.file_path, node.first_match_line)
+        else:
             # VFS/скрипты: строка относится к исходному файлу.
             self._open_raw_at_line(node.file_path, node.first_match_line)
-        else:
-            self._open_at_line(node.file_path, node.first_match_line)
 
     def _on_open_clicked(self):
         self._on_item_double_clicked(self._active_list.currentItem())

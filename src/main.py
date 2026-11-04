@@ -39,6 +39,7 @@ def main():
     from core.resolver_service import ResolverService
     from core.assembly_service import AssemblyService
     from core.resolved_cache import ResolvedCache
+    from core.xml_resolve_service import XmlResolveService
 
     from sdk import SDK_VERSION, ModuleContext, ModuleLoader
     from sdk.events import Events
@@ -80,6 +81,7 @@ def main():
         cache=cache,
         resolved_cache=resolved_cache,
     )
+    xml_resolve_service = XmlResolveService(resolved_cache=resolved_cache)
     assembly_service = AssemblyService(
         resolver_service=resolver_service,
         generated_dir=app_dir / "generated",
@@ -94,6 +96,7 @@ def main():
         resolver_service=resolver_service,
         assembly_service=assembly_service,
         generated_dir=app_dir / "generated",
+        xml_resolve_service=xml_resolve_service,
     )
 
     # 2) Сервисы платформы.

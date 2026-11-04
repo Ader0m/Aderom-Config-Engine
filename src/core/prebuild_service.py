@@ -1,14 +1,18 @@
 # -*- coding: utf-8 -*-
 """Фоновая предсборка резолвера.
 
-Запускается после построения дерева, резолвит LTX-корни (файлы, которые
-дают итоговые конфиги) и складывает результаты в общий ResolvedCache
-(память + диск). Include-файлы отдельно не резолвятся: их содержимое уже
-входит в итоговый текст корня.
+Запускается после построения дерева и складывает в общий ResolvedCache
+(память + диск):
 
-Для многоядерной сборки используется пул процессов: Resolver4 — Python-код,
-поэтому потоки не дают ускорения из-за GIL. По умолчанию берётся ~75%
-логических процессоров, но всегда оставляется хотя бы один для UI/ОС.
+- LTX-корни (файлы, которые дают итоговые конфиги); include-файлы
+  отдельно не резолвятся, их содержимое уже входит в итоговый текст корня;
+- все XML-файлы леса (include-сборка + DXML), иначе поиск по XML
+  в графе связей каждый раз читает и разбирает их заново.
+
+Для многоядерной сборки используется пул процессов: Resolver4 и
+XmlResolver — Python-код, поэтому потоки не дают ускорения из-за GIL.
+По умолчанию берётся ~75% логических процессоров, но всегда оставляется
+хотя бы один для UI/ОС.
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ import logging
 import multiprocessing as mp
 import os
 import threading
+from pathlib import Path
 
 from .resolve_targets import resolved_ltx_roots
 
@@ -52,24 +57,43 @@ def _init_worker(resolver_script, source_map, abs_map):
     _WORKER_STATE["abs_map"] = abs_map
 
 
-def _worker_resolve(root_path):
-    """Резолв одного корня в дочернем процессе."""
+def _worker_resolve(job):
+    """Резолв одного LTX-корня в дочернем процессе."""
+    root_path, key = job
     try:
         value = _WORKER_STATE["adapter"].assemble_resolved(
             str(root_path),
             _WORKER_STATE["source_map"],
             _WORKER_STATE["abs_map"],
         )
-        return str(root_path), value, None
+        return root_path, key, value, None
     except Exception as exc:
-        return str(root_path), None, str(exc)
+        return root_path, key, None, str(exc)
+
+
+def _init_xml_worker(config_dir):
+    """Инициализация XML-резолвера в процессе-воркере."""
+    from .xml_resolver import XmlResolver
+
+    _WORKER_STATE["xml"] = XmlResolver(config_dir=config_dir)
+
+
+def _worker_resolve_xml(job):
+    """Резолв одного XML-файла в дочернем процессе."""
+    path, key = job
+    try:
+        value = _WORKER_STATE["xml"].resolve_output(path)
+        return path, key, value, None
+    except Exception as exc:
+        return path, key, None, str(exc)
 
 
 class PrebuildService:
-    """Фоновая предсборка LTX-корней."""
+    """Фоновая предсборка LTX-корней и XML-файлов."""
 
-    def __init__(self, resolver, workers=None):
+    def __init__(self, resolver, xml_resolver=None, workers=None):
         self._resolver = resolver
+        self._xml_resolver = xml_resolver
         self._workers = workers
         self._lock = threading.RLock()
         self._thread = None
@@ -98,7 +122,19 @@ class PrebuildService:
         if old is not None and old.is_alive():
             old.join(timeout=0.5)
 
-        targets = resolved_ltx_roots(forest)
+        ltx_targets = resolved_ltx_roots(forest)
+        xml_targets = []
+        if self._xml_resolver is not None:
+            if hasattr(self._xml_resolver, "refresh"):
+                self._xml_resolver.refresh()
+            seen = set()
+            for path in (getattr(forest, "xml_files", ()) or ()):
+                path = Path(path)
+                key = str(path).lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                xml_targets.append(path)
 
         def _size(path):
             try:
@@ -107,27 +143,35 @@ class PrebuildService:
                 return 0
 
         # Мелкие файлы быстрее дают видимый прогресс и заполняют кэш.
-        targets.sort(key=_size)
+        ltx_targets.sort(key=_size)
+        xml_targets.sort(key=_size)
 
         with self._lock:
             stop_event = threading.Event()
             self._stop = stop_event
             self._state = "running"
             self._done = 0
-            self._total = len(targets)
+            self._total = len(ltx_targets) + len(xml_targets)
             self._error = None
             self._pool = None
             self._thread = threading.Thread(
                 target=self._run,
-                args=(forest, config_dir, targets, stop_event),
+                args=(
+                    forest,
+                    config_dir,
+                    ltx_targets,
+                    xml_targets,
+                    stop_event,
+                ),
                 name="ltx-prebuild",
                 daemon=True,
             )
             self._thread.start()
 
         logger.info(
-            "Фоновая сборка запущена: %d файлов, процессов: %d",
-            len(targets),
+            "Фоновая сборка запущена: LTX %d, XML %d, процессов: %d",
+            len(ltx_targets),
+            len(xml_targets),
             self._workers or _default_workers(),
         )
 
@@ -169,44 +213,11 @@ class PrebuildService:
             }
 
     # -------------------------------------------------- рабочий поток
-    def _run(self, forest, config_dir, targets, stop_event):
-        total = len(targets)
-
+    def _run(self, forest, config_dir, ltx_targets, xml_targets, stop_event):
         try:
-            missing = []
-
-            # 1. Всё, что уже есть на диске/в памяти, не отправляем воркерам.
-            for path in targets:
-                if stop_event.is_set():
-                    break
-                if self._resolver.has_resolved(path, forest, config_dir):
-                    with self._lock:
-                        if self._stop is stop_event:
-                            self._done += 1
-                else:
-                    missing.append(path)
-
-            # 2. Оставшееся резолвим параллельно.
-            if missing and not stop_event.is_set():
-                workers = self._workers or _default_workers()
-                adapter = self._resolver.get_adapter()
-
-                if workers > 1 and adapter is not None:
-                    self._run_parallel(
-                        forest,
-                        config_dir,
-                        missing,
-                        stop_event,
-                        workers,
-                        adapter,
-                    )
-                else:
-                    self._run_sequential(
-                        forest,
-                        config_dir,
-                        missing,
-                        stop_event,
-                    )
+            self._run_ltx(forest, config_dir, ltx_targets, stop_event)
+            if not stop_event.is_set():
+                self._run_xml(config_dir, xml_targets, stop_event)
         except Exception as exc:
             with self._lock:
                 if self._stop is stop_event:
@@ -220,12 +231,86 @@ class PrebuildService:
                         "idle" if stop_event.is_set() else "done"
                     )
                 state = self._state
+                done = self._done
+                total = self._total
 
             if state == "done":
-                logger.info("Фоновая сборка завершена: %d файлов", total)
+                logger.info(
+                    "Фоновая сборка завершена: %d/%d файлов",
+                    done,
+                    total,
+                )
 
-    def _run_sequential(self, forest, config_dir, targets, stop_event):
+    def _run_ltx(self, forest, config_dir, targets, stop_event):
+        # Подпись Resolver4.py входит в ключ кэша, поэтому адаптер
+        # должен быть найден до расчёта ключей.
+        adapter = self._resolver.ensure_adapter(forest, config_dir)
+
+        missing = []
+
+        # 1. Всё, что уже есть на диске/в памяти, не отправляем воркерам.
         for path in targets:
+            if stop_event.is_set():
+                break
+            key = self._resolver.resolved_key(path, forest, config_dir)
+            if self._resolver.has_resolved_key(key):
+                self._advance(stop_event)
+            else:
+                missing.append((path, key))
+
+        if not missing or stop_event.is_set():
+            return
+
+        # 2. Оставшееся резолвим параллельно.
+        workers = self._workers or _default_workers()
+
+        if workers > 1 and adapter is not None:
+            self._run_parallel(
+                forest,
+                config_dir,
+                missing,
+                stop_event,
+                workers,
+                adapter,
+            )
+        else:
+            self._run_sequential(
+                forest,
+                config_dir,
+                missing,
+                stop_event,
+            )
+
+    def _run_xml(self, config_dir, targets, stop_event):
+        if self._xml_resolver is None or not targets:
+            return
+
+        missing = []
+        for path in targets:
+            if stop_event.is_set():
+                break
+            key = self._xml_resolver.cache_key(path, config_dir)
+            if self._xml_resolver.has_resolved_by_key(key):
+                self._advance(stop_event)
+            else:
+                missing.append((path, key))
+
+        if not missing or stop_event.is_set():
+            return
+
+        workers = self._workers or _default_workers()
+        if workers > 1:
+            self._run_parallel_xml(config_dir, missing, stop_event, workers)
+        else:
+            self._run_sequential_xml(config_dir, missing, stop_event)
+
+    def _advance(self, stop_event):
+        with self._lock:
+            if self._stop is stop_event:
+                self._done += 1
+
+    def _run_sequential(self, forest, config_dir, jobs, stop_event):
+        for path, key in jobs:
             if stop_event.is_set():
                 break
             try:
@@ -234,6 +319,7 @@ class PrebuildService:
                     forest,
                     config_dir,
                     log=None,
+                    key=key,
                 )
             except Exception as exc:
                 with self._lock:
@@ -243,23 +329,41 @@ class PrebuildService:
                 if "Resolver4.py не найден" in str(exc):
                     break
 
-            with self._lock:
-                if self._stop is stop_event:
-                    self._done += 1
+            self._advance(stop_event)
+            self._log_progress(stop_event, jobs)
 
-            self._log_progress(stop_event, targets)
+    def _run_sequential_xml(self, config_dir, jobs, stop_event):
+        for path, key in jobs:
+            if stop_event.is_set():
+                break
+            try:
+                self._xml_resolver.resolve_output(
+                    path,
+                    config_dir,
+                    log=None,
+                    key=key,
+                )
+            except Exception as exc:
+                with self._lock:
+                    if self._stop is stop_event:
+                        self._error = str(exc)
+                logger.warning("Предсборка XML %s: %s", path, exc)
+
+            self._advance(stop_event)
+            self._log_progress(stop_event, jobs)
 
     def _run_parallel(self, forest, config_dir, missing, stop_event,
                       workers, adapter):
         source_map, abs_map = self._resolver.source_maps(forest)
         script = adapter.resolver_script
 
+        jobs = [(str(path), key) for path, key in missing]
         pool = None
         try:
             ctx = mp.get_context("spawn")
             try:
                 pool = ctx.Pool(
-                    processes=min(workers, max(1, len(missing))),
+                    processes=min(workers, max(1, len(jobs))),
                     initializer=_init_worker,
                     initargs=(str(script), source_map, abs_map),
                 )
@@ -280,9 +384,9 @@ class PrebuildService:
                 if self._stop is stop_event:
                     self._pool = pool
 
-            for root_str, value, error in pool.imap_unordered(
+            for root_str, key, value, error in pool.imap_unordered(
                 _worker_resolve,
-                [str(path) for path in missing],
+                jobs,
                 chunksize=1,
             ):
                 if stop_event.is_set():
@@ -299,23 +403,77 @@ class PrebuildService:
                         forest,
                         config_dir,
                         value,
+                        key=key,
                     )
 
-                with self._lock:
-                    if self._stop is stop_event:
-                        self._done += 1
-
-                self._log_progress(stop_event, missing)
+                self._advance(stop_event)
+                self._log_progress(stop_event, jobs)
         finally:
-            if pool is not None:
-                try:
-                    if stop_event.is_set():
-                        pool.terminate()
-                    else:
-                        pool.close()
-                    pool.join()
-                except Exception:
-                    pass
+            self._close_pool(pool, stop_event)
+
+    def _run_parallel_xml(self, config_dir, missing, stop_event, workers):
+        jobs = [(str(path), key) for path, key in missing]
+        canonical = config_dir
+        if hasattr(self._xml_resolver, "effective_config_dir"):
+            canonical = self._xml_resolver.effective_config_dir(config_dir)
+        pool = None
+        try:
+            ctx = mp.get_context("spawn")
+            try:
+                pool = ctx.Pool(
+                    processes=min(workers, max(1, len(jobs))),
+                    initializer=_init_xml_worker,
+                    initargs=(str(canonical),),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Не удалось создать пул XML-процессов (%s), "
+                    "перехожу на один поток",
+                    exc,
+                )
+                self._run_sequential_xml(
+                    config_dir,
+                    missing,
+                    stop_event,
+                )
+                return
+            with self._lock:
+                if self._stop is stop_event:
+                    self._pool = pool
+
+            for path, key, value, error in pool.imap_unordered(
+                _worker_resolve_xml,
+                jobs,
+                chunksize=1,
+            ):
+                if stop_event.is_set():
+                    break
+
+                if error is not None:
+                    with self._lock:
+                        if self._stop is stop_event:
+                            self._error = error
+                    logger.warning("Предсборка XML %s: %s", path, error)
+                elif value is not None:
+                    self._xml_resolver.store_output_by_key(key, value)
+
+                self._advance(stop_event)
+                self._log_progress(stop_event, jobs)
+        finally:
+            self._close_pool(pool, stop_event)
+
+    @staticmethod
+    def _close_pool(pool, stop_event):
+        if pool is None:
+            return
+        try:
+            if stop_event.is_set():
+                pool.terminate()
+            else:
+                pool.close()
+            pool.join()
+        except Exception:
+            pass
 
     def _log_progress(self, stop_event, targets):
         with self._lock:

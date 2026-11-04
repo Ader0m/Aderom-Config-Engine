@@ -47,6 +47,21 @@ def detect_config_dir(candidates):
     return None
 
 
+def canonical_config_dir(config_dir):
+    """Привести выбранный каталог к реальному каталогу configs.
+
+    Пользователь/UI может передать корень игры, ``gamedata`` или уже
+    ``gamedata/configs``. XML-резолву и ключу кэша нужен именно каталог
+    с ``system.ltx``, иначе include-пути и ключи будут разными.
+    """
+    if config_dir is None:
+        return None
+    found = detect_config_dir([config_dir])
+    if found is not None:
+        return found
+    return normalize_path(config_dir)
+
+
 def rel_path(p, base) -> str:
     try:
         return os.path.relpath(str(p), str(base))

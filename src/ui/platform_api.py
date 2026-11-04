@@ -6,6 +6,7 @@ PlatformApi — сервисы UI-платформы и точка регист�
 """
 
 import os
+import time
 
 from PyQt5.QtWidgets import QApplication, QFileDialog, QMessageBox
 
@@ -326,6 +327,15 @@ class PlatformApi:
         if self._pending_file_actions.pop(_path_key(path), None) is not None:
             self.log("[open] навигация отменена, файл не открыт: %s" % path)
 
+    def _log_slow_view(self, kind, title, content_elapsed, tab_elapsed):
+        """Диагностика: показать, сколько заняла отрисовка вкладки."""
+        total = content_elapsed + tab_elapsed
+        if total >= 0.5:
+            self.log(
+                "[%s] отрисовка %.2f s (контент %.2f, вкладка %.2f): %s"
+                % (kind, total, content_elapsed, tab_elapsed, title)
+            )
+
     def open_resolved_tab(self, tab_id, title, text, line_sources, root_path,
                           line_number=None):
         """Создать ResolvedView и открыть его как вкладку."""
@@ -333,24 +343,32 @@ class PlatformApi:
             return
         from .editor import ResolvedView  # локальный импорт, чтобы не цеплять PyQt до окна
 
+        started = time.perf_counter()
         view = ResolvedView()
         view.set_content(text, line_sources, root_path)
+        content_elapsed = time.perf_counter() - started
+
         view.source_activated.connect(
             lambda path, search: self.request_open_file_with_search(path, search)
         )
         view.diagnostic.connect(lambda msg: self.log("[resolved] %s" % msg))
         view.diagnostic.connect(lambda msg: self.set_status(msg, 8000))
+
+        started = time.perf_counter()
         self.window.editor.open_tab(
             tab_id,
             title,
             view,
             source_path=root_path,
         )
+        tab_elapsed = time.perf_counter() - started
+        self._log_slow_view("resolved", title, content_elapsed, tab_elapsed)
+
         if line_number is not None:
             view.goto_line(int(line_number))
 
     def open_xml_resolved_tab(self, tab_id, title, text, root_path,
-                              line_sources=None):
+                              line_sources=None, line_number=None):
         """Открыть XML-резолв в отдельной вкладке с панелью источников."""
         if self.window is None:
             return
@@ -358,6 +376,7 @@ class PlatformApi:
 
         sources = list(line_sources or [])
         has_sources = any(src is not None for src in sources)
+        started = time.perf_counter()
         view = ResolvedView()
         view.set_content(
             text,
@@ -365,6 +384,8 @@ class PlatformApi:
             str(root_path),
             sources_visible=has_sources,
         )
+        content_elapsed = time.perf_counter() - started
+
         view.source_activated.connect(
             lambda path, search: self.request_open_file_with_search(path, search)
         )
@@ -373,12 +394,19 @@ class PlatformApi:
         )
         view.diagnostic.connect(lambda msg: self.log("[xml-resolved] %s" % msg))
         view.diagnostic.connect(lambda msg: self.set_status(msg, 8000))
+
+        started = time.perf_counter()
         self.window.editor.open_tab(
             tab_id,
             title,
             view,
             source_path=str(root_path),
         )
+        tab_elapsed = time.perf_counter() - started
+        self._log_slow_view("xml-resolved", title, content_elapsed, tab_elapsed)
+
+        if line_number is not None:
+            view.goto_line(int(line_number))
 
     def request_open_file_raw_with_search(self, path, search_text):
         """Открыть файл как сырой текст и перейти к строке поиска."""

@@ -486,10 +486,18 @@ class SourceListModel(QAbstractListModel):
         if not index.isValid():
             return None
         src = self._sources[index.row()]
-        if isinstance(src, tuple):
+
+        kind = getattr(src, "kind", None)
+        if kind is not None:
+            if kind == "original":
+                pretty = self.ORIGINAL_LABEL
+            else:
+                pretty = getattr(src, "display", "") or ""
+        elif isinstance(src, tuple):
             pretty = src[0]
         else:
             pretty = src
+
         if role == Qt.DisplayRole:
             if pretty is None:
                 return ""
@@ -497,6 +505,10 @@ class SourceListModel(QAbstractListModel):
                 return self.ORIGINAL_LABEL
             return pretty
         if role == Qt.ToolTipRole:
+            if kind is not None:
+                if kind in ("file", "patch"):
+                    return "Двойной клик — открыть файл-источник"
+                return None
             if not isinstance(src, tuple):
                 return None
             return "Двойной клик — открыть файл-источник"
@@ -506,7 +518,15 @@ class SourceListModel(QAbstractListModel):
         base = super().flags(index)
         if not index.isValid():
             return Qt.NoItemFlags
-        if not isinstance(self._sources[index.row()], tuple):
+
+        src = self._sources[index.row()]
+        kind = getattr(src, "kind", None)
+        if kind is not None:
+            if kind in ("file", "patch") and getattr(src, "path", None):
+                return base
+            return base & ~Qt.ItemIsEnabled
+
+        if not isinstance(src, tuple):
             return base & ~Qt.ItemIsEnabled
         return base
 
@@ -850,6 +870,34 @@ class ResolvedView(QWidget):
 
     def _on_source_double_clicked(self, row):
         src = self.source_list.source_at(row)
+        kind = getattr(src, "kind", None)
+
+        if kind is not None:
+            pretty = "оригинал" if kind == "original" else (
+                getattr(src, "display", "") or ""
+            )
+            full_path = getattr(src, "path", None)
+            if kind not in ("file", "patch") or full_path is None:
+                self.diagnostic.emit(
+                    "Строка %d (%s): открывать нечего."
+                    % (row + 1, pretty)
+                )
+                return
+
+            if not (0 <= row < self.editor.lines()):
+                self.diagnostic.emit(
+                    "Строка %d: вне границ редактора (всего строк: %d)."
+                    % (row + 1, self.editor.lines())
+                )
+                return
+
+            line_text = self.editor.text(row).rstrip("\r\n")
+            if getattr(src, "open_raw", False):
+                self.source_raw_activated.emit(full_path, line_text)
+            else:
+                self.source_activated.emit(full_path, line_text)
+            return
+
         if not isinstance(src, tuple):
             self.diagnostic.emit(
                 "Строка %d: владельца нет (служебная строка или «оригинал») — открывать нечего."

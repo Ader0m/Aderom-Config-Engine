@@ -21,7 +21,6 @@ import hashlib
 import os
 import pickle
 import threading
-import time
 from collections import OrderedDict
 from pathlib import Path
 
@@ -51,55 +50,52 @@ def resolver_signature(resolver_script) -> str:
     )
 
 
+def invalidate_forest_signatures(forest):
+    """Оставить совместимый сброс на случай внешних вызовов."""
+    try:
+        forest._resolved_signature_memo = {}
+    except Exception:
+        pass
+
+
+def path_key(path) -> str:
+    """Стабильная идентичность пути: абсолютный, нормализованный, без регистра.
+
+    Один и тот же файл может прийти из скана, UI и графа с разным
+    регистром/разделителями — ключ кэша не должен от этого зависеть.
+    """
+    return os.path.normcase(os.path.normpath(os.path.abspath(str(path))))
+
+
 def file_subtree_signature(forest, root_path) -> str:
     """SHA1 подписи файла и всех его include/DLTX-зависимостей.
 
-    ``forest.display_children`` уже содержит include-детей и
-    присоединённые mod_*.ltx. Для файла вне дерева остаётся только
-    собственная метка.
+    Считается по поддереву конкретного файла, а не по всему лесу:
+    проверка одного файла не должна делать stat всех 4000+ LTX.
+    mtime/size/ctime читаются заново, поэтому внешние правки видны.
     """
-    memo = getattr(forest, "_resolved_signature_memo", None)
-    lock = getattr(forest, "_resolved_signature_lock", None)
-
-    if memo is None:
-        memo = {}
-        lock = threading.RLock()
-        try:
-            forest._resolved_signature_memo = memo
-            forest._resolved_signature_lock = lock
-        except Exception:
-            pass
-
-    if lock is None:
-        lock = threading.RLock()
-
     children_map = getattr(forest, "display_children", {}) or {}
 
-    with lock:
-        def calc(node, stack):
-            key = os.path.normcase(os.path.abspath(str(node)))
-            if key in memo:
-                return memo[key]
-            if key in stack:
-                return "cycle"
+    def calc(node, stack):
+        key = os.path.normcase(os.path.abspath(str(node)))
+        if key in stack:
+            return "cycle"
 
-            digest = hashlib.sha1()
-            digest.update(key.encode("utf-8", "replace"))
-            digest.update(b"\0")
-            digest.update(file_stamp(node).encode("ascii"))
+        digest = hashlib.sha1()
+        digest.update(key.encode("utf-8", "replace"))
+        digest.update(b"\0")
+        digest.update(file_stamp(node).encode("ascii"))
 
-            children = children_map.get(Path(node), []) or []
-            for child in children:
-                digest.update(b"\1")
-                digest.update(
-                    calc(child, stack | frozenset((key,))).encode("ascii")
-                )
+        children = children_map.get(Path(node), []) or []
+        for child in children:
+            digest.update(b"\1")
+            digest.update(
+                calc(child, stack | frozenset((key,))).encode("ascii")
+            )
 
-            value = digest.hexdigest()
-            memo[key] = value
-            return value
+        return digest.hexdigest()
 
-        return calc(root_path, frozenset())
+    return calc(root_path, frozenset())
 
 
 # ---------------------------------------------------------------- кэш
@@ -265,45 +261,6 @@ class ResolvedCache:
                     pass
             self.disk_hits = 0
             self.disk_writes = 0
-
-    def prune_disk(self, max_bytes=None, max_age_days=None):
-        """Удалить старые/лишние файлы дискового кэша."""
-        if self._cache_dir is None:
-            return
-
-        with self._lock:
-            files = []
-            total = 0
-            for path in self._cache_dir.glob("*.pkl.gz"):
-                try:
-                    st = path.stat()
-                except OSError:
-                    continue
-                files.append((st.st_mtime, st.st_size, path))
-                total += st.st_size
-
-            files.sort()
-
-            if max_age_days is not None:
-                cutoff = time.time() - max_age_days * 24 * 3600
-                for mtime, size, path in list(files):
-                    if mtime < cutoff:
-                        try:
-                            path.unlink()
-                            total -= size
-                            files.remove((mtime, size, path))
-                        except OSError:
-                            pass
-
-            if max_bytes is not None:
-                for _mtime, size, path in files:
-                    if total <= max_bytes:
-                        break
-                    try:
-                        path.unlink()
-                        total -= size
-                    except OSError:
-                        pass
 
     def stats(self):
         with self._lock:

@@ -296,13 +296,14 @@ class UiApiAdapter:
         )
 
     def open_xml_resolved_tab(self, tab_id, title, text, root_path,
-                              line_sources=()):
+                              line_sources=(), line_number=None):
         self._platform.open_xml_resolved_tab(
             tab_id,
             title,
             text,
             root_path,
             line_sources,
+            line_number,
         )
 
     def open_file_with_search(self, path, search_text):

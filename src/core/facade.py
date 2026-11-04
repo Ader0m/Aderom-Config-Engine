@@ -18,7 +18,7 @@ from pathlib import Path
 from .external import open_in_notepad_pp
 from .fs import find_system_ltx, detect_config_dir
 from .tree_query_service import search_nodes, sort_nodes
-from .xml_resolver import XmlResolver
+from .xml_resolve_service import XmlResolveService
 from .prebuild_service import PrebuildService
 
 
@@ -34,6 +34,7 @@ class CoreServices:
         resolver_service,
         assembly_service,
         generated_dir,
+        xml_resolve_service=None,
     ):
         """
         Args:
@@ -44,6 +45,7 @@ class CoreServices:
             resolver_service: ResolverService — сервис работы с резолвером.
             assembly_service: AssemblyService — сервис сборки конфигов.
             generated_dir: Директория для сгенерированных файлов.
+            xml_resolve_service: XmlResolveService — кэширующий XML-резолв.
         """
         # Сохраняем ссылки на реальные сервисы
         self.cache = cache
@@ -53,7 +55,8 @@ class CoreServices:
         self.resolver = resolver_service
         self.assembly = assembly_service
         self.generated_dir = Path(generated_dir)
-        self.prebuild = PrebuildService(resolver_service)
+        self.xml = xml_resolve_service or XmlResolveService()
+        self.prebuild = PrebuildService(resolver_service, self.xml)
 
         # Для обратной совместимости (модули пока используют старые имена)
         self._adapter = None  # Устаревшее, использовать через .resolver
@@ -65,6 +68,8 @@ class CoreServices:
         self.cache.clear()
         if hasattr(self.resolver, "invalidate_cache"):
             self.resolver.invalidate_cache()
+        if hasattr(self.xml, "clear"):
+            self.xml.clear()
 
     # -------------------------------------------------- фоновая предсборка
 
@@ -164,25 +169,39 @@ class CoreServices:
         каждого корня проверяется :class:`ResolvedCache`.
         """
         resolved_provider = None
+        xml_provider = None
 
-        if not vfs_mode:
-            config_dir = Path(getattr(forest, "scan_dir", "") or "")
-            reported = {"error": False}
+        config_dir = Path(getattr(forest, "scan_dir", "") or "")
+        reported = {"error": False}
 
-            def resolved_provider(root_path):
-                try:
-                    text, line_sources = self.resolver.assemble_resolved(
-                        root_path,
-                        forest,
-                        config_dir,
-                        log=None,
-                    )
-                    return text, line_sources
-                except Exception as exc:
-                    if log and not reported["error"]:
-                        log("resolved graph: резолвер недоступен: %s" % exc)
-                        reported["error"] = True
-                    return None
+        def resolved_provider(root_path):
+            try:
+                text, line_sources = self.resolver.assemble_resolved(
+                    root_path,
+                    forest,
+                    config_dir,
+                    log=None,
+                )
+                return text, line_sources
+            except Exception as exc:
+                if log and not reported["error"]:
+                    log("resolved graph: резолвер недоступен: %s" % exc)
+                    reported["error"] = True
+                return None
+
+        def xml_provider(xml_path):
+            try:
+                result = self.resolve_xml(
+                    xml_path,
+                    config_dir,
+                    log=None,
+                )
+                return result.text, result.line_sources
+            except Exception as exc:
+                if log and not reported["error"]:
+                    log("resolved xml: XML-резолвер недоступен: %s" % exc)
+                    reported["error"] = True
+                return None
 
         try:
             return self.graph_builder.build_for_section(
@@ -190,22 +209,37 @@ class CoreServices:
                 section_name,
                 vfs_mode=vfs_mode,
                 resolved_provider=resolved_provider,
+                xml_provider=xml_provider,
                 log=log,
             )
         finally:
-            if log and hasattr(self.resolver, "cache_stats"):
-                stats = self.resolver.cache_stats()
-                log(
-                    "resolve cache: entries=%d, chars=%d, hits=%d, "
-                    "disk_hits=%d, misses=%d"
-                    % (
-                        stats.get("entries", 0),
-                        stats.get("chars", 0),
-                        stats.get("hits", 0),
-                        stats.get("disk_hits", 0),
-                        stats.get("misses", 0),
+            if log:
+                if hasattr(self.resolver, "cache_stats"):
+                    stats = self.resolver.cache_stats()
+                    log(
+                        "resolve cache: entries=%d, chars=%d, hits=%d, "
+                        "disk_hits=%d, misses=%d"
+                        % (
+                            stats.get("entries", 0),
+                            stats.get("chars", 0),
+                            stats.get("hits", 0),
+                            stats.get("disk_hits", 0),
+                            stats.get("misses", 0),
+                        )
                     )
-                )
+                if hasattr(self.xml, "cache_stats"):
+                    stats = self.xml.cache_stats()
+                    log(
+                        "xml cache: entries=%d, chars=%d, hits=%d, "
+                        "disk_hits=%d, misses=%d"
+                        % (
+                            stats.get("entries", 0),
+                            stats.get("chars", 0),
+                            stats.get("hits", 0),
+                            stats.get("disk_hits", 0),
+                            stats.get("misses", 0),
+                        )
+                    )
 
     # -------------------------------------------------- внешние инструменты
 
@@ -225,12 +259,12 @@ class CoreServices:
 
     def resolve_xml(self, path, config_dir, log=None, dxml=True):
         """Разрешить XML: include-сборка + DXML (XmlResolveOutput)."""
-        resolver = XmlResolver(
-            config_dir=config_dir,
+        return self.xml.resolve_output(
+            path,
+            config_dir,
             log=log,
             dxml=dxml,
         )
-        return resolver.resolve_output(path, dxml=dxml)
 
     def resolve_xml_to_file(self, path, config_dir, log=None, dxml=True):
         """Разрешить XML и сохранить результат в generated/xml/."""

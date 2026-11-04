@@ -2,7 +2,27 @@
 """Модели данных ядра."""
 
 from dataclasses import dataclass, field
-from typing import Dict, Set
+from pathlib import Path
+from typing import Dict, Optional, Set
+
+
+@dataclass(frozen=True)
+class LineSource:
+    """Владелец строки итогового текста.
+
+    Это доменная модель, а не формат панели UI:
+    - ``kind``: ``original``, ``file``, ``patch``;
+    - ``display``: человекочитаемая подпись (без UI-маркеров);
+    - ``path``: файл для открытия, если есть;
+    - ``line``: строка в исходнике, если известна;
+    - ``open_raw``: открывать исходник без резолва.
+    """
+
+    kind: str = "none"
+    display: str = ""
+    path: Optional[Path] = None
+    line: int = 0
+    open_raw: bool = False
 
 
 @dataclass

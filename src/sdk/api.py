@@ -22,6 +22,16 @@ from typing import Callable, Optional, Protocol, Sequence
 # ---------------------------------------------------------------- модели данных
 
 
+class LineSource(Protocol):
+    """Владелец строки итогового текста (см. core.models.LineSource)."""
+
+    kind: str
+    display: str
+    path: Optional[Path]
+    line: int
+    open_raw: bool
+
+
 @dataclass(frozen=True)
 class TreeSummary:
     """Краткая сводка по построенному дереву."""
@@ -85,7 +95,7 @@ class XmlResolveResult:
     virtual_name: str
     dxml_applied: bool = False
     notes: tuple[str, ...] = field(default_factory=tuple)
-    line_sources: tuple = field(default_factory=tuple)
+    line_sources: tuple[LineSource, ...] = field(default_factory=tuple)
 
 
 # ---------------------------------------------------------------- контракты
@@ -168,7 +178,7 @@ class CoreApi(Protocol):
         forest,
         config_dir: Path,
         log: Optional[Callable[[str], None]] = None,
-    ) -> tuple[str, list[Optional[str]]]:
+    ) -> tuple[str, list[Optional[LineSource]]]:
          """Собрать чистый резолв + маппинг (source_per_line)."""
 
     def resolve_xml(
@@ -200,7 +210,8 @@ class CoreApi(Protocol):
     ) -> SectionGraph:
         """Построить граф связей для секции.
 
-        ``vfs_mode=True`` — обойти всю VFS, не ограничиваясь LtxForest.
+        ``vfs_mode=True`` — обойти всю VFS, не ограничиваясь LtxForest,
+        и сравнить её с сырым итоговым деревом без запуска резолвера.
         В ``SectionGraph.lost_children`` попадут связи, которых нет в
         итоговом дереве.
         """
@@ -297,7 +308,7 @@ class UiApi(Protocol):
         tab_id: str,
         title: str,
         text: str,
-        line_sources: list[Optional[str]],
+        line_sources: Sequence[Optional[LineSource]],
         root_path: Path,
         line_number: Optional[int] = None,
     ) -> None:
@@ -309,12 +320,12 @@ class UiApi(Protocol):
         title: str,
         text: str,
         root_path: Path,
-        line_sources: tuple = (),
+        line_sources: Sequence[Optional[LineSource]] = (),
+        line_number: Optional[int] = None,
     ) -> None:
         """Открыть вкладку с результатом XML-резолва.
 
-        ``line_sources`` — владельцы строк в том же формате, что у LTX:
-        ``(pretty, full_path)``, ``"__ORIGINAL__"`` или ``None``.
+        ``line_sources`` — владельцы строк в том же формате, что у LTX.
         """
 
     def open_file_with_search(self, path: Path, search_text: str) -> None:

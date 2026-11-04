@@ -15,11 +15,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
 from .fs import read_xml_text, pattern_match, normalize_path
+from .models import LineSource
+from .resolved_cache import file_stamp, path_key
 from .xml_dxml import DxmlProcessor
 from .xml_slaxml import (
     SlaxmlParser,
@@ -27,9 +32,6 @@ from .xml_slaxml import (
     assign_origins,
     pretty_dom,
 )
-
-
-ORIGINAL_MARKER = "__ORIGINAL__"
 
 
 class XmlResolveError(Exception):
@@ -44,10 +46,13 @@ class XmlResolveOutput:
     virtual_name: str
     dxml_applied: bool = False
     notes: tuple[str, ...] = ()
-    line_sources: tuple = ()
+    line_sources: tuple[LineSource, ...] = ()
 
 
 _INCLUDE_QUOTED_RE = re.compile(r'"([^"]*)"')
+
+# Версия логики XML-резолва: меняется при изменении формата результата.
+XML_CACHE_VERSION = "xml-resolve-v2"
 
 
 class XmlResolver:
@@ -104,6 +109,13 @@ class XmlResolver:
             scripts_dir=self.scripts_dir,
             builtin_patches=builtin_patches and self._dxml_enabled,
         )
+
+        # Список include-зависимостей файла считается чтением всех
+        # включённых XML. Это дорого повторять при каждом открытии уже
+        # собранного файла, поэтому кэшируем зависимости и проверяем их
+        # актуальность по mtime/size/ctime (см. ``_dependencies_signature``).
+        self._dep_cache = {}
+        self._dep_lock = threading.RLock()
 
         if self.dxml.unsupported_scripts:
             self.notes.append(
@@ -184,10 +196,17 @@ class XmlResolver:
             self._log("XML: не удалось прочитать include %s: %s" % (relative, exc))
             return None
 
-    def _list_include_files(self, mask: str):
-        """Список файлов по маске как FS.file_list(FS_ListFiles)."""
-        mask = str(mask).replace("\\", "/")
-        out = []
+    def _all_files(self):
+        """Все файлы configs (один обход на экземпляр резолвера).
+
+        ``rglob`` по всему каталогу на каждый ``#include "*.xml"`` — слишком
+        дорого при предсборке сотен XML-файлов.
+        """
+        cache = getattr(self, "_all_files_cache", None)
+        if cache is not None:
+            return cache
+
+        cache = []
         for path in self.config_dir.rglob("*"):
             try:
                 if not path.is_file():
@@ -195,10 +214,175 @@ class XmlResolver:
                 rel = str(path.relative_to(self.config_dir)).replace("\\", "/")
             except (OSError, ValueError):
                 continue
-            if pattern_match(rel, mask):
-                out.append(rel.replace("/", "\\"))
+            cache.append(rel)
+        cache.sort(key=str.lower)
+        self._all_files_cache = cache
+        return cache
+
+    def _list_include_files(self, mask: str):
+        """Список файлов по маске как FS.file_list(FS_ListFiles)."""
+        mask = str(mask).replace("\\", "/")
+        out = [
+            rel.replace("/", "\\")
+            for rel in self._all_files()
+            if pattern_match(rel, mask)
+        ]
         out.sort(key=lambda s: s.lower())
         return out
+
+    # -------------------------------------------------- зависимости и ключ кэша
+    def dependency_paths(self, path):
+        """Файлы, от которых зависит резолв: сам файл + все #include.
+
+        Используется только для ключа кэша, поэтому не собирает текст,
+        а лишь рекурсивно читает директивы include.
+        """
+        out = []
+        seen = set()
+        self._collect_dependencies(
+            self.virtual_name(path),
+            stack=[],
+            out=out,
+            seen=seen,
+        )
+        return out
+
+    def _collect_dependencies(self, virtual_name, stack, out, seen):
+        key = str(virtual_name).replace("\\", "/").lower()
+        if key in stack or key in seen:
+            return
+
+        path = self._resolve_relative(virtual_name)
+        if path is None:
+            return
+        seen.add(key)
+        out.append(path)
+
+        try:
+            text = read_xml_text(path)
+        except Exception:
+            return
+
+        stack.append(key)
+        try:
+            for line in text.split("\n"):
+                if not (line.startswith("#") and "#include" in line):
+                    continue
+                match = _INCLUDE_QUOTED_RE.search(line)
+                if not match:
+                    continue
+                include = match.group(1)
+                if "*.xml" in include:
+                    for file_name in self._list_include_files(include):
+                        self._collect_dependencies(
+                            file_name,
+                            stack,
+                            out,
+                            seen,
+                        )
+                else:
+                    self._collect_dependencies(
+                        include,
+                        stack,
+                        out,
+                        seen,
+                    )
+        finally:
+            stack.pop()
+
+    def _dependencies_signature(self, path) -> str:
+        cache_key = path_key(path)
+
+        # Проверяем закэшированный список зависимостей по их меткам.
+        # Если ни один файл не менялся, читать include-дерево заново не
+        # нужно: это и есть основной расход при cache hit.
+        with self._dep_lock:
+            cached = self._dep_cache.get(cache_key)
+        if cached is not None:
+            entries, signature = cached
+            if all(file_stamp(dep) == stamp for dep, stamp in entries):
+                return signature
+
+        seen = set()
+        deps = []
+        for dep in self.dependency_paths(path):
+            dep = Path(dep)
+            key = os.path.normcase(os.path.abspath(str(dep)))
+            if key in seen:
+                continue
+            seen.add(key)
+            deps.append((key, dep))
+
+        digest = hashlib.sha1()
+        entries = []
+        for key, dep in sorted(deps, key=lambda item: item[0]):
+            stamp = file_stamp(dep)
+            entries.append((dep, stamp))
+            digest.update(key.encode("utf-8", "replace"))
+            digest.update(b"\0")
+            digest.update(stamp.encode("ascii"))
+            digest.update(b"\1")
+
+        signature = digest.hexdigest()
+        with self._dep_lock:
+            self._dep_cache[cache_key] = (tuple(entries), signature)
+        return signature
+
+    def scripts_signature(self) -> str:
+        """Подпись dxml_core.script и всех modxml_*.script."""
+        sig = getattr(self, "_scripts_signature", None)
+        if sig is not None:
+            return sig
+
+        if not self._dxml_enabled or self.scripts_dir is None:
+            self._scripts_signature = ""
+            return ""
+
+        scripts_dir = Path(self.scripts_dir)
+        files = []
+        core = scripts_dir / "dxml_core.script"
+        if core.is_file():
+            files.append(core)
+        try:
+            files.extend(
+                sorted(
+                    scripts_dir.glob("modxml_*.script"),
+                    key=lambda p: p.name.lower(),
+                )
+            )
+        except OSError:
+            pass
+
+        digest = hashlib.sha1()
+        for script in files:
+            key = os.path.normcase(os.path.abspath(str(script)))
+            digest.update(key.encode("utf-8", "replace"))
+            digest.update(b"\0")
+            digest.update(file_stamp(script).encode("ascii"))
+            digest.update(b"\1")
+
+        sig = digest.hexdigest()
+        self._scripts_signature = sig
+        return sig
+
+    def cache_key(self, path, dxml=None):
+        """Ключ кэша результата: файл + include-дерево + DXML-скрипты."""
+        use_dxml = self._dxml_enabled if dxml is None else bool(dxml)
+        return (
+            XML_CACHE_VERSION,
+            path_key(self.config_dir),
+            path_key(path),
+            self._dependencies_signature(path),
+            self.scripts_signature() if use_dxml else "",
+            bool(use_dxml),
+        )
+
+    def refresh(self):
+        """Сбросить внутрисессионные кэши каталога/скриптов/зависимостей."""
+        self._all_files_cache = None
+        self._scripts_signature = None
+        with self._dep_lock:
+            self._dep_cache.clear()
 
     # -------------------------------------------------- include-сборка
     def assemble_with_origins(self, virtual_name: str):
@@ -335,7 +519,7 @@ class XmlResolver:
             try:
                 text, refs = pretty_dom(dom)
                 line_sources = tuple(
-                    self._to_ui_source(ref, virtual_name)
+                    self._to_line_source(ref, virtual_name)
                     for ref in refs
                 )
             except Exception as exc:
@@ -352,24 +536,32 @@ class XmlResolver:
             line_sources=line_sources,
         )
 
-    def _to_ui_source(self, ref, root_virtual_name):
-        """SourceRef -> формат панели источников LTX/XML."""
+    def _to_line_source(self, ref, root_virtual_name):
+        """SourceRef -> доменный LineSource."""
         if ref is None:
             return None
 
         if ref.kind == "patch":
-            pretty = "DXML: %s" % ref.file
-            return (
-                pretty,
-                str(ref.path) if ref.path is not None else None,
-                "raw",
+            return LineSource(
+                kind="patch",
+                display="DXML: %s" % ref.file,
+                path=ref.path,
+                line=ref.line,
+                open_raw=True,
             )
 
         if str(ref.file).replace("/", "\\") == root_virtual_name:
-            return ORIGINAL_MARKER
+            return LineSource(
+                kind="original",
+                display="",
+                path=self._resolve_relative(root_virtual_name),
+                open_raw=True,
+            )
 
-        return (
-            ref.file,
-            str(ref.path) if ref.path is not None else None,
-            "raw",
+        return LineSource(
+            kind="file",
+            display=ref.file,
+            path=ref.path,
+            line=ref.line,
+            open_raw=True,
         )

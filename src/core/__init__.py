@@ -12,12 +12,13 @@ core — ядро приложения.
 - каркас графа связей.
 """
 
-from .models import LtxForest
+from .models import LtxForest, LineSource
 
 from .fs import (
     RESOLVER_CANDIDATES,
     TEXT_FILE_SUFFIXES,
     normalize_path,
+    canonical_config_dir,
     rel_path,
     pattern_match,
     read_text_safe,
@@ -40,7 +41,7 @@ from .fs import (
 from .external import open_in_notepad_pp
 
 from .file_cache import FileCacheSystem
-from .resolved_cache import ResolvedCache
+from .resolved_cache import ResolvedCache, invalidate_forest_signatures
 
 from .tree_builder import (
     TreeBuilder,
@@ -74,16 +75,19 @@ from .xml_slaxml import (
 )
 from .xml_dxml import DxmlProcessor, DxmlError, XmlObject
 from .xml_resolver import XmlResolver, XmlResolveOutput, XmlResolveError
+from .xml_resolve_service import XmlResolveService
 
 
 __all__ = [
     # Модели
     "LtxForest",
+    "LineSource",
 
     # fs
     "RESOLVER_CANDIDATES",
     "TEXT_FILE_SUFFIXES",
     "normalize_path",
+    "canonical_config_dir",
     "rel_path",
     "pattern_match",
     "read_text_safe",
@@ -108,6 +112,7 @@ __all__ = [
     # cache
     "FileCacheSystem",
     "ResolvedCache",
+    "invalidate_forest_signatures",
 
     # tree
     "TreeBuilder",
@@ -145,4 +150,5 @@ __all__ = [
     "XmlResolver",
     "XmlResolveOutput",
     "XmlResolveError",
+    "XmlResolveService",
 ]

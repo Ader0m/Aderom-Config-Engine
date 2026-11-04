@@ -16,6 +16,7 @@ from .api import (
     GraphNode,
     SectionGraph,
     XmlResolveResult,
+    LineSource,
 )
 from .adapters import CoreApiAdapter, TaskApiAdapter, UiApiAdapter
 
@@ -40,6 +41,7 @@ __all__ = [
     "GraphNode",
     "SectionGraph",
     "XmlResolveResult",
+    "LineSource",
     "CoreApiAdapter",
     "TaskApiAdapter",
     "UiApiAdapter",

@@ -8,6 +8,7 @@ from .fs import (
     load_resolver_module,
     pretty_source,
 )
+from .models import LineSource
 
 
 class LtxResolverAdapter:
@@ -129,8 +130,7 @@ class LtxResolverAdapter:
         Returns:
             (text, line_sources): текст и список той же длины, что и число
             строк в ``text``. Элемент ``line_sources[i]``:
-              - кортеж ``(pretty, полный_путь)`` — владелец из другого файла;
-              - маркер ``"__ORIGINAL__"`` — владелец сам ``root_path``;
+              - :class:`core.models.LineSource` — владелец строки;
               - ``None`` — владельца нет (преамбула, пустые строки,
                 продолжения многострочных значений).
         """
@@ -143,17 +143,40 @@ class LtxResolverAdapter:
         # Resolver4 хранит в Item.filename stem без расширения в lower-case —
         # ключ для source_map и abs_map совпадает с ним.
         root_basename_no_ext = Path(root_path).stem.lower()
-        ORIGINAL = "__ORIGINAL__"
+
+        # Один и тот же источник встречается в тысячах строк (system.ltx —
+        # больше миллиона). Держим по одному LineSource на filename: это
+        # резко уменьшает память и позволяет pickle сохранять ссылки, а не
+        # миллион одинаковых объектов (иначе чтение кэша занимает секунды).
+        src_cache = {}
 
         def src_of(fn):
             if not fn:
                 return None
+
+            cached = src_cache.get(fn)
+            if cached is not None:
+                return cached
+
             if fn == root_basename_no_ext:
-                return ORIGINAL
-            pretty = pretty_source(fn, sm)
-            full = abs_map.get(fn)
-            # наверх уходит пара: показывать pretty, открывать full
-            return (pretty, str(full) if full is not None else None)
+                source = LineSource(
+                    kind="original",
+                    display="",
+                    path=Path(root_path),
+                    open_raw=False,
+                )
+            else:
+                pretty = pretty_source(fn, sm)
+                full = abs_map.get(fn)
+                source = LineSource(
+                    kind="file",
+                    display=pretty,
+                    path=Path(full) if full is not None else None,
+                    open_raw=False,
+                )
+
+            src_cache[fn] = source
+            return source
 
         lines = []
         line_sources = []

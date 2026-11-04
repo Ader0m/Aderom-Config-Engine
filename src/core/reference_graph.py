@@ -75,11 +75,12 @@ class ReferenceGraphBuilder:
 
     Обычный режим работает только с готовым деревом (LtxForest) от
     TreeBuilder. Для .ltx файлов использует пути из леса, для .script
-    сканирует scan_dir леса, для .xml — заглушка.
+    сканирует scan_dir леса, для .xml — XmlResolver, если передан
+    ``xml_provider``, иначе сырые XML-файлы леса.
 
     Режим ``vfs_mode`` игнорирует фильтр LtxForest и сканирует все
-    текстовые файлы под ``forest.scan_dir``. Это позволяет увидеть связи,
-    которые физически есть в VFS, но не выжили в итоговой сборке.
+    текстовые файлы под ``forest.scan_dir``. Это диагностический режим:
+    он не запускает резолвер, а сравнивает сырое дерево с сырым.
     """
 
     def __init__(self, cache=None):
@@ -91,9 +92,12 @@ class ReferenceGraphBuilder:
         section_name: str,
         vfs_mode: bool = False,
         resolved_provider=None,
+        xml_provider=None,
         log=None,
     ) -> SectionGraph:
         if vfs_mode:
+            # VFS-режим — диагностический: сравниваем сырое дерево с
+            # сырым деревом, не запуская резолв.
             return self.build_for_section_vfs(
                 forest,
                 section_name,
@@ -108,6 +112,7 @@ class ReferenceGraphBuilder:
                 forest,
                 section,
                 resolved_provider,
+                xml_provider=xml_provider,
                 log=log,
             )
             if graph is not None:
@@ -154,7 +159,11 @@ class ReferenceGraphBuilder:
         # 3. Сканируем .script файлы в scan_dir
         self._append_script_children(children, forest, section)
 
-        # 4. XML — заглушка
+        # 3.1. XML в raw-режиме: нужен для корректного сравнения VFS
+        # «потерянных» связей, иначе XML всегда выглядит потерянным.
+        self._append_xml_raw_children(children, forest, section)
+
+        # 4. XML — заглушка в старом смысле больше не нужна
 
         return SectionGraph(
             section_name=section,
@@ -162,12 +171,13 @@ class ReferenceGraphBuilder:
             children=children,
         )
 
-    def _build_resolved(self, forest, section, resolved_provider, log=None):
+    def _build_resolved(self, forest, section, resolved_provider,
+                        xml_provider=None, log=None):
         """Поиск по итоговым файлам резолвера (LTX-корням)."""
         from .resolve_targets import resolved_ltx_roots
 
         roots = resolved_ltx_roots(forest)
-        if not roots:
+        if not roots and xml_provider is None:
             return None
 
         items = []
@@ -198,7 +208,7 @@ class ReferenceGraphBuilder:
             if log and (i == 1 or i == total or i % 25 == 0):
                 log("resolved graph: %d/%d" % (i, total))
 
-        if not items:
+        if not items and xml_provider is None:
             return None
 
         root_node, texture = self._find_declaration_in_items(
@@ -206,12 +216,9 @@ class ReferenceGraphBuilder:
             section,
             resolved=True,
         )
-        if root_node is None:
-            return None
-
         children = []
 
-        if texture is not None:
+        if texture is not None and root_node is not None:
             raw_ref, tex_match = texture
             children.append(GraphNode(
                 display_name=self._texture_display_name(raw_ref),
@@ -225,7 +232,7 @@ class ReferenceGraphBuilder:
         for root, text, line_sources in items:
             matches = self._scan_ltx_text(text, section)
 
-            if root == root_node.file_path:
+            if root_node is not None and root == root_node.file_path:
                 # Объявление уже показано корневым узлом; остальные
                 # вхождения в том же итоговом файле оставляем детьми.
                 matches = [
@@ -255,11 +262,93 @@ class ReferenceGraphBuilder:
         # Скрипты не проходят через LTX-резолвер — их ищем по исходникам.
         self._append_script_children(children, forest, section)
 
+        # XML проходит через XmlResolver (include + DXML).
+        if xml_provider is not None:
+            self._append_xml_resolved_children(
+                children,
+                forest,
+                section,
+                xml_provider,
+                log=log,
+            )
+
+        if root_node is None:
+            # Секция может встречаться только в XML.
+            for index, node in enumerate(children):
+                if node.resolved and node.file_path is not None:
+                    root_node = children.pop(index)
+                    root_node = GraphNode(
+                        display_name=section,
+                        file_path=root_node.file_path,
+                        first_match_line=root_node.first_match_line,
+                        matches=root_node.matches,
+                        raw_ref=root_node.raw_ref,
+                        resolved=True,
+                    )
+                    break
+
+        if root_node is None:
+            return None
+
         return SectionGraph(
             section_name=section,
             root=root_node,
             children=children,
         )
+
+    def _append_xml_resolved_children(self, children, forest, section,
+                                      provider, log=None):
+        paths = list(getattr(forest, "xml_files", ()) or ())
+        total = len(paths)
+
+        for i, path in enumerate(paths, 1):
+            try:
+                result = provider(path)
+            except Exception as exc:
+                if log:
+                    log("resolved xml: %s: %s" % (Path(path).name, exc))
+                continue
+
+            if result is None:
+                continue
+
+            if isinstance(result, tuple):
+                text = result[0]
+                line_sources = result[1] if len(result) > 1 else []
+            else:
+                text = result
+                line_sources = []
+
+            if text:
+                matches = self._scan_xml_text(text, section)
+                if matches:
+                    display = self._owner_label(
+                        line_sources,
+                        matches[0].line_number,
+                        Path(path).name,
+                    )
+                    children.append(GraphNode(
+                        display_name=display,
+                        file_path=Path(path),
+                        first_match_line=matches[0].line_number,
+                        matches=matches,
+                        resolved=True,
+                    ))
+
+            if log and total and (i == 1 or i == total or i % 50 == 0):
+                log("resolved xml: %d/%d" % (i, total))
+
+    def _append_xml_raw_children(self, children, forest, section):
+        for path in (getattr(forest, "xml_files", ()) or ()):
+            path = Path(path)
+            matches = self._scan_xml_file(path, section)
+            if matches:
+                children.append(GraphNode(
+                    display_name=path.name,
+                    file_path=path,
+                    first_match_line=matches[0].line_number,
+                    matches=matches,
+                ))
 
     def _append_script_children(self, children, forest, section):
         scan_dir = Path(forest.scan_dir)
@@ -282,18 +371,28 @@ class ReferenceGraphBuilder:
         try:
             if line_sources and 1 <= line_number <= len(line_sources):
                 source = line_sources[line_number - 1]
+                if getattr(source, "kind", None) == "original":
+                    return fallback
+                display = getattr(source, "display", None)
+                if display:
+                    return display
                 if isinstance(source, tuple) and source:
                     return source[0]
-                if source and source != "__ORIGINAL__":
-                    return str(source)
+                if isinstance(source, str) and source:
+                    return source
         except Exception:
             pass
         return fallback
 
     # ------------------------------------------------------------ режим VFS
 
-    def build_for_section_vfs(self, forest, section_name: str, log=None) -> SectionGraph:
+    def build_for_section_vfs(self, forest, section_name: str,
+                              log=None) -> SectionGraph:
         """Построить граф по всем текстовым файлам VFS, без фильтра LtxForest.
+
+        Сравнение «потерянных» связей идёт с сырым деревом
+        (:meth:`_build_raw`), а не с результатом резолвера: VFS-режим
+        не должен запускать Resolver4/XmlResolver по всему лесу.
 
         В ``lost_children`` попадают только совпадения, которых нет в
         обычном (итоговом) графе той же секции.
@@ -302,7 +401,7 @@ class ReferenceGraphBuilder:
         files = scan_files(Path(forest.scan_dir), TEXT_FILE_SUFFIXES)
 
         try:
-            final_graph = self.build_for_section(forest, section)
+            final_graph = self._build_raw(forest, section)
         except ValueError:
             final_graph = None
 
@@ -368,7 +467,10 @@ class ReferenceGraphBuilder:
         text = self._read_file(file_path)
         if not text:
             return []
+        return self._scan_xml_text(text, section)
 
+    def _scan_xml_text(self, text: str, section: str) -> list[MatchInfo]:
+        """Сканирует исходный или итоговый XML-текст."""
         matches = []
         for line_num, line in enumerate(text.splitlines(), 1):
             if section in line.lower():
@@ -377,22 +479,40 @@ class ReferenceGraphBuilder:
                     line_number=line_num,
                     line_text=line,
                 ))
-
         return matches
 
     def _lost_children(self, vfs_graph: SectionGraph, final_graph: SectionGraph):
         """Оставить только те совпадения VFS, которых нет в итоговом графе."""
         final_keys = set()
 
+        # XML сравниваем по файлу, а не по строке: разные представления
+        # (резолв/DXML) меняют форматирование и номера строк. Если файл
+        # уже найден в итоговом графе, он не потерян.
+        final_xml_files = set()
+
         if final_graph is not None:
+            if final_graph.root.file_path is not None:
+                root_path = normalize_path(final_graph.root.file_path)
+                if root_path.suffix.lower() == ".xml":
+                    final_xml_files.add(root_path)
             for match in final_graph.root.matches:
                 final_keys.add(self._match_key(final_graph.root.file_path, match))
             for node in final_graph.children:
+                if node.file_path is not None:
+                    node_path = normalize_path(node.file_path)
+                    if node_path.suffix.lower() == ".xml":
+                        final_xml_files.add(node_path)
                 for match in node.matches:
                     final_keys.add(self._match_key(node.file_path, match))
 
         lost = []
         for node in vfs_graph.children:
+            if (
+                node.file_path is not None
+                and normalize_path(node.file_path) in final_xml_files
+            ):
+                continue
+
             matches = [
                 match
                 for match in node.matches

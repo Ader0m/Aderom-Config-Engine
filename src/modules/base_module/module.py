@@ -108,6 +108,7 @@ class BaseModule(ModuleBase):
         commands.register("base.assemble_open", self._tree_actions.assemble_and_open)
         commands.register("base.open_ltx_resolved_at_line", self._ltx_opener.open_resolved_at_line)
         commands.register("base.open_xml_resolved", self._xml_opener.open_resolved)
+        commands.register("base.open_xml_resolved_at_line", self._xml_opener.open_resolved_at_line)
         commands.register("base.open_xml_resolved_notepad", self._xml_opener.open_resolved_in_external_editor)
         commands.register("base.copy_rel_path", self._tree_actions.copy_relative_path)
         commands.register("base.open_raw", self._tree_actions.open_raw)

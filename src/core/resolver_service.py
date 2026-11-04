@@ -18,22 +18,28 @@ ResolverService — сервис ядра для оркестрации рабо
 
 import logging
 import threading
+import time
 from pathlib import Path
 
 from .fs import (
     build_search_bases,
     find_resolver_script,
     build_source_map,
-    normalize_path,
 )
 from .resolver_adapter import LtxResolverAdapter
 from .resolved_cache import (
     ResolvedCache,
     file_subtree_signature,
+    path_key,
     resolver_signature,
 )
 
 logger = logging.getLogger(__name__)
+
+# Порог диагностики: операции резолва длиннее этого пишем в лог,
+# чтобы было видно, где именно теряются секунды при открытии файла.
+_SLOW_KEY_SECONDS = 0.25
+_SLOW_CACHE_SECONDS = 0.25
 
 
 class ResolverService:
@@ -50,10 +56,21 @@ class ResolverService:
         self._adapter = None
         self._inflight_lock = threading.RLock()
         self._inflight = {}
+        self._last_keys = {}
+
+        # Ключ резолва содержит подпись всего поддерева (stat всех
+        # include/DLTX-файлов). Для system.ltx это тысячи файлов, поэтому
+        # повторно считать подпись при каждом открытии нельзя: кэшируем
+        # готовый ключ на время жизни дерева. Сбрасывается вместе с
+        # ResolvedCache при «Чистом запуске».
+        self._key_cache = {}
+        self._key_lock = threading.RLock()
 
     def invalidate_cache(self):
         """Сбросить кэш резолва (вызывается при «Чистом запуске»)."""
         self._resolved_cache.clear()
+        with self._key_lock:
+            self._key_cache.clear()
 
     def cache_stats(self):
         return self._resolved_cache.stats()
@@ -79,27 +96,61 @@ class ResolverService:
         """Вернуть текущий адаптер (или None)."""
         return self._adapter
 
+    def ensure_adapter(self, forest, config_dir):
+        """Публичная инициализация адаптера перед расчётом ключей кэша.
+
+        Ключ содержит подпись Resolver4.py, поэтому адаптер должен быть
+        найден до первого ``resolved_key()``.
+        """
+        return self._ensure_adapter(forest, config_dir)
+
     def _resolved_key(self, kind, root_path, forest, config_dir):
         """Ключ кэша: результат зависит от файла и его зависимостей.
 
         Подпись поддерева включает mtime+size самого файла, include-файлов
         и присоединённых mod_*.ltx, а также подпись Resolver4.py.
+
+        ``config_dir`` намеренно не входит в ключ: он влияет только на
+        поиск Resolver4.py (уже покрыт подписью скрипта), а разные точки
+        вызова передают то ``configs``, то ``scan_dir``.
+
+        Готовый ключ кэшируется на время жизни дерева: подпись поддерева
+        может стоить секунды (system.ltx включает тысячи файлов), а
+        открытие уже собранного файла не должно её пересчитывать.
         """
-        config = (
-            str(normalize_path(config_dir))
-            if config_dir is not None
-            else ""
-        )
-        return (
-            "resolve-v1",
+        root_key = path_key(root_path)
+        identity = (id(forest), kind, root_key)
+
+        with self._key_lock:
+            cached = self._key_cache.get(identity)
+        if cached is not None:
+            return cached
+
+        started = time.perf_counter()
+        key = (
+            # v4: line_sources хранятся как ссылки на общие LineSource.
+            # Старые записи (v3) содержат по объекту на строку и читаются
+            # с диска секундами, поэтому их нужно пересобрать.
+            "resolve-v4",
             kind,
-            str(normalize_path(root_path)),
+            root_key,
             file_subtree_signature(forest, root_path),
-            config,
             resolver_signature(
                 getattr(self._adapter, "resolver_script", None)
             ),
         )
+
+        with self._key_lock:
+            self._key_cache[identity] = key
+
+        elapsed = time.perf_counter() - started
+        if elapsed >= _SLOW_KEY_SECONDS:
+            logger.warning(
+                "resolver key: %.2f s для %s (подпись поддерева)",
+                elapsed,
+                Path(root_path).name,
+            )
+        return key
 
     def _cache_call(self, kind, root_path, forest, config_dir,
                     compute, log=None):
@@ -110,8 +161,27 @@ class ResolverService:
         повторный проход.
         """
         key = self._resolved_key(kind, root_path, forest, config_dir)
+        return self._cache_call_key(key, root_path, compute, log=log)
 
+    def _cache_call_key(self, key, root_path, compute, log=None):
+        """То же, но ключ уже посчитан (предсборка не делает stat дважды)."""
+        identity = None
+        previous = None
+        if isinstance(key, tuple) and len(key) >= 3:
+            identity = (key[1], key[2])
+            with self._inflight_lock:
+                previous = self._last_keys.get(identity)
+                self._last_keys[identity] = key
+
+        started = time.perf_counter()
         cached = self._resolved_cache.get(key)
+        load_elapsed = time.perf_counter() - started
+        if load_elapsed >= _SLOW_CACHE_SECONDS:
+            logger.warning(
+                "resolver cache: %.2f s на чтение %s",
+                load_elapsed,
+                Path(root_path).name,
+            )
         if cached is not None:
             if log:
                 log("resolver cache: hit %s" % Path(root_path).name)
@@ -124,15 +194,51 @@ class ResolverService:
                 self._inflight[key] = key_lock
 
         with key_lock:
-            cached = self._resolved_cache.get(key, count_miss=False)
-            if cached is not None:
-                if log:
-                    log("resolver cache: hit %s" % Path(root_path).name)
-                return cached
+            try:
+                cached = self._resolved_cache.get(key, count_miss=False)
+                if cached is not None:
+                    if log:
+                        log("resolver cache: hit %s" % Path(root_path).name)
+                    return cached
 
-            value = compute()
-            self._resolved_cache.set(key, value)
-            return value
+                if log:
+                    log(
+                        "resolver cache: miss %s (%s)"
+                        % (
+                            Path(root_path).name,
+                            self._miss_reason(previous, key),
+                        )
+                    )
+                started = time.perf_counter()
+                value = compute()
+                compute_elapsed = time.perf_counter() - started
+                if compute_elapsed >= _SLOW_CACHE_SECONDS:
+                    logger.warning(
+                        "resolver compute: %.2f s для %s",
+                        compute_elapsed,
+                        Path(root_path).name,
+                    )
+                self._resolved_cache.set(key, value)
+                return value
+            finally:
+                with self._inflight_lock:
+                    if self._inflight.get(key) is key_lock:
+                        self._inflight.pop(key, None)
+
+    @staticmethod
+    def _miss_reason(previous, key):
+        """Человекочитаемая причина промаха для диагностики."""
+        if previous is None:
+            return "нет предыдущего ключа"
+        labels = ("version", "kind", "path", "signature", "resolver")
+        changed = []
+        for index, label in enumerate(labels):
+            if index >= len(previous) or index >= len(key):
+                changed.append("формат ключа")
+                break
+            if previous[index] != key[index]:
+                changed.append(label)
+        return "изменилось: " + ", ".join(changed) if changed else "ключи совпадают"
 
     # -------------------------------------------------- предсборка
     def source_maps(self, forest):
@@ -163,22 +269,27 @@ class ResolverService:
 
     def has_resolved(self, root_path, forest, config_dir):
         """Есть ли готовый resolved-кэш для файла."""
-        key = self._resolved_key(
-            "resolved",
-            root_path,
-            forest,
-            config_dir,
+        return self.has_resolved_key(
+            self.resolved_key(root_path, forest, config_dir)
         )
+
+    def has_resolved_key(self, key):
+        """Проверка готовности по уже посчитанному ключу."""
         return self._resolved_cache.has(key)
 
-    def store_resolved(self, root_path, forest, config_dir, value):
-        """Положить результат фоновой сборки в кэш."""
-        key = self._resolved_key(
+    def resolved_key(self, root_path, forest, config_dir):
+        """Публичный ключ resolved-кэша для предсборки."""
+        return self._resolved_key(
             "resolved",
             root_path,
             forest,
             config_dir,
         )
+
+    def store_resolved(self, root_path, forest, config_dir, value, key=None):
+        """Положить результат фоновой сборки в кэш."""
+        if key is None:
+            key = self.resolved_key(root_path, forest, config_dir)
         self._resolved_cache.set(key, value)
 
     # -------------------------------------------------- проход резолвера
@@ -252,7 +363,8 @@ class ResolverService:
             log=log,
         )[0]
 
-    def assemble_resolved(self, root_path, forest, config_dir, log=None):
+    def assemble_resolved(self, root_path, forest, config_dir, log=None,
+                          key=None):
         adapter = self._ensure_adapter(forest, config_dir)
         if adapter is None:
             raise RuntimeError("Resolver4.py не найден")
@@ -260,6 +372,9 @@ class ResolverService:
         def compute():
             sm, abs_map = self.source_maps(forest)
             return adapter.assemble_resolved(root_path, sm, abs_map)
+
+        if key is not None:
+            return self._cache_call_key(key, root_path, compute, log=log)
 
         return self._cache_call(
             "resolved",
