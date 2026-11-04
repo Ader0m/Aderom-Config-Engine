@@ -90,6 +90,7 @@ class Palette:
     syn_parent: str = "#DCDCAA"     # родители после ]:
     syn_list_add: str = "#4EC9B0"   # DLTX: >key (добавить в CSV)
     syn_list_remove: str = "#CE9178" # DLTX: <key (удалить из CSV)
+    syn_list_value: str = "#9ACD8B" # элементы списка через запятую
 
     # ============ Редактор (Scintilla, программные цвета) ============
     ed_margin_bg: str = "#313335"
@@ -439,6 +440,7 @@ QTreeWidget::branch:has-children:open, QTreeView::branch:has-children:open {
      @[section]        -> syn_safe      (#4EC9B0)
      ключи             -> syn_key       (#9CDCFE)
      значения          -> syn_value     (#B5CEA8)
+     списки через ','  -> syn_list_value (#9ACD8B)
      числа             -> syn_number    (#6897BB)
      true/false        -> syn_constant  (#CC7832)
      #include          -> syn_directive (#CC7832)

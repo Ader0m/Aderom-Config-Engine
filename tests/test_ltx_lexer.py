@@ -38,7 +38,28 @@ class LtxLexerTest(unittest.TestCase):
         self.assertIn((6, 9, lexers.STYLE_NUMBER), tokens)
         self.assertIn((11, 14, lexers.STYLE_NUMBER), tokens)
         self.assertIn((16, 20, lexers.STYLE_CONSTANT), tokens)
-        self.assertIn((22, 26, lexers.STYLE_VALUE), tokens)
+        self.assertIn((22, 26, lexers.STYLE_LIST_VALUE), tokens)
+
+    def test_comma_separated_list(self):
+        tokens = styles(
+            "bones = bip01_r_calf,bip01_l_calf,bip01_r_forearm"
+        )
+        values = [
+            (start, end, style)
+            for start, end, style in tokens
+            if style == lexers.STYLE_LIST_VALUE
+        ]
+        self.assertEqual(
+            values,
+            [
+                (8, 20, lexers.STYLE_LIST_VALUE),
+                (21, 33, lexers.STYLE_LIST_VALUE),
+                (34, 49, lexers.STYLE_LIST_VALUE),
+            ],
+        )
+        self.assertTrue(
+            any(style == lexers.STYLE_ASSIGN for _, _, style in tokens)
+        )
 
     def test_include(self):
         tokens = styles('#include "configs/defines.ltx"')

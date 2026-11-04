@@ -17,6 +17,7 @@
     [section]:parent1, parent2    syn_section + syn_parent
     [section]:!parent             syn_section + syn_deleted + syn_parent
     key = value                   syn_key + syn_assign + syn_value
+    key = a, b, c                 syn_key + syn_assign + syn_list_value
     !key                          syn_deleted    (DLTX: удаление ключа)
     >key = value                  syn_list_add   (DLTX: добавление в CSV)
     <key = value                  syn_list_remove (DLTX: удаление из CSV)
@@ -59,6 +60,7 @@ STYLE_CONSTANT = 14
 STYLE_PARENT = 15
 STYLE_PARENT_DELETE = 16
 STYLE_INCLUDE_PATH = 17
+STYLE_LIST_VALUE = 18
 
 _STYLE_COLORS = {
     STYLE_DEFAULT: PALETTE.syn_default,
@@ -79,6 +81,7 @@ _STYLE_COLORS = {
     STYLE_PARENT: PALETTE.syn_parent,
     STYLE_PARENT_DELETE: PALETTE.syn_deleted,
     STYLE_INCLUDE_PATH: PALETTE.syn_value,
+    STYLE_LIST_VALUE: PALETTE.syn_list_value,
 }
 
 _BOLD_STYLES = {
@@ -128,7 +131,21 @@ def _find_unquoted(line, char, start, end):
     return -1
 
 
-def _tokenize_value(line, start, end, tokens):
+def _has_unquoted_comma(line, start, end):
+    """True, если в диапазоне есть запятая вне кавычек (значение-список)."""
+    in_quote = False
+    i = start
+    while i < end:
+        ch = line[i]
+        if ch == '"':
+            in_quote = not in_quote
+        elif ch == "," and not in_quote:
+            return True
+        i += 1
+    return False
+
+
+def _tokenize_value(line, start, end, tokens, list_mode=False):
     """Разметить значение: строки, числа, константы, обычные значения."""
     i = start
     while i < end:
@@ -150,7 +167,9 @@ def _tokenize_value(line, start, end, tokens):
                     j += 1
                     break
                 j += 1
-            tokens.append((i, j, STYLE_VALUE))
+            tokens.append(
+                (i, j, STYLE_LIST_VALUE if list_mode else STYLE_VALUE)
+            )
             i = j
             continue
 
@@ -165,7 +184,9 @@ def _tokenize_value(line, start, end, tokens):
         elif _RE_NUMBER.fullmatch(word):
             tokens.append((i, j, STYLE_NUMBER))
         else:
-            tokens.append((i, j, STYLE_VALUE))
+            tokens.append(
+                (i, j, STYLE_LIST_VALUE if list_mode else STYLE_VALUE)
+            )
         i = j
 
 
@@ -325,7 +346,8 @@ def tokenize_line(line):
     else:
         _tokenize_key(body, indent, eq, tokens)
         tokens.append((eq, eq + 1, STYLE_ASSIGN))
-        _tokenize_value(body, eq + 1, end, tokens)
+        list_mode = _has_unquoted_comma(body, eq + 1, end)
+        _tokenize_value(body, eq + 1, end, tokens, list_mode=list_mode)
 
     if comment != -1:
         tokens.append((comment, n, STYLE_COMMENT))
@@ -371,6 +393,7 @@ class LtxLexer(QsciLexerCustom):
             STYLE_PARENT: "Parent",
             STYLE_PARENT_DELETE: "DLTX removed parent",
             STYLE_INCLUDE_PATH: "Include path",
+            STYLE_LIST_VALUE: "List value",
         }.get(style, "")
 
     def defaultColor(self, style):
