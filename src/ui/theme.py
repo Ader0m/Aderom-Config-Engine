@@ -74,13 +74,22 @@ class Palette:
     text_dock: str = "#A9B7C6"
     text_disabled: str = "#5A5D63"
 
-    # ============ Подсветка синтаксиса (LTX / XML, использует editor.py) ============
+    # ============ Подсветка синтаксиса (LTX / XML / Lua, ui/lexers.py) ============
     syn_default: str = "#BCBFBC"    # обычный текст
     syn_section: str = "#C578DD"    # [section], <tag>
     syn_key: str = "#9CDCFE"        # ключи, атрибуты
     syn_value: str = "#B5CEA8"      # значения, строки
     syn_comment: str = "#6A9955"    # комментарии, <!-- -->
-    syn_assign: str = "#D4D4D4"     # знак '='
+    syn_assign: str = "#D4D4D4"     # знак '=', пунктуация
+    syn_number: str = "#6897BB"     # числа (Darcula: Number)
+    syn_constant: str = "#CC7832"   # true/false/nil, сущности XML
+    syn_directive: str = "#CC7832"  # #include, ключевые слова Lua
+    syn_override: str = "#FFC66D"   # DLTX: ![section]
+    syn_deleted: str = "#F14C4C"    # DLTX: !![section], !key, !parent
+    syn_safe: str = "#4EC9B0"       # DLTX: @[section]
+    syn_parent: str = "#DCDCAA"     # родители после ]:
+    syn_list_add: str = "#4EC9B0"   # DLTX: >key (добавить в CSV)
+    syn_list_remove: str = "#CE9178" # DLTX: <key (удалить из CSV)
 
     # ============ Редактор (Scintilla, программные цвета) ============
     ed_margin_bg: str = "#313335"
@@ -421,14 +430,20 @@ QTreeWidget::branch:has-children:open, QTreeView::branch:has-children:open {
 }
 
 /* ============ Редактор кода ============
-   Подсветка синтаксиса задаётся НЕ здесь, а программно в ui/editor.py
+   Подсветка синтаксиса задаётся НЕ здесь, а программно в ui/lexers.py
    теми же цветами палитры (syn_*): QSS не управляет стилями лексера
    Scintilla. Здесь — только рамка/фон виджета и шрифт в pt.
-     секции [section]  -> syn_section  (#C578DD)
-     ключи             -> syn_key      (#9CDCFE)
-     значения          -> syn_value    (#B5CEA8)
-     комментарии       -> syn_comment  (#6A9955)
-     строка-override   -> selection    (#2E436E) */
+     [section]         -> syn_section   (#C578DD)
+     ![section]        -> syn_override  (#FFC66D)
+     !![section]       -> syn_deleted   (#F14C4C)
+     @[section]        -> syn_safe      (#4EC9B0)
+     ключи             -> syn_key       (#9CDCFE)
+     значения          -> syn_value     (#B5CEA8)
+     числа             -> syn_number    (#6897BB)
+     true/false        -> syn_constant  (#CC7832)
+     #include          -> syn_directive (#CC7832)
+     комментарии       -> syn_comment   (#6A9955)
+     строка-override   -> selection     (#2E436E) */
 
 QTextEdit, QPlainTextEdit {
     background-color: $bg_main;

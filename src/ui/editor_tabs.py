@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Вкладки редактора: базовый редактор + вкладки, созданные модулями."""
 
+import logging
 from pathlib import Path
 
 from PyQt5.QtCore import Qt
@@ -11,17 +12,20 @@ from sdk.events import Events
 from .editor import CodeEditor
 
 
+log = logging.getLogger(__name__)
 DEFAULT_TAB_ID = "ui.editor"
 
 
 class EditorTabs(QTabWidget):
     """Контейнер вкладок. Содержимое вкладок создают модули."""
 
-    def __init__(self, events=None, parent=None):
+    def __init__(self, events=None, commands=None, parent=None):
         super().__init__(parent)
 
         self._events = events
+        self._commands = commands
         self._tab_ids = {}
+        self._tab_source_paths = {}
         self._default_editor = None
 
         self.setTabsClosable(True)
@@ -66,6 +70,7 @@ class EditorTabs(QTabWidget):
             index = self.indexOf(widget)
             self.setTabText(index, title)
             self.setCurrentIndex(index)
+            self._tab_source_paths[tab_id] = source_path
             self._publish(Events.UI_TAB_OPENED, tab_id)
             self._publish_file_opened(source_path)
             return
@@ -74,11 +79,13 @@ class EditorTabs(QTabWidget):
             self.close_tab(tab_id)
 
         self._add_tab(tab_id, title, widget)
+        self._tab_source_paths[tab_id] = source_path
         self._publish(Events.UI_TAB_OPENED, tab_id)
         self._publish_file_opened(source_path)
 
     def close_tab(self, tab_id):
         widget = self._tab_ids.pop(tab_id, None)
+        self._tab_source_paths.pop(tab_id, None)
         if widget is None:
             return False
 
@@ -139,6 +146,7 @@ class EditorTabs(QTabWidget):
         index = self.indexOf(self._default_editor)
         self.setTabText(index, tab_text)
         self.setTabToolTip(index, tooltip)
+        self._tab_source_paths[DEFAULT_TAB_ID] = source_path
         self._publish(Events.UI_TAB_OPENED, DEFAULT_TAB_ID)
         self._publish_file_opened(
             source_path if source_path is not None else tooltip
@@ -193,6 +201,11 @@ class EditorTabs(QTabWidget):
 
         menu = QMenu(self)
 
+        path = self._tab_path(index)
+        file_actions = self._add_file_actions(menu, path)
+        if file_actions:
+            menu.addSeparator()
+
         close_right = menu.addAction("Закрыть все вкладки справа")
         close_right.setEnabled(index + 1 < self.count())
 
@@ -205,7 +218,9 @@ class EditorTabs(QTabWidget):
 
         chosen = menu.exec_(tab_bar.mapToGlobal(pos))
 
-        if chosen is close_right:
+        if chosen in file_actions:
+            self._run_file_action(file_actions[chosen], path)
+        elif chosen is close_right:
             self._close_tabs_by_indices(
                 range(index + 1, self.count())
             )
@@ -215,6 +230,52 @@ class EditorTabs(QTabWidget):
             )
         elif chosen is close_all:
             self._close_tabs_by_indices(range(self.count()))
+
+    def _tab_path(self, index):
+        """Файл, который показывает вкладка (если известен)."""
+        widget = self.widget(index)
+        tab_id = self._tab_id_for_widget(widget)
+
+        path = self._tab_source_paths.get(tab_id)
+        if path is None and isinstance(widget, CodeEditor):
+            path = widget.current_file
+        return str(path) if path is not None else None
+
+    def _add_file_actions(self, menu, path):
+        """Действия с файлом вкладки: те же команды, что и в дереве VFS."""
+        if path is None or self._commands is None:
+            return {}
+
+        suffix = Path(path).suffix.lower()
+        resolved_external = (
+            "base.open_xml_resolved_notepad"
+            if suffix == ".xml"
+            else "base.assemble_open"
+        )
+
+        entries = (
+            ("Открыть исходный", "base.open_raw"),
+            ("Открыть resolved", "ui.open_file"),
+            ("Открыть resolved в Notepad++", resolved_external),
+            ("Открыть исходный в Notepad++", "base.open_notepad"),
+        )
+
+        actions = {}
+        for label, command in entries:
+            if not self._has_command(command):
+                continue
+            actions[menu.addAction(label)] = command
+        return actions
+
+    def _has_command(self, name):
+        has = getattr(self._commands, "has", None)
+        return bool(has(name)) if callable(has) else True
+
+    def _run_file_action(self, command, path):
+        try:
+            self._commands.execute(command, path)
+        except Exception:
+            log.exception("Не удалось выполнить команду вкладки: %s", command)
 
     def _close_tabs_by_indices(self, indices):
         """Закрыть вкладки по индексам, не сбивая нумерацию при удалении."""

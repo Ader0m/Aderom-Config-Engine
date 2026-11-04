@@ -29,18 +29,14 @@ from PyQt5.QtWidgets import (
     
 )
 
-from PyQt5.Qsci import (
-    QsciScintilla,
-    QsciLexerProperties,
-    QsciLexerXML,
-)
-
-from PyQt5.Qsci import QsciScintilla, QsciLexerProperties, QsciLexerXML
+from PyQt5.Qsci import QsciScintilla
 
 try:  # запуск с корня проекта (src в sys.path)
     from ui.theme import PALETTE
+    from ui.lexers import create_lexer
 except ImportError:  # запуск как пакета
     from .theme import PALETTE
+    from .lexers import create_lexer
 
 
 class EditorFindBar(QWidget):
@@ -247,55 +243,7 @@ class CodeEditor(QWidget):
         self.editor.setTabWidth(4)
 
     def _apply_lexer(self, path):
-        if path is None:
-            self._set_lexer(None)
-            return
-
-        path = Path(path)
-        suffix = path.suffix.lower()
-
-        if suffix == ".xml":
-            lexer = QsciLexerXML()
-        elif suffix == ".ltx":
-            lexer = QsciLexerProperties()
-        else:
-            lexer = None
-
-        if lexer is None:
-            self._set_lexer(None)
-            return
-
-        font = self._editor_font()
-        paper = QColor(PALETTE.bg_main)
-        fg = QColor(PALETTE.syn_default)
-
-        # Дефолты лексера.
-        lexer.setDefaultFont(font)
-        lexer.setDefaultColor(fg)
-        lexer.setDefaultPaper(paper)
-
-        # Переопределения ШТАТНЫХ per-style дефолтов лексера
-        # (Comment=Comic Sans/#007F7F, Section=#E0F0F0 и т.д.).
-        # style == -1 означает "все стили".
-        lexer.setFont(font)
-        lexer.setColor(fg)
-        lexer.setPaper(paper)
-
-        if isinstance(lexer, QsciLexerProperties):
-            lexer.setColor(QColor(PALETTE.syn_comment), QsciLexerProperties.Comment)
-            lexer.setColor(QColor(PALETTE.syn_section), QsciLexerProperties.Section)
-            lexer.setColor(QColor(PALETTE.syn_key), QsciLexerProperties.Key)
-            lexer.setColor(QColor(PALETTE.syn_assign), QsciLexerProperties.Assignment)
-            lexer.setColor(QColor(PALETTE.syn_value), QsciLexerProperties.DefaultValue)
-        elif isinstance(lexer, QsciLexerXML):
-            lexer.setColor(QColor(PALETTE.syn_section), QsciLexerXML.Tag)
-            lexer.setColor(QColor(PALETTE.syn_section), QsciLexerXML.XMLTagEnd)
-            lexer.setColor(QColor(PALETTE.syn_key), QsciLexerXML.Attribute)
-            lexer.setColor(QColor(PALETTE.syn_value), QsciLexerXML.HTMLDoubleQuotedString)
-            lexer.setColor(QColor(PALETTE.syn_value), QsciLexerXML.HTMLSingleQuotedString)
-            lexer.setColor(QColor(PALETTE.syn_comment), QsciLexerXML.HTMLComment)
-
-        self._set_lexer(lexer)
+        self._set_lexer(create_lexer(path))
 
     # -------------------------------------------------- публичные действия
     def show_find(self):
@@ -725,66 +673,11 @@ class ResolvedView(QWidget):
         self._apply_lexer(None)
 
     def _apply_lexer(self, path):
-        """Подсветка: XML для .xml, LTX/properties для остального."""
-        font = QFont(PALETTE.editor_font_family, PALETTE.editor_font_size_pt)
-        paper = QColor(PALETTE.bg_main)
-        fg = QColor(PALETTE.syn_default)
-
-        suffix = Path(path).suffix.lower() if path else ""
-
-        if suffix == ".xml":
-            lexer = QsciLexerXML()
-            lexer.setDefaultFont(font)
-            lexer.setDefaultColor(fg)
-            lexer.setDefaultPaper(paper)
-            lexer.setFont(font)
-            lexer.setColor(fg)
-            lexer.setPaper(paper)
-            lexer.setColor(QColor(PALETTE.syn_section), QsciLexerXML.Tag)
-            lexer.setColor(QColor(PALETTE.syn_section), QsciLexerXML.XMLTagEnd)
-            lexer.setColor(QColor(PALETTE.syn_key), QsciLexerXML.Attribute)
-            lexer.setColor(
-                QColor(PALETTE.syn_value),
-                QsciLexerXML.HTMLDoubleQuotedString,
-            )
-            lexer.setColor(
-                QColor(PALETTE.syn_value),
-                QsciLexerXML.HTMLSingleQuotedString,
-            )
-            lexer.setColor(
-                QColor(PALETTE.syn_comment),
-                QsciLexerXML.HTMLComment,
-            )
-        else:
-            lexer = QsciLexerProperties()
-            lexer.setDefaultFont(font)
-            lexer.setDefaultColor(fg)
-            lexer.setDefaultPaper(paper)
-            lexer.setFont(font)
-            lexer.setColor(fg)
-            lexer.setPaper(paper)
-            lexer.setColor(
-                QColor(PALETTE.syn_comment),
-                QsciLexerProperties.Comment,
-            )
-            lexer.setColor(
-                QColor(PALETTE.syn_section),
-                QsciLexerProperties.Section,
-            )
-            lexer.setColor(QColor(PALETTE.syn_key), QsciLexerProperties.Key)
-            lexer.setColor(
-                QColor(PALETTE.syn_assign),
-                QsciLexerProperties.Assignment,
-            )
-            lexer.setColor(
-                QColor(PALETTE.syn_value),
-                QsciLexerProperties.DefaultValue,
-            )
-
+        """Подсветка: XML, LTX/DLTX или Lua в зависимости от расширения."""
         # Ссылка обязательна: иначе лексер удаляется сборщиком мусора
         # сразу после выхода из метода.
-        self._lexer = lexer
-        self.editor.setLexer(lexer)
+        self._lexer = create_lexer(path)
+        self.editor.setLexer(self._lexer)
 
     # -------------------------------------------------- публичные API
     def set_sources_visible(self, visible):

@@ -4,7 +4,7 @@
 from pathlib import Path
 
 # Старый хардкод оставлен только как последний fallback при автоопределении.
-DEFAULT_CONFIG_DIR = r"H:/GRA2.5_work/Anomaly 1.5.3 up/gamedata/configs"
+DEFAULT_CONFIG_DIR = r"../Anomaly 1.5.3 up/gamedata/configs"
 
 
 def config_dir_candidates(app_dir) -> list[Path]:

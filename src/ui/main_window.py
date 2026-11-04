@@ -76,7 +76,10 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.file_tree, 1)
 
         # Редактор
-        self.editor = EditorTabs(events=self.api.events)
+        self.editor = EditorTabs(
+            events=self.api.events,
+            commands=self.api.commands,
+        )
         self.api.router.set_default(TextEditorHandler(self.editor))
 
         self.splitter.addWidget(left)
