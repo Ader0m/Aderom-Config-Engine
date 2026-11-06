@@ -138,6 +138,82 @@ class XmlResolveResult:
     line_sources: tuple[LineSource, ...] = field(default_factory=tuple)
 
 
+@dataclass(frozen=True)
+class ItemField:
+    """Одно поле игрового предмета."""
+
+    key: str
+    value: str
+
+
+@dataclass(frozen=True)
+class ItemEntry:
+    """Предмет из корневого файла предметов (``items.ltx``).
+
+    ``icon_path`` — найденный в VFS атлас ``.dds`` (``None``, если
+    текстура не найдена). ``icon_x``/``icon_y``/``icon_width``/
+    ``icon_height`` — координаты и размер в ячейках инвентаря по 50 px.
+    """
+
+    section: str
+    fields: tuple[ItemField, ...] = field(default_factory=tuple)
+    icon_texture: str = ""
+    icon_path: Optional[Path] = None
+    icon_x: int = 0
+    icon_y: int = 0
+    icon_width: int = 1
+    icon_height: int = 1
+    line_number: int = 0
+
+    def field(self, name: str, default: Optional[str] = None) -> Optional[str]:
+        """Значение поля без учёта регистра ключа."""
+        wanted = str(name).lower()
+        for item in self.fields:
+            if item.key.lower() == wanted:
+                return item.value
+        return default
+
+    @property
+    def icon_rect(self) -> tuple[int, int, int, int]:
+        """Прямоугольник иконки в пикселях атласа."""
+        return (
+            self.icon_x * 50,
+            self.icon_y * 50,
+            self.icon_width * 50,
+            self.icon_height * 50,
+        )
+
+
+@dataclass(frozen=True)
+class ItemCatalog:
+    """Отсортированный список предметов и файл, из которого он собран."""
+
+    source_path: Optional[Path] = None
+    items: tuple[ItemEntry, ...] = field(default_factory=tuple)
+    warnings: tuple[str, ...] = field(default_factory=tuple)
+    # Идентификатор снимка каталога для кэша иконок.
+    cache_key: str = ""
+
+
+@dataclass(frozen=True)
+class ItemIcon:
+    """Декодированная иконка предмета в формате RGBA."""
+
+    section: str
+    width: int
+    height: int
+    rgba: bytes = b""
+
+
+@dataclass(frozen=True)
+class TextureRegion:
+    """Прямоугольник DDS в формате RGBA (4 байта на пиксель)."""
+
+    width: int
+    height: int
+    rgba: bytes = b""
+
+
 # ---------------------------------------------------------------- контракты
 
 
@@ -238,6 +314,46 @@ class CoreApi(Protocol):
         dxml: bool = True,
     ) -> Path:
         """Разрешить XML и сохранить результат в generated/xml/."""
+
+    # --- предметы и иконки -----------------------------------------------
+
+    def build_item_catalog(
+        self,
+        forest,
+        log: Optional[Callable[[str], None]] = None,
+    ) -> ItemCatalog:
+        """Собрать каталог предметов из корневого файла предметов.
+
+        Разбирается только один корень (``items.ltx``/``item.ltx``/
+        ``item_base.ltx``) вместе с его include/DLTX-зависимостями.
+        Результат отсортирован
+        по имени секции.
+        """
+
+    def read_texture_region(
+        self,
+        path: Path,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+    ) -> TextureRegion:
+        """Декодировать прямоугольник DDS-текстуры в RGBA.
+
+        Используется для вырезания иконки из атласа по ``inv_grid_*``.
+        Поддерживаются несжатые DDS и DXT1/DXT3/DXT5.
+        """
+
+    def load_item_icons(
+        self,
+        catalog: ItemCatalog,
+        log: Optional[Callable[[str], None]] = None,
+    ) -> tuple[ItemIcon, ...]:
+        """Пакетно декодировать иконки каталога.
+
+        Ядро использует кэш регионов и пул процессов; модуль получает
+        готовые RGBA-иконки и не занимает UI-поток декодированием DDS.
+        """
 
     # --- граф связей и внешние инструменты -------------------------------
 

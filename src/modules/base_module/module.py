@@ -7,6 +7,7 @@
 - :class:`LtxFileOpener` — открытие .ltx (резолв/DLTX-патч);
 - :class:`XmlFileOpener` — открытие .xml (сырое и после XmlResolver);
 - :class:`SectionGraphFeature` — граф связей секции;
+- :class:`ItemViewerFeature` — просмотр игровых предметов и иконок;
 - :class:`TreeActions` — действия дерева;
 - :class:`EditorActions` — действия редактора.
 
@@ -21,6 +22,7 @@ from sdk.events import Events
 
 from .actions import EditorActions, TreeActions, is_ltx_path, is_xml_path
 from .clean_run import CleanRunFeature
+from .item_viewer import ItemViewerFeature
 from .ltx_open import LtxFileOpener, ResolvedLtxHandler
 from .section_graph import SectionGraphFeature
 from .session import ModuleSession
@@ -30,9 +32,9 @@ from .xml_open import XmlFileOpener, XmlOpenHandler
 class BaseModule(ModuleBase):
     manifest = ModuleManifest(
         name="base",
-        version="0.3.0",
+        version="0.4.0",
         sdk_min="0.1.0",
-        description="Базовый сценарий: чистый запуск, VFS-вид, резолв .ltx, XML/DXML.",
+        description="Базовый сценарий: чистый запуск, VFS-вид, резолв .ltx, XML/DXML, предметы.",
     )
 
     # -------------------------------------------------- жизненный цикл
@@ -44,6 +46,7 @@ class BaseModule(ModuleBase):
         self._ltx_opener = LtxFileOpener(ctx, self.session)
         self._xml_opener = XmlFileOpener(ctx, self.session)
         self._section_graph = SectionGraphFeature(ctx, self.session)
+        self._item_viewer = ItemViewerFeature(ctx, self.session)
         self._tree_actions = TreeActions(ctx, self.session)
         self._editor_actions = EditorActions(ctx)
 
@@ -73,6 +76,7 @@ class BaseModule(ModuleBase):
             sub.unsubscribe()
         self._app_started_sub = None
         self._section_graph.close()
+        self._item_viewer.close()
         ctx.log("Базовый модуль деактивирован.")
 
     # -------------------------------------------------- регистрации
@@ -90,6 +94,10 @@ class BaseModule(ModuleBase):
         ui.register_menu(
             "Инструменты", "Граф связей секции",
             self._section_graph.show, "Ctrl+G",
+        )
+        ui.register_menu(
+            "Инструменты", "Просмотр игровых предметов",
+            self._item_viewer.show, "Ctrl+I",
         )
         ui.register_menu(
             "Вид", "Сортировать по убыванию (Файлов в дереве)",
@@ -116,6 +124,7 @@ class BaseModule(ModuleBase):
         commands.register("base.edit_redo", self._editor_actions.redo)
         commands.register("base.edit_find", self._editor_actions.find)
         commands.register("base.section_graph", self._section_graph.show)
+        commands.register("base.item_viewer", self._item_viewer.show)
         commands.register("base.sort_tree_files_desc", self._tree_actions.sort_tree_by_files_desc)
 
     def _register_open_handler(self, ctx):

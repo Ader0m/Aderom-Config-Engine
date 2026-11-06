@@ -43,9 +43,11 @@ from PyQt5.Qsci import QsciScintilla
 try:  # запуск с корня проекта (src в sys.path)
     from ui.theme import PALETTE
     from ui.lexers import create_lexer
+    from ui.debounce import Debounce
 except ImportError:  # запуск как пакета
     from .theme import PALETTE
     from .lexers import create_lexer
+    from .debounce import Debounce
 
 
 class _LexerScheduler(QObject):
@@ -149,6 +151,7 @@ class EditorFindBar(QWidget):
         super().__init__(parent)
 
         self.scintilla = scintilla
+        self._debounce = Debounce(self._apply_pending_search, parent=self)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
@@ -214,19 +217,34 @@ class EditorFindBar(QWidget):
         self.entry.selectAll()
 
     def hide_and_restore(self):
+        self._debounce.cancel()
         self.hide()
         self.scintilla.setFocus(Qt.OtherFocusReason)
 
-    def _on_text_changed(self, _text):
+    def hideEvent(self, event):
+        self._debounce.cancel()
+        super().hideEvent(event)
+
+    def _on_text_changed(self, text):
+        if not text:
+            self._debounce.cancel()
+            self.status.setText("")
+            return
+
+        self._debounce.schedule()
+
+    def _apply_pending_search(self):
         if self.entry.text():
-            self.find_next()
+            self._find(forward=True)
         else:
             self.status.setText("")
 
     def find_next(self):
+        self._debounce.cancel()
         self._find(forward=True)
 
     def find_prev(self):
+        self._debounce.cancel()
         self._find(forward=False)
 
     def _find(self, forward):
@@ -530,6 +548,7 @@ class ResolvedFindBar(QWidget):
     def __init__(self, scintilla, parent=None):
         super().__init__(parent)
         self.scintilla = scintilla
+        self._debounce = Debounce(self._apply_pending_search, parent=self)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
@@ -567,13 +586,28 @@ class ResolvedFindBar(QWidget):
         self.entry.textChanged.connect(self._on_text_changed)
         self.hide()
 
-    def _on_text_changed(self, _t):
-        self.find_next()
+    def _on_text_changed(self, text):
+        if not text:
+            self._debounce.cancel()
+            self.status.setText("")
+            return
+
+        self._debounce.schedule()
+
+    def _apply_pending_search(self):
+        if self.entry.text():
+            self._search(forward=True)
+        else:
+            self.status.setText("")
 
     def show_and_focus(self):
         self.show()
         self.entry.setFocus()
         self.entry.selectAll()
+
+    def hideEvent(self, event):
+        self._debounce.cancel()
+        super().hideEvent(event)
 
     def _search(self, forward=True):
         text = self.entry.text()
@@ -586,9 +620,11 @@ class ResolvedFindBar(QWidget):
         self.status.setText("" if ok else "не найдено")
 
     def find_next(self):
+        self._debounce.cancel()
         self._search(forward=True)
 
     def find_prev(self):
+        self._debounce.cancel()
         self._search(forward=False)
 
 

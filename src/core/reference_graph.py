@@ -12,7 +12,7 @@ from .fs import (
     read_text_safe,
     scan_files,
 )
-from .vfs_paths import resolve_physical_path
+from .vfs_paths import resolve_asset_path, resolve_physical_path
 
 
 # ------------------------------------------------------------ типы
@@ -874,55 +874,12 @@ class ReferenceGraphBuilder:
 
     @staticmethod
     def _resolve_asset_path(forest, kind, raw_ref):
-        """Полный путь к dds/ogf относительно корня VFS.
-
-        ``forest.scan_dir`` — каталог configs (например,
-        ``<root>/gamedata/configs``). Ресурсы игры лежат рядом:
-        ``textures`` и ``meshes``. Проверяем несколько баз, чтобы
-        покрыть и VFS-корень, и отдельный каталог мода.
-        """
-        scan_dir = getattr(forest, "scan_dir", None)
-        if not scan_dir:
-            return None
-
-        raw = str(raw_ref or "").strip().strip('"').replace("\\", "/")
-        if not raw:
-            return None
-
-        suffix = ".dds" if kind == "texture" else ".ogf"
-        subdir = "textures" if kind == "texture" else "meshes"
-
-        p = Path(raw)
-        if p.is_absolute():
-            candidates = [p]
-        else:
-            if not p.suffix:
-                raw += suffix
-            has_subdir = raw.lower().startswith(subdir + "/")
-
-            bases = []
-            scan = Path(scan_dir)
-            for base in (scan, scan.parent, scan.parent.parent):
-                for candidate_base in (base, base / "gamedata"):
-                    if candidate_base not in bases:
-                        bases.append(candidate_base)
-
-            candidates = []
-            for base in bases:
-                if has_subdir:
-                    candidates.append(base / raw)
-                else:
-                    candidates.append(base / subdir / raw)
-                    candidates.append(base / raw)
-
-        for candidate in candidates:
-            try:
-                if candidate.is_file():
-                    return normalize_path(candidate)
-            except OSError:
-                continue
-
-        return None
+        """Полный путь к dds/ogf относительно корня VFS."""
+        return resolve_asset_path(
+            getattr(forest, "scan_dir", None),
+            kind,
+            raw_ref,
+        )
 
     def _is_declaration(self, line: str, section: str) -> bool:
         """Проверяет, является ли строка объявлением секции."""

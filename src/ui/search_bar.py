@@ -10,6 +10,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from .debounce import Debounce
+
 
 class SearchBar(QWidget):
     """
@@ -31,6 +33,7 @@ class SearchBar(QWidget):
         self._search_fn = None
         self._matches = []
         self._index = -1
+        self._debounce = Debounce(self._apply_query, parent=self)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(4, 2, 4, 2)
@@ -80,6 +83,7 @@ class SearchBar(QWidget):
         self.entry.selectAll()
 
     def hide_and_clear(self):
+        self._debounce.cancel()
         self.entry.blockSignals(True)
         self.entry.clear()
         self.entry.blockSignals(False)
@@ -92,7 +96,8 @@ class SearchBar(QWidget):
 
     def refresh(self):
         """Пересчитать совпадения (например, после построения нового дерева)."""
-        self._on_text_changed(self.entry.text())
+        self._debounce.cancel()
+        self._apply_query()
 
     # -------------------------------------------------- клавиши
     def eventFilter(self, obj, ev):
@@ -112,7 +117,17 @@ class SearchBar(QWidget):
 
     # -------------------------------------------------- логика
     def _on_text_changed(self, text):
-        q = (text or "").strip().lower()
+        q = (text or "").strip()
+        if not q:
+            # Очистка не требует паузы: не оставляем старую подсветку.
+            self._debounce.cancel()
+            self._apply_query()
+            return
+
+        self._debounce.schedule()
+
+    def _apply_query(self):
+        q = (self.entry.text() or "").strip().lower()
 
         if not q or self._search_fn is None:
             self._matches = []
@@ -127,12 +142,25 @@ class SearchBar(QWidget):
         self._emit_state()
 
     def next(self):
+        if self._debounce.is_active():
+            # Enter сразу после набора: применяем запрос и показываем
+            # первое совпадение, а не перескакиваем через него.
+            self._debounce.flush()
+            return
+
         if not self._matches:
             return
         self._index = (self._index + 1) % len(self._matches)
         self._emit_state()
 
     def prev(self):
+        if self._debounce.is_active():
+            self._debounce.flush()
+            if self._matches:
+                self._index = len(self._matches) - 1
+                self._emit_state()
+            return
+
         if not self._matches:
             return
         self._index = (self._index - 1) % len(self._matches)

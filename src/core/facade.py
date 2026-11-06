@@ -18,6 +18,8 @@ from pathlib import Path
 
 from .external import open_in_notepad_pp, open_with_shell
 from .fs import find_system_ltx, detect_config_dir
+from .item_catalog import ItemCatalogService
+from .item_icons import ItemIconService
 from .tree_query_service import search_nodes, sort_nodes
 from .xml_resolve_service import XmlResolveService
 from .prebuild_service import PrebuildService
@@ -67,6 +69,15 @@ class CoreServices:
         self.xml = xml_resolve_service or XmlResolveService()
         self.prebuild = PrebuildService(resolver_service, self.xml)
 
+        # Кэш каталога и иконок переживает перезапуск приложения:
+        # ключи включают снимок LTX-поддерева и подписи DDS-атласов.
+        item_cache_dir = self.generated_dir / "item_cache"
+        self.items = ItemCatalogService(
+            resolver_service,
+            cache_dir=item_cache_dir,
+        )
+        self.item_icons = ItemIconService(cache_dir=item_cache_dir)
+
         # Патч-конвейер: планирование, генерация, проверка и запись.
         # Запись по умолчанию требует успешной проверки.
         self.patch = PatchPlanner(resolver_service, cache)
@@ -90,6 +101,10 @@ class CoreServices:
             self.resolver.invalidate_cache()
         if hasattr(self.xml, "clear"):
             self.xml.clear()
+        if hasattr(self.items, "clear_memory"):
+            self.items.clear_memory()
+        if hasattr(self.item_icons, "clear_memory"):
+            self.item_icons.clear_memory()
 
     # -------------------------------------------------- фоновая предсборка
 
@@ -170,6 +185,24 @@ class CoreServices:
         .. deprecated:: Используйте `self.assembly.assemble_to_file()`.
         """
         return self.assembly.assemble_to_file(root_path, forest)
+
+    # -------------------------------------------------- предметы и иконки
+
+    def build_item_catalog(self, forest, log=None):
+        """Разобрать корневой файл предметов и вернуть каталог."""
+        return self.items.build(forest, log=log)
+
+    def read_texture_region(self, path, x, y, width, height):
+        """Декодировать прямоугольник DDS в RGBA (с кэшем регионов)."""
+        return self.item_icons.read_region(path, x, y, width, height)
+
+    def load_item_icons(self, catalog_key, requests, log=None):
+        """Пакетно загрузить иконки: кэш + пул процессов."""
+        return self.item_icons.load(
+            catalog_key,
+            requests,
+            log=log,
+        )
 
     # -------------------------------------------------- граф связей
 

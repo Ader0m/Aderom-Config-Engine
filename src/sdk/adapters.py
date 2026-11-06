@@ -10,7 +10,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .api import GraphMatch, GraphNode, SectionGraph, TreeSummary, XmlResolveResult
+from .api import (
+    GraphMatch,
+    GraphNode,
+    ItemCatalog,
+    ItemEntry,
+    ItemField,
+    ItemIcon,
+    SectionGraph,
+    TextureRegion,
+    TreeSummary,
+    XmlResolveResult,
+)
 
 
 _SDK_API_MARKER = "_sdk_api_kind"
@@ -172,6 +183,89 @@ class CoreApiAdapter:
             config_dir,
             log=log,
             dxml=dxml,
+        )
+
+    # --- предметы и иконки -----------------------------------------------
+
+    def build_item_catalog(self, forest, log=None):
+        raw = self._provider.build_item_catalog(forest, log=log)
+
+        source_path = getattr(raw, "source_path", None)
+        if source_path is not None:
+            source_path = Path(source_path)
+
+        items = []
+        for item in (getattr(raw, "items", ()) or ()):
+            icon_path = getattr(item, "icon_path", None)
+            if icon_path is not None:
+                icon_path = Path(icon_path)
+
+            items.append(ItemEntry(
+                section=str(getattr(item, "section", "")),
+                fields=tuple(
+                    ItemField(
+                        key=str(getattr(field, "key", "")),
+                        value=str(getattr(field, "value", "")),
+                    )
+                    for field in (getattr(item, "fields", ()) or ())
+                ),
+                icon_texture=str(getattr(item, "icon_texture", "")),
+                icon_path=icon_path,
+                icon_x=int(getattr(item, "icon_x", 0) or 0),
+                icon_y=int(getattr(item, "icon_y", 0) or 0),
+                icon_width=int(getattr(item, "icon_width", 1) or 1),
+                icon_height=int(getattr(item, "icon_height", 1) or 1),
+                line_number=int(getattr(item, "line_number", 0) or 0),
+            ))
+
+        return ItemCatalog(
+            source_path=source_path,
+            items=tuple(items),
+            warnings=tuple(getattr(raw, "warnings", ()) or ()),
+            cache_key=str(getattr(raw, "cache_key", "") or ""),
+        )
+
+    def read_texture_region(self, path, x, y, width, height):
+        raw = self._provider.read_texture_region(path, x, y, width, height)
+        return TextureRegion(
+            width=int(raw.width),
+            height=int(raw.height),
+            rgba=bytes(raw.rgba),
+        )
+
+    def load_item_icons(self, catalog, log=None):
+        requests = []
+        for entry in (getattr(catalog, "items", ()) or ()):
+            if entry.icon_path is None:
+                continue
+
+            x, y, width, height = entry.icon_rect
+            if x < 0 or y < 0 or width <= 0 or height <= 0:
+                continue
+
+            requests.append((
+                entry.section,
+                str(entry.icon_path),
+                x,
+                y,
+                width,
+                height,
+            ))
+
+        raw = self._provider.load_item_icons(
+            getattr(catalog, "cache_key", "") or "",
+            requests,
+            log=log,
+        )
+
+        return tuple(
+            ItemIcon(
+                section=str(section),
+                width=int(region.width),
+                height=int(region.height),
+                rgba=bytes(region.rgba),
+            )
+            for section, region in (raw or ())
         )
 
     # --- граф связей и внешние инструменты -------------------------------

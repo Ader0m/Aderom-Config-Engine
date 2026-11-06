@@ -189,6 +189,56 @@ def _resolve_uncached(path: Path, materialize: Optional[bool]):
     return original
 
 
+def resolve_asset_path(scan_dir, kind: str, raw_ref):
+    """Полный VFS-путь к текстуре (``.dds``) или модели (``.ogf``).
+
+    ``scan_dir`` — каталог configs игры (``<root>/gamedata/configs``).
+    Ресурсы лежат рядом с ним: ``textures`` и ``meshes``. Проверяем
+    несколько баз, чтобы покрыть и VFS-корень, и отдельный каталог мода.
+    """
+    if not scan_dir:
+        return None
+
+    raw = str(raw_ref or "").strip().strip('"').replace("\\", "/")
+    if not raw:
+        return None
+
+    suffix = ".dds" if kind == "texture" else ".ogf"
+    subdir = "textures" if kind == "texture" else "meshes"
+
+    p = Path(raw)
+    if p.is_absolute():
+        candidates = [p]
+    else:
+        if not p.suffix:
+            raw += suffix
+        has_subdir = raw.lower().startswith(subdir + "/")
+
+        bases = []
+        scan = Path(scan_dir)
+        for base in (scan, scan.parent, scan.parent.parent):
+            for candidate_base in (base, base / "gamedata"):
+                if candidate_base not in bases:
+                    bases.append(candidate_base)
+
+        candidates = []
+        for base in bases:
+            if has_subdir:
+                candidates.append(base / raw)
+            else:
+                candidates.append(base / subdir / raw)
+                candidates.append(base / raw)
+
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return normalize_path(candidate)
+        except OSError:
+            continue
+
+    return None
+
+
 def resolve_physical_path(path, materialize: Optional[bool] = None):
     """Вернуть реальный путь для запуска внешней программы.
 

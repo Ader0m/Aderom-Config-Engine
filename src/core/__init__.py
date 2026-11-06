@@ -39,7 +39,19 @@ from .fs import (
 )
 
 from .external import open_in_notepad_pp, open_with_shell
-from .vfs_paths import resolve_physical_path
+from .vfs_paths import resolve_asset_path, resolve_physical_path
+from .dds import DdsError, DdsInfo, TextureRegion, read_dds_info, read_dds_region
+from .item_catalog import (
+    DEFAULT_ICON_TEXTURE,
+    ITEM_CATALOG_VERSION,
+    GRID_SIZE,
+    ItemCatalog,
+    ItemCatalogService,
+    ItemField,
+    ItemRecord,
+)
+from .item_icons import ICON_CACHE_VERSION, ItemIconService
+from .object_cache import ObjectCache
 
 from .file_cache import FileCacheSystem
 from .resolved_cache import ResolvedCache, invalidate_forest_signatures
@@ -173,7 +185,25 @@ __all__ = [
     # external
     "open_in_notepad_pp",
     "open_with_shell",
+    "resolve_asset_path",
     "resolve_physical_path",
+
+    # items / dds
+    "DEFAULT_ICON_TEXTURE",
+    "ITEM_CATALOG_VERSION",
+    "GRID_SIZE",
+    "ItemCatalog",
+    "ItemCatalogService",
+    "ItemField",
+    "ItemRecord",
+    "ICON_CACHE_VERSION",
+    "ItemIconService",
+    "ObjectCache",
+    "DdsError",
+    "DdsInfo",
+    "TextureRegion",
+    "read_dds_info",
+    "read_dds_region",
 
     # cache
     "FileCacheSystem",

@@ -16,6 +16,11 @@ from .api import (
     SectionGraph,
     XmlResolveResult,
     LineSource,
+    ItemCatalog,
+    ItemEntry,
+    ItemField,
+    ItemIcon,
+    TextureRegion,
 )
 from .adapters import (
     CommandApiAdapter,
@@ -45,6 +50,11 @@ __all__ = [
     "SectionGraph",
     "XmlResolveResult",
     "LineSource",
+    "ItemCatalog",
+    "ItemEntry",
+    "ItemField",
+    "ItemIcon",
+    "TextureRegion",
     "CoreApiAdapter",
     "EventApiAdapter",
     "CommandApiAdapter",
