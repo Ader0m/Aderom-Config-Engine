@@ -48,13 +48,17 @@ class LtxResolverTest(unittest.TestCase):
                 len(sources),
                 len(text.split("\n")),
             )
-            self.assertTrue(
-                any(
-                    isinstance(src, LineSource) and src.kind in ("original", "file")
-                    for src in sources
-                    if src is not None
-                )
-            )
+            included_sources = [
+                src
+                for line, src in zip(text.splitlines(), sources)
+                if line in ("[test]", "x = 1")
+            ]
+            self.assertEqual(len(included_sources), 2)
+            for src in included_sources:
+                self.assertIsInstance(src, LineSource)
+                self.assertEqual(src.kind, "file")
+                self.assertEqual(src.path, cfg / "a.ltx")
+                self.assertTrue(src.display.endswith("a.ltx"))
 
             _, sources2 = service.assemble_resolved(
                 cfg / "system.ltx",
@@ -91,7 +95,9 @@ class LtxResolverTest(unittest.TestCase):
             prebuild.start(forest, cfg)
             prebuild.wait()
 
-            self.assertEqual(prebuild.status()["done"], 1)
+            status = prebuild.status()
+            self.assertEqual(status["done"], 1)
+            self.assertIsNone(status["error"])
             misses_after_prebuild = service.cache_stats()["misses"]
 
             text, _sources = service.assemble_resolved(

@@ -104,6 +104,29 @@ class MultiLineEditTest(unittest.TestCase):
             any("выбрано последнее значение" in note for note in analysis.notes)
         )
 
+    def test_list_operation_removal_is_blocked_but_change_is_kept(self):
+        analysis = analyze_multiline_edit(
+            "[a]\nlist = a,b\n>list = c\n",
+            "[a]\nlist = a,b\n<list = c\n",
+        )
+        self.assertTrue(analysis.has_errors)
+        self.assertEqual(
+            analysis.issues[0].code,
+            "list_operation_removed",
+        )
+        self.assertEqual(analysis.changes[0].kind, "list_remove")
+        self.assertEqual(analysis.changes[0].key, "list")
+        self.assertEqual(analysis.changes[0].new_value, "c")
+
+    def test_quoted_value_with_equals_and_crlf(self):
+        analysis = analyze_multiline_edit(
+            '[a]\r\nx = "a=b"\r\n',
+            '[a]\r\nx = "c=d"\r\n',
+        )
+        self.assertTrue(analysis.is_supported)
+        self.assertEqual(analysis.changes[0].kind, "set_key")
+        self.assertEqual(analysis.changes[0].new_value, '"c=d"')
+
     def test_include_change_is_blocking(self):
         analysis = analyze_multiline_edit(
             '#include "a.ltx"\n[a]\nx = 1\n',

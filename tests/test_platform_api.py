@@ -78,6 +78,13 @@ class PublishingHandler:
         return True
 
 
+class SilentHandler:
+    """Открывает файл, не публикуя событие (для проверки pending-навигации)."""
+
+    def open(self, path, api):
+        return True
+
+
 class PlatformApiTest(unittest.TestCase):
     def test_open_at_line_applies_pending_navigation(self):
         events = FakeEvents()
@@ -110,6 +117,44 @@ class PlatformApiTest(unittest.TestCase):
 
         self.assertEqual(api.window.editor.widget.lines, [])
         self.assertEqual(api._pending_file_actions, {})
+
+    def test_navigation_waits_for_matching_path(self):
+        events = FakeEvents()
+        commands = FakeCommands()
+        api = PlatformApi(events, commands, None, None, None)
+        api.window = FakeWindow()
+        api.router.set_default(SilentHandler())
+        path = Path("a.ltx")
+        other = Path("b.ltx")
+
+        self.assertTrue(api.request_open_file_at_line(path, 42))
+        # Событие о другом файле не должно применить навигацию.
+        events.publish(Events.FILE_OPENED, other)
+        self.assertEqual(api.window.editor.widget.lines, [])
+        self.assertTrue(
+            any(
+                Path(key).name == path.name
+                for key in api._pending_file_actions
+            ),
+            api._pending_file_actions,
+        )
+
+        events.publish(Events.FILE_OPENED, path)
+        self.assertEqual(api.window.editor.widget.lines, [42])
+        self.assertEqual(api._pending_file_actions, {})
+
+    def test_request_open_without_line_does_not_add_navigation(self):
+        events = FakeEvents()
+        commands = FakeCommands()
+        api = PlatformApi(events, commands, None, None, None)
+        api.window = FakeWindow()
+        api.router.set_default(PublishingHandler(events))
+
+        path = Path("a.ltx")
+        self.assertTrue(api.request_open_file(path))
+
+        self.assertEqual(api._pending_file_actions, {})
+        self.assertEqual(api.window.editor.widget.lines, [])
 
 
 if __name__ == "__main__":

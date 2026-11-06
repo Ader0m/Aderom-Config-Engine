@@ -1,4 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -74,6 +75,36 @@ class FileDocumentTrackerTest(unittest.TestCase):
             self.assertEqual(
                 session.baseline_text.replace("\r\n", "\n"),
                 "[a]\nx = 2\n",
+            )
+
+    def test_external_change_does_not_discard_dirty_draft(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "a.ltx"
+            path.write_text("[a]\nx = 1\n", encoding="windows-1251")
+
+            tracker = FileDocumentTracker(path)
+            session = tracker.session()
+            session.set_text("[a]\nx = 2\n")
+
+            path.write_text("[a]\nx = 9\n", encoding="windows-1251")
+            stat = path.stat()
+            os.utime(
+                path,
+                ns=(
+                    stat.st_atime_ns,
+                    stat.st_mtime_ns + 2_000_000_000,
+                ),
+            )
+
+            self.assertTrue(tracker.refresh())
+            self.assertEqual(
+                tracker.text.replace("\r\n", "\n"),
+                "[a]\nx = 9\n",
+            )
+            self.assertTrue(session.is_dirty)
+            self.assertEqual(
+                session.diff().changes[0].new_value,
+                "2",
             )
 
 

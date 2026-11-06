@@ -18,6 +18,33 @@ from ui.project import ProjectError, ProjectService
 
 
 class ProjectServiceTest(unittest.TestCase):
+    def _services(self, d, cfg, root):
+        cache = FileCacheSystem()
+        forest = TreeBuilder(cache).build(
+            cfg,
+            root,
+            use_cache=False,
+        )
+        resolver = ResolverService(
+            cache,
+            ResolvedCache(cache_dir=Path(d) / "cache"),
+        )
+        resolver.ensure_adapter(forest, cfg)
+        services = CoreServices(
+            cache=cache,
+            tree_builder=TreeBuilder(cache),
+            tree_query=TreeQueryService(),
+            graph_builder=ReferenceGraphBuilder(DisabledCache()),
+            resolver_service=resolver,
+            assembly_service=AssemblyService(
+                resolver,
+                Path(d) / "generated",
+            ),
+            generated_dir=Path(d) / "generated",
+            xml_resolve_service=XmlResolveService(),
+        )
+        return services, forest
+
     def test_create_save_close_and_load(self):
         with tempfile.TemporaryDirectory() as d:
             base = Path(d) / "projects"
@@ -429,6 +456,8 @@ class ProjectServiceTest(unittest.TestCase):
                 line_sources=sources,
             )
 
+            old_patch_before = existing_patch.read_bytes()
+
             preview = project.build_preview(services, forest)
             item = preview.items[0]
 
@@ -439,6 +468,39 @@ class ProjectServiceTest(unittest.TestCase):
                 "mod_system_~ace_override_winner.ltx",
             )
             self.assertTrue(item.generated.verification.ok)
+
+            # round-trip: патч должен не только сгенерироваться, но и
+            # победить существующий mod_system_old.ltx в Resolver4.
+            patch_path = cfg / item.generated.files[0].relative_path.relative_to(
+                Path("gamedata") / "configs"
+            )
+            patch_path.write_text(
+                item.generated.text,
+                encoding="windows-1251",
+            )
+            services.invalidate_cache()
+            resolved, sources = services.assemble_resolved(
+                root,
+                forest,
+                cfg,
+            )
+            self.assertIn("cost = 300", resolved)
+            self.assertNotIn("cost = 200", resolved)
+            cost_sources = [
+                src
+                for line, src in zip(resolved.splitlines(), sources)
+                if line.strip() == "cost = 300"
+            ]
+            self.assertTrue(cost_sources)
+            self.assertTrue(
+                any(
+                    src is not None
+                    and "override_winner" in src.display
+                    for src in cost_sources
+                ),
+                cost_sources,
+            )
+            self.assertEqual(existing_patch.read_bytes(), old_patch_before)
 
     def test_build_preview_for_resolved_draft(self):
         with tempfile.TemporaryDirectory() as d:
@@ -499,6 +561,177 @@ class ProjectServiceTest(unittest.TestCase):
             self.assertTrue(item.ok, item.error)
             self.assertEqual(item.plan.target.root_path, root)
             self.assertIn("cost = 150", item.generated.text)
+
+
+    def test_all_in_one_same_key_conflict_uses_later_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "gamedata" / "configs"
+            cfg.mkdir(parents=True)
+            root = cfg / "system.ltx"
+            source_a = cfg / "a.ltx"
+            source_b = cfg / "b.ltx"
+            root.write_text(
+                '[system]\n#include "a.ltx"\n#include "b.ltx"\n',
+                encoding="cp1251",
+            )
+            source_a.write_text("[w]\ncost = 100\n", encoding="cp1251")
+            source_b.write_text("[w]\ncost = 200\n", encoding="cp1251")
+
+            services, forest = self._services(d, cfg, root)
+            project = ProjectService(Path(d) / "projects")
+            project.create("Conflict", save_mode="all_in_one")
+            project.update_draft(source_a, "[w]\ncost = 300\n")
+            project.update_draft(source_b, "[w]\ncost = 400\n")
+
+            preview = project.build_preview(services, forest)
+
+            self.assertEqual(len(preview.items), 1)
+            item = preview.items[0]
+            self.assertEqual(item.kind, "root")
+            self.assertTrue(
+                any(
+                    warning.code == "merge_key_conflict"
+                    for warning in item.plan.warnings
+                )
+            )
+            self.assertIn("cost = 400", item.generated.text)
+            self.assertNotIn("cost = 300", item.generated.text)
+            self.assertTrue(
+                any("Файлов: 2" in note for note in item.notes),
+                item.notes,
+            )
+
+    def test_all_in_one_structural_conflict_blocks(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "gamedata" / "configs"
+            cfg.mkdir(parents=True)
+            root = cfg / "system.ltx"
+            source_a = cfg / "a.ltx"
+            source_b = cfg / "b.ltx"
+            root.write_text(
+                '[system]\n#include "a.ltx"\n#include "b.ltx"\n',
+                encoding="cp1251",
+            )
+            source_a.write_text(
+                "[a]\nx = 1\n[b]\ny = 1\n",
+                encoding="cp1251",
+            )
+            source_b.write_text("[b]\ny = 2\n", encoding="cp1251")
+
+            services, forest = self._services(d, cfg, root)
+            project = ProjectService(Path(d) / "projects")
+            project.create("Structural", save_mode="all_in_one")
+            project.update_draft(source_a, "[a]\nx = 1\n")
+            project.update_draft(source_b, "[b]\ny = 3\n")
+
+            preview = project.build_preview(services, forest)
+
+            self.assertEqual(len(preview.items), 1)
+            item = preview.items[0]
+            self.assertFalse(item.ok)
+            self.assertIsNone(item.generated)
+            self.assertTrue(
+                any(
+                    issue.code == "merge_deleted_section_edit"
+                    for issue in item.plan.errors()
+                ),
+                [(issue.code, issue.message) for issue in item.plan.errors()],
+            )
+
+    def test_all_in_one_different_roots_produces_separate_items(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "gamedata" / "configs"
+            cfg.mkdir(parents=True)
+            root_a = cfg / "system.ltx"
+            root_b = cfg / "other.ltx"
+            source_a = cfg / "a.ltx"
+            source_b = cfg / "b.ltx"
+            root_a.write_text(
+                '[system]\n#include "a.ltx"\n',
+                encoding="cp1251",
+            )
+            root_b.write_text(
+                '[other]\n#include "b.ltx"\n',
+                encoding="cp1251",
+            )
+            source_a.write_text("[w]\ncost = 1\n", encoding="cp1251")
+            source_b.write_text("[w]\ncost = 2\n", encoding="cp1251")
+
+            services, forest = self._services(d, cfg, root_a)
+            project = ProjectService(Path(d) / "projects")
+            project.create("Roots", save_mode="all_in_one")
+            project.update_draft(source_a, "[w]\ncost = 3\n")
+            project.update_draft(source_b, "[w]\ncost = 4\n")
+
+            preview = project.build_preview(services, forest)
+
+            self.assertEqual(len(preview.items), 2)
+            self.assertTrue(all(item.ok for item in preview.items))
+            self.assertEqual(
+                {item.kind for item in preview.items},
+                {"root"},
+            )
+            names = {
+                item.generated.files[0].relative_path.name
+                for item in preview.items
+            }
+            self.assertEqual(len(names), 2)
+            self.assertTrue(
+                all(
+                    name.startswith("mod_") and name.endswith("_roots.ltx")
+                    for name in names
+                ),
+                names,
+            )
+            self.assertTrue(any("system" in name for name in names), names)
+            self.assertTrue(any("other" in name for name in names), names)
+
+    def test_project_name_is_confined_to_base(self):
+        names = [
+            "../evil",
+            "a/b",
+            "a\\b",
+            "C:\\abs",
+            ".",
+            "..",
+        ]
+        for name in names:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as d:
+                    base = Path(d) / "projects"
+                    service = ProjectService(base)
+                    project = service.create(name)
+                    root = project.root_dir.resolve()
+                    self.assertTrue(root.is_relative_to(base.resolve()))
+                    self.assertNotIn("/", project.root_dir.name)
+                    self.assertNotIn("\\", project.root_dir.name)
+                    self.assertNotIn(project.root_dir.name, {".", ".."})
+                    service.close()
+
+        with tempfile.TemporaryDirectory() as d:
+            service = ProjectService(Path(d) / "projects")
+            for name in ("", "   "):
+                with self.subTest(name=name):
+                    with self.assertRaises(ProjectError):
+                        service.create(name)
+
+    def test_project_does_not_modify_source_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d) / "projects"
+            source = Path(d) / "a.ltx"
+            original = "[a]\nx = 1\n"
+            source.write_text(original, encoding="windows-1251")
+
+            service = ProjectService(base)
+            service.create("Read only")
+            service.update_draft(source, "[a]\nx = 2\n")
+            service.save_draft(source)
+            service.close()
+
+            self.assertEqual(
+                source.read_text(encoding="windows-1251"),
+                original,
+            )
 
 
 if __name__ == "__main__":

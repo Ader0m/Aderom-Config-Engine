@@ -35,6 +35,24 @@ class FakeAdapter:
         )
 
 
+class BlockingAdapter(FakeAdapter):
+    def __init__(self):
+        super().__init__()
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def assemble_resolved(self, root_path, source_map, abs_map):
+        with self.lock:
+            self.calls += 1
+        self.entered.set()
+        if not self.release.wait(2.0):
+            raise RuntimeError("adapter не был отпущен")
+        return (
+            "[test]\nx=1\n",
+            [LineSource(kind="original")],
+        )
+
+
 class FakeForest:
     def __init__(self, path):
         self.files = [path]
@@ -75,25 +93,47 @@ class ResolverServiceTest(unittest.TestCase):
         )
 
     def test_inflight_deduplication(self):
-        self.adapter.delay = 0.1
+        adapter = BlockingAdapter()
+        service = ResolverService(
+            cache=FileCacheSystem(),
+            resolved_cache=ResolvedCache(),
+        )
+        service._adapter = adapter
+        start = threading.Barrier(2)
         results = []
+        errors = []
 
         def work():
-            results.append(
-                self.service.assemble_resolved(
-                    self.path, self.forest, self.cfg,
+            try:
+                start.wait(2.0)
+                results.append(
+                    service.assemble_resolved(
+                        self.path, self.forest, self.cfg,
+                    )
                 )
-            )
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
 
         threads = [threading.Thread(target=work) for _ in range(2)]
         for thread in threads:
             thread.start()
-        for thread in threads:
-            thread.join()
 
+        self.assertTrue(
+            adapter.entered.wait(2.0),
+            "ни один поток не вошёл в адаптер",
+        )
+        # Второй поток должен ждать in-flight вычисление, а не
+        # запускать второй вызов адаптера.
+        self.assertEqual(adapter.calls, 1)
+        adapter.release.set()
+
+        for thread in threads:
+            thread.join(2.0)
+
+        self.assertEqual(errors, [])
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0], results[1])
-        self.assertEqual(self.adapter.calls, 1)
+        self.assertEqual(adapter.calls, 1)
 
     def test_key_is_stable_across_config_dir_and_path_case(self):
         key1 = self.service.resolved_key(self.path, self.forest, self.cfg)

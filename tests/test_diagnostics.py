@@ -1,16 +1,15 @@
 # -*- coding: utf-8 -*-
-import time
 import unittest
 
 from tests.support import SRC  # noqa: F401
 
-from PyQt5.QtWidgets import QApplication
 from PyQt5.QtGui import QTextCursor
 
+from tests.qt_support import qapp
 from ui.diagnostics import DiagnosticsLog
 from ui.theme import PALETTE
 
-_app = QApplication.instance() or QApplication([])
+_app = qapp()
 
 
 class DiagnosticsTest(unittest.TestCase):
@@ -33,7 +32,9 @@ class DiagnosticsTest(unittest.TestCase):
         log = DiagnosticsLog()
         log.FADE_SECONDS = 0.05
         log.append_message("hello")
-        time.sleep(0.06)
+        # Не спим: сдвигаем сохранённую метку старта, чтобы тест не
+        # зависел от загруженности машины.
+        log._fades[0]["start"] -= 1.0
         log._on_tick()
 
         self.assertEqual(

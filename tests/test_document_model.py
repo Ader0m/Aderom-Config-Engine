@@ -49,8 +49,36 @@ k = v
 
     def test_delete_section(self):
         doc = parse_ltx_document("[a]\nx = 1\n!![b]\ny = 2\n")
-        self.assertIn("b", doc.deleted_sections)
+        self.assertEqual(doc.deleted_sections, {"b"})
         self.assertNotIn("b", doc.sections)
+        self.assertIsNone(doc.section("b"))
+        self.assertEqual(doc.section_view("b").present, {})
+
+    def test_section_header_kinds(self):
+        doc = parse_ltx_document(
+            "[base]\n![override]\n@[safe]\n!![deleted]\n"
+        )
+        self.assertEqual(doc.section("base").header_kind, "base")
+        self.assertEqual(doc.section("override").header_kind, "override")
+        self.assertEqual(doc.section("safe").header_kind, "safe")
+        self.assertNotIn("deleted", doc.sections)
+        self.assertIn("deleted", doc.deleted_sections)
+
+    def test_section_names_are_case_insensitive_and_duplicate_keys_last_win(self):
+        doc = parse_ltx_document(
+            "[A]\nx = 1\n[a]\nx = 2\ny = 3\n"
+        )
+        self.assertEqual(set(doc.sections), {"a"})
+        self.assertEqual(doc.values("a"), {"x": "2", "y": "3"})
+        self.assertTrue(doc.diagnostics)
+
+    def test_removed_parent_is_not_effective(self):
+        doc = parse_ltx_document("[a]:p, !q\nx = 1\n")
+        self.assertEqual(doc.parents("a"), ("p",))
+        self.assertEqual(
+            doc.section("a").effective_parents(),
+            ("p",),
+        )
 
 
 class DocumentDiffTest(unittest.TestCase):

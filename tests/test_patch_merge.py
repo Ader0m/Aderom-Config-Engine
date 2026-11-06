@@ -9,8 +9,8 @@ from core.patching.patch_merge import merge_patch_plans
 from core.patching.patch_models import PatchPlan, PatchTarget
 
 
-def _plan(source, value):
-    root = Path("C:/game/system.ltx")
+def _plan(source, value, key="cost", root="C:/game/system.ltx"):
+    root = Path(root)
     return PatchPlan(
         source_path=Path(source),
         target=PatchTarget(
@@ -24,7 +24,7 @@ def _plan(source, value):
             DocumentChange(
                 kind="set_key",
                 section="w",
-                key="cost",
+                key=key,
                 new_value=value,
             ),
         ),
@@ -50,6 +50,39 @@ class PatchMergeTest(unittest.TestCase):
         )
         self.assertIn("cost = 300", merged.preview)
         self.assertIsNone(merged.diff)
+
+    def test_disjoint_keys_are_merged_without_conflict(self):
+        merged = merge_patch_plans(
+            [
+                _plan("C:/game/a.ltx", "200", key="cost"),
+                _plan("C:/game/b.ltx", "x", key="name"),
+            ]
+        )
+
+        self.assertEqual(
+            [(change.key, change.new_value) for change in merged.changes],
+            [("cost", "200"), ("name", "x")],
+        )
+        self.assertEqual(merged.warnings, ())
+        self.assertIn("cost = 200", merged.preview)
+        self.assertIn("name = x", merged.preview)
+
+    def test_plans_from_different_roots_are_rejected(self):
+        with self.assertRaises(ValueError):
+            merge_patch_plans(
+                [
+                    _plan(
+                        "C:/game/a.ltx",
+                        "200",
+                        root="C:/game/system.ltx",
+                    ),
+                    _plan(
+                        "C:/game/b.ltx",
+                        "300",
+                        root="C:/game/other.ltx",
+                    ),
+                ]
+            )
 
 
 if __name__ == "__main__":

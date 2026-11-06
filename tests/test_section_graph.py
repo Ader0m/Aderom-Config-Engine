@@ -4,12 +4,11 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from PyQt5.QtWidgets import QApplication
-
+from tests.qt_support import qapp
 from modules.base_module.section_graph import SectionGraphWindow
 from sdk.api import GraphMatch, GraphNode, SectionGraph
 
-_app = QApplication.instance() or QApplication([])
+_app = qapp()
 
 
 class SectionGraphWindowTest(unittest.TestCase):

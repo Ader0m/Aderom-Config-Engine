@@ -96,6 +96,23 @@ class ReferenceGraphTest(unittest.TestCase):
             vfs_mode=True,
         )
 
+        found_xml = [
+            node for node in graph.children
+            if node.file_path == self.xml
+        ]
+        self.assertTrue(
+            found_xml,
+            "XML-файл должен быть найден в VFS-графе, иначе проверка "
+            "потерянных связей ничего не доказывает",
+        )
+        self.assertTrue(
+            any(
+                match.edge_type.value == "xml_reference"
+                for node in found_xml
+                for match in node.matches
+            )
+        )
+
         lost_xml = [
             node for node in graph.lost_children
             if node.file_path == self.xml

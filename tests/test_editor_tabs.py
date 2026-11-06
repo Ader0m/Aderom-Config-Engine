@@ -4,21 +4,27 @@ from unittest.mock import patch
 
 from tests.support import SRC  # noqa: F401
 
-from PyQt5.QtWidgets import QApplication, QMenu, QWidget
+from PyQt5.QtWidgets import QMenu, QWidget
 
+from tests.qt_support import qapp
 from ui.editor_tabs import EditorTabs
 
-_app = QApplication.instance() or QApplication([])
+_app = qapp()
 
 
 class Events:
-    def publish(self, *args, **kwargs):
-        pass
+    def __init__(self):
+        self.published = []
+
+    def publish(self, name, payload=None):
+        self.published.append((name, payload))
 
 
 class EditorTabsTest(unittest.TestCase):
     def _make(self):
-        tabs = EditorTabs(events=Events())
+        events = Events()
+        tabs = EditorTabs(events=events)
+        tabs.test_events = events
         tabs.open_tab("a", "A", QWidget())
         tabs.open_tab("b", "B", QWidget())
         tabs.open_tab("c", "C", QWidget())
@@ -45,6 +51,12 @@ class EditorTabsTest(unittest.TestCase):
             self._run_menu_action(tabs, "Закрыть все вкладки справа", 1),
             ["Редактор", "A"],
         )
+        closed = {
+            payload
+            for name, payload in tabs.test_events.published
+            if name == "ui.tab.closed"
+        }
+        self.assertEqual(closed, {"b", "c"})
         tabs.close()
 
     def test_close_other_tabs(self):
@@ -53,6 +65,12 @@ class EditorTabsTest(unittest.TestCase):
             self._run_menu_action(tabs, "Закрыть все другие вкладки", 1),
             ["A"],
         )
+        closed = {
+            payload
+            for name, payload in tabs.test_events.published
+            if name == "ui.tab.closed"
+        }
+        self.assertTrue({"b", "c"}.issubset(closed), closed)
         tabs.close()
 
     def test_close_all_tabs(self):
@@ -62,6 +80,12 @@ class EditorTabsTest(unittest.TestCase):
             [],
         )
         self.assertIsNone(tabs._default_editor)
+        closed = {
+            payload
+            for name, payload in tabs.test_events.published
+            if name == "ui.tab.closed"
+        }
+        self.assertEqual(closed, {"a", "b", "c", "ui.editor"})
         tabs.close()
 
 

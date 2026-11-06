@@ -11,7 +11,7 @@ from core.documents.document_diff import diff_texts
 from core.patching.dltx_generator import DltxGenerator
 from core.facade import CoreServices
 from core.file_cache import FileCacheSystem
-from core.patching.patch_models import PatchOptions
+from core.patching.patch_models import PatchFile, PatchOptions
 from core.patching.patch_planner import PatchPlanner
 from core.patching.patch_targets import patch_file_name, resolve_patch_target
 from core.patching.patch_verifier import ModelPatchVerifier, ResolverPatchVerifier
@@ -105,6 +105,31 @@ class PatchPipelineTest(unittest.TestCase):
             root.parent,
             [root, source],
             {source: {root}},
+        )
+
+    def _verified_patch(self, d, suffix="safe"):
+        cfg = Path(d) / "gamedata" / "configs"
+        cfg.mkdir(parents=True, exist_ok=True)
+        root = cfg / "system.ltx"
+        source = cfg / "a.ltx"
+        root.write_text('[system]\n#include "a.ltx"\n', encoding="cp1251")
+        source.write_text("[a]\nx = 1\n", encoding="cp1251")
+        forest = self._forest(root, source)
+        plan = PatchPlanner().plan_document_change(
+            source,
+            "[a]\nx = 1\n",
+            "[a]\nx = 2\n",
+            forest,
+            PatchOptions(patch_mod="Test", suffix=suffix),
+        )
+        generated = DltxGenerator().generate(plan)
+        return (
+            cfg,
+            source,
+            replace(
+                generated,
+                verification=ModelPatchVerifier().verify(generated),
+            ),
         )
 
     def test_plan_generate_and_verify_set_key(self):
@@ -223,12 +248,38 @@ class PatchPipelineTest(unittest.TestCase):
             generated = DltxGenerator().generate(plan)
             self.assertTrue(ModelPatchVerifier().verify(generated).ok)
 
-    def test_include_change_blocks_generation(self):
-        diff = diff_texts(
-            '#include "a.ltx"\n[a]\nx = 1\n',
-            '#include "b.ltx"\n[a]\nx = 1\n',
-        )
-        self.assertTrue(diff.has_blocking_issues)
+    def test_include_change_does_not_generate_patch(self):
+        with tempfile.TemporaryDirectory() as d:
+            source = Path(d) / "a.ltx"
+            source.write_text(
+                '#include "a.ltx"\n[a]\nx = 1\n',
+                encoding="cp1251",
+            )
+            forest = _Forest(d, [source])
+            baseline = '#include "a.ltx"\n[a]\nx = 1\n'
+            edited = '#include "b.ltx"\n[a]\nx = 1\n'
+
+            diff = diff_texts(baseline, edited)
+            self.assertTrue(diff.has_blocking_issues)
+            self.assertEqual(
+                diff.blocking_issues()[0].code,
+                "include_changed",
+            )
+
+            plan = PatchPlanner().plan_document_change(
+                source,
+                baseline,
+                edited,
+                forest,
+                PatchOptions(patch_mod="Test", suffix="inc"),
+            )
+            # Планировщик не должен молча превращать смену include
+            # в пустой патч: сейчас он отбрасывает такое изменение,
+            # поэтому проверяем отсутствие файлов и текста.
+            self.assertEqual(plan.changes, ())
+            generated = DltxGenerator().generate(plan)
+            self.assertEqual(generated.files, ())
+            self.assertEqual(generated.text, "")
 
     def test_writer_requires_verification_and_rejects_overwrite(self):
         with tempfile.TemporaryDirectory() as d:
@@ -325,10 +376,24 @@ class PatchPipelineTest(unittest.TestCase):
                 cache=cache,
                 resolved_cache=ResolvedCache(),
             )
-            text, _sources = service.assemble_resolved(root, forest, cfg)
+            text, sources = service.assemble_resolved(root, forest, cfg)
 
             self.assertIn("cost = 150", text)
             self.assertIn('name = "New"', text)
+            patch_lines = [
+                src
+                for line, src in zip(text.splitlines(), sources)
+                if line.startswith(("cost =", "name ="))
+            ]
+            self.assertTrue(patch_lines)
+            self.assertTrue(
+                all(
+                    src is not None
+                    and src.display.startswith("mod_system_~e2e")
+                    for src in patch_lines
+                ),
+                patch_lines,
+            )
 
     def test_writer_requires_confirmation_for_delete_key(self):
         with tempfile.TemporaryDirectory() as d:
@@ -613,6 +678,87 @@ class PatchPipelineTest(unittest.TestCase):
 
             self.assertFalse(bad_verification.ok)
             self.assertTrue(bad_verification.failed_checks)
+            failed_names = {
+                check.name for check in bad_verification.failed_checks
+            }
+            self.assertIn("resolver:weapon:cost", failed_names)
+            mismatch = [
+                issue
+                for issue in bad_verification.issues
+                if issue.code == "resolver_value_mismatch"
+            ]
+            self.assertTrue(mismatch)
+            self.assertIn("cost", mismatch[0].message)
+
+
+    def test_writer_rejects_forbidden_root_and_overwrite(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            cfg, _source, verified = self._verified_patch(d, "safe")
+            writer = PatchWriter(require_verification=True)
+
+            with self.assertRaises(PatchWriteError):
+                writer.write(
+                    verified,
+                    cfg,
+                    forbidden_roots=[cfg],
+                )
+
+            with self.assertRaises(PatchWriteError):
+                writer.write(
+                    verified,
+                    base / "overwrite" / "Bad Patch",
+                )
+
+            good_root = base / "mods" / "Good Patch"
+            writer.write(verified, good_root)
+            with self.assertRaises(PatchWriteError):
+                writer.write(verified, good_root)
+
+    def test_writer_rejects_escaping_relative_paths(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            _cfg, _source, verified = self._verified_patch(d, "escape")
+            writer = PatchWriter(require_verification=True)
+
+            for relative in (
+                Path("../evil.ltx"),
+                Path("C:/evil.ltx"),
+            ):
+                with self.subTest(relative=relative):
+                    bad_file = PatchFile(
+                        relative_path=relative,
+                        text="bad",
+                    )
+                    bad = replace(
+                        verified,
+                        files=(bad_file,),
+                        text="bad",
+                    )
+                    with self.assertRaises(PatchWriteError):
+                        writer.write(bad, base / "mods" / "Bad Patch")
+
+    def test_writer_keeps_original_source_untouched(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            _cfg, source, verified = self._verified_patch(d, "untouched")
+            before = source.read_bytes()
+
+            writer = PatchWriter(require_verification=True)
+            written = writer.write(
+                verified,
+                base / "mods" / "Untouched",
+                forbidden_roots=[base / "gamedata"],
+            )
+
+            self.assertTrue(written)
+            self.assertEqual(source.read_bytes(), before)
+            self.assertEqual(
+                written[0].read_text(encoding="windows-1251").count(
+                    "x = 2"
+                ),
+                1,
+            )
 
 
 if __name__ == "__main__":

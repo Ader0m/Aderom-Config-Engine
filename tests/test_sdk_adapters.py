@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
+import io
 import unittest
+from contextlib import redirect_stderr
 
 from tests.support import SRC  # noqa: F401
 
 from sdk.adapters import CommandApiAdapter, EventApiAdapter
 from sdk.contracts import ModuleContext
-from ui.bus import CommandBus, EventBus
+from ui.bus import CommandBus, CommandError, EventBus
 
 
 class _Ui:
@@ -62,6 +64,82 @@ class SdkAdapterTest(unittest.TestCase):
 
         self.assertTrue(commands.has("test.command"))
         self.assertEqual(commands.execute("test.command", 3), 6)
+
+    def test_event_priority_falls_through_when_handler_returns_false(self):
+        bus = EventBus()
+        events = EventApiAdapter(bus)
+        calls = []
+
+        events.subscribe(
+            "test.action",
+            lambda payload: calls.append("low") or True,
+            priority=0,
+        )
+        events.subscribe(
+            "test.action",
+            lambda payload: calls.append("high") or False,
+            priority=100,
+        )
+
+        self.assertTrue(events.dispatch("test.action", None))
+        self.assertEqual(calls, ["high", "low"])
+
+    def test_event_equal_priority_keeps_registration_order(self):
+        bus = EventBus()
+        events = EventApiAdapter(bus)
+        calls = []
+
+        events.subscribe("test.event", lambda payload: calls.append("a"))
+        events.subscribe("test.event", lambda payload: calls.append("b"))
+        events.publish("test.event", None)
+
+        self.assertEqual(calls, ["a", "b"])
+
+    def test_event_adapter_isolates_subscriber_errors(self):
+        bus = EventBus()
+        events = EventApiAdapter(bus)
+        seen = []
+
+        events.subscribe(
+            "test.event",
+            lambda payload: (_ for _ in ()).throw(RuntimeError("boom")),
+            priority=10,
+        )
+        events.subscribe(
+            "test.event",
+            lambda payload: seen.append(payload),
+        )
+
+        with redirect_stderr(io.StringIO()):
+            events.publish("test.event", 7)
+
+        self.assertEqual(seen, [7])
+
+    def test_subscription_unsubscribe_is_idempotent(self):
+        bus = EventBus()
+        events = EventApiAdapter(bus)
+        seen = []
+
+        sub = events.subscribe("test.event", lambda payload: seen.append(payload))
+        sub.unsubscribe()
+        sub.unsubscribe()
+        events.publish("test.event", 1)
+
+        self.assertEqual(seen, [])
+
+    def test_command_adapter_reports_missing_and_failing_handlers(self):
+        bus = CommandBus()
+        commands = CommandApiAdapter(bus)
+
+        with self.assertRaises(CommandError):
+            commands.execute("test.missing")
+
+        def fail(value):
+            raise RuntimeError("boom")
+
+        commands.register("test.fail", fail)
+        with self.assertRaises(RuntimeError):
+            commands.execute("test.fail", 1)
 
     def test_module_context_wraps_buses(self):
         ctx = ModuleContext(

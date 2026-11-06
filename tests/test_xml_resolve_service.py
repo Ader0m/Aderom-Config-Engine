@@ -84,14 +84,15 @@ class XmlResolveServiceTest(unittest.TestCase):
 
         second = service.resolve_output(self.main, self.cfg)
         self.assertIn("<a x=\"2\"/>", second.text)
+        self.assertEqual(service.cache_stats()["misses"], 2)
 
-    def test_scripts_edit_invalidates_cache(self):
+    def test_script_edit_requires_refresh_to_invalidate(self):
         service = XmlResolveService(
             resolved_cache=ResolvedCache(),
             scripts_dir=self.scripts,
         )
         service.resolve_output(self.main, self.cfg)
-        service.refresh()
+        self.assertEqual(service.cache_stats()["misses"], 1)
 
         core = self.scripts / "dxml_core.script"
         core.write_text("-- core v2\n", encoding="utf-8")
@@ -101,6 +102,13 @@ class XmlResolveServiceTest(unittest.TestCase):
             ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000),
         )
 
+        # Подпись скриптов кэшируется до refresh: без сброса результат
+        # должен браться из кэша.
+        service.resolve_output(self.main, self.cfg)
+        self.assertEqual(service.cache_stats()["misses"], 1)
+        self.assertEqual(service.cache_stats()["hits"], 1)
+
+        service.refresh()
         service.resolve_output(self.main, self.cfg)
         self.assertEqual(service.cache_stats()["misses"], 2)
 

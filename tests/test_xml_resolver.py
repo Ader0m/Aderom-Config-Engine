@@ -7,7 +7,7 @@ from unittest.mock import patch
 from tests.support import SRC  # noqa: F401
 
 from core.models import LineSource
-from core.xml_resolver import XmlResolver
+from core.xml_resolver import XmlResolveError, XmlResolver
 
 
 class XmlResolverTest(unittest.TestCase):
@@ -126,12 +126,77 @@ class XmlResolverTest(unittest.TestCase):
         self.assertIn('width="24"', result.text)
         self.assertIn('height="24"', result.text)
         self.assertGreater(len(result.text.splitlines()), 1)
+        patch_sources = [
+            src
+            for src in result.line_sources
+            if isinstance(src, LineSource) and src.kind == "patch"
+        ]
+        self.assertTrue(patch_sources)
         self.assertTrue(
             any(
-                isinstance(src, LineSource) and src.kind == "patch"
-                for src in result.line_sources
-            )
+                "modxml_fix_faction_spot_size" in src.display
+                for src in patch_sources
+            ),
+            patch_sources,
         )
+
+    def test_dxml_can_be_disabled(self):
+        resolver = XmlResolver(
+            self.cfg,
+            scripts_dir=self.scripts,
+            dxml=False,
+        )
+        result = resolver.resolve_output(self.cfg / "ui" / "map_spots.xml")
+
+        self.assertFalse(result.dxml_applied)
+        self.assertNotIn('width="24"', result.text)
+        self.assertNotIn('height="24"', result.text)
+
+    def test_bom_is_stripped_and_cp1251_is_used(self):
+        path = self.cfg / "ui" / "bom.xml"
+        path.write_bytes(
+            b"\xef\xbb\xbf<root>\xd2\xe5\xf1\xf2</root>\n"
+        )
+        resolver = XmlResolver(
+            self.cfg,
+            scripts_dir=self.scripts,
+            dxml=False,
+        )
+
+        result = resolver.resolve_output(path)
+
+        self.assertEqual(result.text, "<root>Тест</root>")
+        self.assertFalse(result.text.startswith("\ufeff"))
+
+    def test_utf8_without_bom_is_not_auto_detected(self):
+        path = self.cfg / "ui" / "utf8.xml"
+        raw = "<root>Тест</root>\n".encode("utf-8")
+        path.write_bytes(raw)
+        resolver = XmlResolver(
+            self.cfg,
+            scripts_dir=self.scripts,
+            dxml=False,
+        )
+
+        result = resolver.resolve_output(path)
+
+        self.assertEqual(result.text, raw.decode("cp1251").strip())
+        self.assertNotIn("Тест", result.text)
+
+    def test_missing_include_raises(self):
+        path = self.cfg / "ui" / "missing.xml"
+        path.write_text(
+            '<root>\n#include "ui\\nope.xml"\n</root>\n',
+            encoding="cp1251",
+        )
+        resolver = XmlResolver(
+            self.cfg,
+            scripts_dir=self.scripts,
+            dxml=False,
+        )
+
+        with self.assertRaises(XmlResolveError):
+            resolver.resolve_output(path)
 
 
 if __name__ == "__main__":

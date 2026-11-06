@@ -117,6 +117,43 @@ class SingleLineEditTest(unittest.TestCase):
         self.assertTrue(analysis.has_errors)
         self.assertEqual(analysis.issues[0].code, "line_count_changed")
 
+    def test_quoted_value_with_equals_is_preserved(self):
+        analysis = analyze_single_line_edit(
+            '[a]\nx = "a=b"\n',
+            '[a]\nx = "c=d"\n',
+        )
+        self.assertTrue(analysis.is_supported)
+        self.assertEqual(analysis.changes[0].kind, "set_key")
+        self.assertEqual(analysis.changes[0].new_value, '"c=d"')
+
+    def test_crlf_is_supported(self):
+        analysis = analyze_single_line_edit(
+            "[a]\r\nx = 1\r\n",
+            "[a]\r\nx = 2\r\n",
+        )
+        self.assertTrue(analysis.is_supported)
+        self.assertEqual(analysis.changes[0].new_value, "2")
+
+    def test_comment_change_keeps_key_change(self):
+        analysis = analyze_single_line_edit(
+            "[a]\nx = 1 ; old\n",
+            "[a]\nx = 2 ; new\n",
+        )
+        self.assertTrue(analysis.is_supported)
+        self.assertEqual(analysis.changes[0].kind, "set_key")
+        self.assertEqual(analysis.changes[0].new_value, "2")
+
+    def test_removing_list_operation_is_blocked(self):
+        analysis = analyze_single_line_edit(
+            "[a]\nlist = a,b\n>list = c\n",
+            "[a]\nlist = a,b\n<list = c\n",
+        )
+        self.assertTrue(analysis.has_errors)
+        self.assertEqual(
+            analysis.issues[0].code,
+            "list_operation_changed",
+        )
+
     def test_section_insertion_before_keys_is_blocked(self):
         analysis = analyze_single_line_edit(
             "[a]\n\nx = 1\n",

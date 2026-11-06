@@ -27,7 +27,7 @@ class VfsPathsTest(unittest.TestCase):
         resolved = resolve_physical_path(path)
 
         self.assertIsNotNone(resolved)
-        self.assertEqual(str(resolved).lower(), str(path).lower())
+        self.assertEqual(resolved.resolve(), path.resolve())
 
     def test_missing_file_returns_none(self):
         self.assertIsNone(
@@ -49,6 +49,7 @@ class VfsPathsTest(unittest.TestCase):
         self.assertEqual(resolved.name, "icon.dds")
         self.assertEqual(resolved.read_bytes(), b"DDS content")
         self.assertTrue(resolved.is_file())
+        self.assertEqual(path.read_bytes(), b"DDS content")
 
     @unittest.skipUnless(hasattr(os, "symlink"), "symlink недоступен")
     def test_symlink_resolves_to_target(self):
@@ -63,7 +64,7 @@ class VfsPathsTest(unittest.TestCase):
         resolved = resolve_physical_path(link)
 
         self.assertIsNotNone(resolved)
-        self.assertEqual(str(resolved).lower(), str(target).lower())
+        self.assertEqual(resolved.resolve(), target.resolve())
 
     @unittest.skipUnless(os.name == "nt", "junction только в Windows")
     def test_junction_resolves_to_target(self):
@@ -85,7 +86,7 @@ class VfsPathsTest(unittest.TestCase):
         resolved = resolve_physical_path(link / "icon.dds")
 
         self.assertIsNotNone(resolved)
-        self.assertEqual(str(resolved).lower(), str(target).lower())
+        self.assertEqual(resolved.resolve(), target.resolve())
 
 
 if __name__ == "__main__":

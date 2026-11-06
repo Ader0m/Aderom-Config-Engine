@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
+import io
 import tempfile
+import threading
 import time
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
@@ -49,6 +52,28 @@ class FakeResolver:
 
     def store_resolved(self, path, forest, config_dir, value, key=None):
         self.cached.add(key if key is not None else str(path))
+
+
+class BlockingResolver(FakeResolver):
+    def __init__(self, cached=()):
+        super().__init__(cached)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def assemble_resolved(self, path, forest, config_dir, log=None, key=None):
+        path = str(path)
+        self.calls.append(path)
+        self.entered.set()
+        if not self.release.wait(2.0):
+            raise RuntimeError("резолвер не был отпущен")
+        self.cached.add(key if key is not None else path)
+        return ("text:%s" % Path(path).name, [])
+
+
+class FailingResolver(FakeResolver):
+    def assemble_resolved(self, path, forest, config_dir, log=None, key=None):
+        self.calls.append(str(path))
+        raise RuntimeError("boom")
 
 
 class FakeForest:
@@ -150,7 +175,7 @@ class PrebuildServiceTest(unittest.TestCase):
             self.assertEqual(service.status()["done"], 1)
             self.assertEqual(xml_resolver.calls, [])
 
-    def test_stop(self):
+    def test_stop_prevents_remaining_work(self):
         with tempfile.TemporaryDirectory() as d:
             cfg = Path(d)
             paths = []
@@ -159,15 +184,42 @@ class PrebuildServiceTest(unittest.TestCase):
                 p.write_text("[x]\n", encoding="utf-8")
                 paths.append(p)
 
-            resolver = FakeResolver(cached=[])
+            resolver = BlockingResolver(cached=[])
             service = PrebuildService(resolver, workers=1)
             service.start(FakeForest(paths), cfg)
-            service.stop()
-            service.wait()
-            self.assertIn(
-                service.status()["state"],
-                ("idle", "done"),
+            self.assertTrue(
+                resolver.entered.wait(2.0),
+                "предсборка не начала работу",
             )
+
+            service.stop()
+            resolver.release.set()
+            service.wait()
+
+            status = service.status()
+            self.assertEqual(status["state"], "idle")
+            self.assertEqual(status["total"], 3)
+            self.assertEqual(status["done"], 1)
+            self.assertLess(len(resolver.calls), len(paths))
+            self.assertEqual(len(resolver.calls), 1)
+
+    def test_reports_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d)
+            path = cfg / "a.ltx"
+            path.write_text("[x]\n", encoding="utf-8")
+
+            resolver = FailingResolver(cached=[])
+            service = PrebuildService(resolver, workers=1)
+            with redirect_stderr(io.StringIO()):
+                service.start(FakeForest([path]), cfg)
+                service.wait()
+
+            status = service.status()
+            self.assertEqual(status["state"], "done")
+            self.assertEqual(status["done"], 1)
+            self.assertEqual(status["total"], 1)
+            self.assertEqual(status["error"], "boom")
 
 
 if __name__ == "__main__":
