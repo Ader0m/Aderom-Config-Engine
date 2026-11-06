@@ -51,6 +51,11 @@ from .item_catalog import (
     ItemRecord,
 )
 from .item_icons import ICON_CACHE_VERSION, ItemIconService
+from .localization import (
+    LOCALIZATION_VERSION,
+    LocalizationService,
+    LocalizationTable,
+)
 from .object_cache import ObjectCache
 
 from .file_cache import FileCacheSystem
@@ -198,6 +203,9 @@ __all__ = [
     "ItemRecord",
     "ICON_CACHE_VERSION",
     "ItemIconService",
+    "LOCALIZATION_VERSION",
+    "LocalizationService",
+    "LocalizationTable",
     "ObjectCache",
     "DdsError",
     "DdsInfo",

@@ -20,6 +20,7 @@ from .external import open_in_notepad_pp, open_with_shell
 from .fs import find_system_ltx, detect_config_dir
 from .item_catalog import ItemCatalogService
 from .item_icons import ItemIconService
+from .localization import LocalizationService
 from .tree_query_service import search_nodes, sort_nodes
 from .xml_resolve_service import XmlResolveService
 from .prebuild_service import PrebuildService
@@ -72,9 +73,11 @@ class CoreServices:
         # Кэш каталога и иконок переживает перезапуск приложения:
         # ключи включают снимок LTX-поддерева и подписи DDS-атласов.
         item_cache_dir = self.generated_dir / "item_cache"
+        self.localization = LocalizationService(cache_dir=item_cache_dir)
         self.items = ItemCatalogService(
             resolver_service,
             cache_dir=item_cache_dir,
+            localization_service=self.localization,
         )
         self.item_icons = ItemIconService(cache_dir=item_cache_dir)
 
@@ -105,6 +108,8 @@ class CoreServices:
             self.items.clear_memory()
         if hasattr(self.item_icons, "clear_memory"):
             self.item_icons.clear_memory()
+        if hasattr(self.localization, "clear_memory"):
+            self.localization.clear_memory()
 
     # -------------------------------------------------- фоновая предсборка
 

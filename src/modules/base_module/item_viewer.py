@@ -4,8 +4,8 @@
 Возможность базового модуля:
 
 - ``Инструменты → Просмотр игровых предметов``;
-- каталог собирается ядром из корневого файла предметов
-  (``items.ltx``/``item.ltx``/``item_base.ltx``) через ``ctx.services``;
+- каталог собирается ядром из резолва ``system.ltx`` (с учётом
+  ``mod_system_*.ltx``) через ``ctx.services``;
 - иконки вырезаются из атласа ``icons_texture`` по ``inv_grid_*``;
 - если текстура не найдена, показывается серый зачёркнутый круг 50×50.
 
@@ -30,12 +30,16 @@ from PyQt5.QtGui import (
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QDialog,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QListView,
+    QListWidget,
+    QListWidgetItem,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -51,6 +55,54 @@ PLACEHOLDER_SIZE = 50
 
 ENTRY_ROLE = Qt.UserRole + 1
 SEARCH_ROLE = Qt.UserRole + 2
+KIND_ROLE = Qt.UserRole + 3
+
+
+class KindListWidget(QListWidget):
+    """Список kind, который не сбрасывает выбор по клику в пустоте."""
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.itemAt(event.pos()) is None:
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+class ItemFilterProxy(QSortFilterProxyModel):
+    """Фильтр по тексту и набору выбранных kind."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._needle = ""
+        self._kinds = None
+
+    def set_filters(self, needle, kinds):
+        needle = str(needle or "").strip().lower()
+        new_kinds = None if kinds is None else set(kinds)
+
+        if needle == self._needle and new_kinds == self._kinds:
+            return
+
+        self._needle = needle
+        self._kinds = new_kinds
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, row, parent):
+        index = self.sourceModel().index(row, 0, parent)
+        if not index.isValid():
+            return False
+
+        if self._needle:
+            haystack = str(index.data(SEARCH_ROLE) or "").lower()
+            if self._needle not in haystack:
+                return False
+
+        if self._kinds is not None:
+            kind = str(index.data(KIND_ROLE) or "")
+            if kind not in self._kinds:
+                return False
+
+        return True
 
 
 def _image_from_region(region) -> QImage | None:
@@ -260,11 +312,43 @@ class ItemViewerWindow(QDialog):
         # Модель + прокси: фильтрация меняет только прокси и не вызывает
         # setHidden() для тысяч элементов (именно это давало мерцание).
         self.model = QStandardItemModel(self)
-        self.proxy = QSortFilterProxyModel(self)
+        self.proxy = ItemFilterProxy(self)
         self.proxy.setSourceModel(self.model)
-        self.proxy.setFilterRole(SEARCH_ROLE)
-        self.proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
-        self.proxy.setDynamicSortFilter(True)
+
+        # Колонка группировки по kind. Это обычный список с
+        # ExtendedSelection: выбранные строки просто подсвечиваются
+        # штатным цветом выделения, без чекбоксов и иконок.
+        self.kind_panel = QWidget()
+        self.kind_panel.setMinimumWidth(190)
+        kind_layout = QVBoxLayout(self.kind_panel)
+        kind_layout.setContentsMargins(0, 0, 0, 0)
+        kind_layout.setSpacing(4)
+
+        kind_caption = QLabel("kind")
+        kind_caption.setProperty("role", "muted")
+        kind_layout.addWidget(kind_caption)
+
+        self.kind_list = KindListWidget()
+        # MultiSelection: обычный клик переключает только эту строку,
+        # не сбрасывая остальные выбранные kind.
+        self.kind_list.setSelectionMode(
+            QAbstractItemView.MultiSelection
+        )
+        self.kind_list.setUniformItemSizes(True)
+        self.kind_list.itemSelectionChanged.connect(
+            self._on_kind_selection_changed
+        )
+        kind_layout.addWidget(self.kind_list, 1)
+
+        select_all_btn = QPushButton("Выбрать все")
+        select_all_btn.clicked.connect(self.kind_list.selectAll)
+        kind_layout.addWidget(select_all_btn)
+
+        clear_all_btn = QPushButton("Снять все")
+        clear_all_btn.clicked.connect(self.kind_list.clearSelection)
+        kind_layout.addWidget(clear_all_btn)
+
+        splitter.addWidget(self.kind_panel)
 
         self.list_view = QListView()
         self.list_view.setModel(self.proxy)
@@ -314,6 +398,33 @@ class ItemViewerWindow(QDialog):
         header.addLayout(text_block, 1)
         details_layout.addLayout(header)
 
+        # Описание — отдельная прокручиваемая область: текст из
+        # text/<lang>, а не ключ локализации из inv_name/description.
+        self.description_panel = QWidget()
+        description_layout = QVBoxLayout(self.description_panel)
+        description_layout.setContentsMargins(0, 0, 0, 0)
+        description_layout.setSpacing(2)
+
+        self.description_caption = QLabel("Описание")
+        self.description_caption.setProperty("role", "muted")
+        description_layout.addWidget(self.description_caption)
+
+        self.description_label = QLabel()
+        self.description_label.setWordWrap(True)
+        self.description_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.description_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+
+        self.description_scroll = QScrollArea()
+        self.description_scroll.setWidgetResizable(True)
+        self.description_scroll.setFrameShape(QFrame.NoFrame)
+        self.description_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarAlwaysOff
+        )
+        self.description_scroll.setWidget(self.description_label)
+        description_layout.addWidget(self.description_scroll, 1)
+
         self.fields_table = QTableWidget(0, 2)
         self.fields_table.setHorizontalHeaderLabels(["Поле", "Значение"])
         self.fields_table.verticalHeader().setVisible(False)
@@ -328,12 +439,33 @@ class ItemViewerWindow(QDialog):
         header_view.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header_view.setSectionResizeMode(1, QHeaderView.Stretch)
 
-        details_layout.addWidget(self.fields_table, 1)
+        # Один вертикальный захват между описанием и свойствами.
+        self.details_splitter = QSplitter(Qt.Vertical)
+        self.details_splitter.setChildrenCollapsible(False)
+        self.details_splitter.setHandleWidth(6)
+        self.details_splitter.addWidget(self.description_panel)
+        self.details_splitter.addWidget(self.fields_table)
+        self.details_splitter.setStretchFactor(0, 0)
+        self.details_splitter.setStretchFactor(1, 1)
+        self.details_splitter.setSizes([110, 450])
+
+        border = self._palette("border", "#3C3F41")
+        accent = self._palette("accent", "#3592E4")
+        self.details_splitter.setStyleSheet(
+            "QSplitter::handle:vertical { height: 6px; "
+            "background-color: %s; }"
+            "QSplitter::handle:vertical:hover { "
+            "background-color: %s; }" % (border, accent)
+        )
+
+        self.description_panel.setVisible(False)
+        details_layout.addWidget(self.details_splitter, 1)
         splitter.addWidget(details)
 
         splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([420, 760])
+        splitter.setStretchFactor(1, 0)
+        splitter.setStretchFactor(2, 1)
+        splitter.setSizes([180, 300, 700])
         layout.addWidget(splitter, 1)
 
         # -------------------------------------------------- кнопки
@@ -375,6 +507,24 @@ class ItemViewerWindow(QDialog):
         self._entries = list(catalog.items)
         self._entries.sort(key=lambda item: item.section.lower())
 
+        # Список kind: обычные строки, выбранные подсвечиваются темой.
+        kinds = sorted(
+            {
+                (entry.field("kind") or "").strip()
+                for entry in self._entries
+            },
+            key=lambda kind: (kind == "", kind.lower()),
+        )
+
+        self.kind_list.blockSignals(True)
+        self.kind_list.clear()
+        for kind in kinds:
+            item = QListWidgetItem(kind or "(без kind)")
+            item.setData(Qt.UserRole, kind)
+            self.kind_list.addItem(item)
+        self.kind_list.selectAll()
+        self.kind_list.blockSignals(False)
+
         for entry in self._entries:
             image = self._images.get(entry.section)
             pixmap = self._gallery_pixmap(image)
@@ -383,10 +533,14 @@ class ItemViewerWindow(QDialog):
             item.setEditable(False)
             item.setData(entry, ENTRY_ROLE)
             item.setData(self._search_text(entry), SEARCH_ROLE)
+            item.setData((entry.field("kind") or "").strip(), KIND_ROLE)
             item.setToolTip(self._entry_tooltip(entry))
             self.model.appendRow(item)
 
-        self.proxy.setFilterFixedString(self.filter_edit.text().strip())
+        self.proxy.set_filters(
+            self.filter_edit.text(),
+            self._selected_kinds(),
+        )
         self.list_view.setUpdatesEnabled(True)
         self._updating = False
 
@@ -473,6 +627,8 @@ class ItemViewerWindow(QDialog):
 
     def _entry_tooltip(self, entry):
         parts = [entry.section]
+        if entry.name_text:
+            parts.append(entry.name_text)
         icon_texture = entry.field("icons_texture") or entry.icon_texture
         parts.append("icons_texture: %s" % icon_texture)
         parts.append(
@@ -526,10 +682,18 @@ class ItemViewerWindow(QDialog):
 
         self.section_label.setText("[%s]" % entry.section)
 
-        name = entry.field("inv_name") or ""
-        description = entry.field("description") or ""
+        name = entry.name_text or entry.field("inv_name") or entry.section
+        description = (
+            entry.description_text
+            or entry.field("description")
+            or ""
+        )
         self.name_label.setText(name)
-        self.name_label.setToolTip(description)
+        self.name_label.setToolTip(name)
+
+        has_description = bool(description.strip())
+        self.description_panel.setVisible(has_description)
+        self.description_label.setText(description)
 
         kind = entry.field("kind") or "—"
         texture = entry.field("icons_texture") or entry.icon_texture
@@ -552,8 +716,6 @@ class ItemViewerWindow(QDialog):
                 texture_path,
             )
         )
-        if description:
-            meta += "\nОписание: %s" % description
         self.meta_label.setText(meta)
 
         self.fields_table.setUpdatesEnabled(False)
@@ -575,6 +737,8 @@ class ItemViewerWindow(QDialog):
         self.section_label.setText("—")
         self.name_label.clear()
         self.meta_label.clear()
+        self.description_label.clear()
+        self.description_panel.setVisible(False)
         self.fields_table.clearContents()
         self.fields_table.setRowCount(0)
 
@@ -583,13 +747,31 @@ class ItemViewerWindow(QDialog):
         """Не фильтровать на каждый символ: один проход после паузы."""
         self._filter_timer.start()
 
+    def _selected_kinds(self):
+        """Выбранные kind или None, если список kind пуст."""
+        if self.kind_list.count() == 0:
+            return None
+        return {
+            str(item.data(Qt.UserRole) or "")
+            for item in self.kind_list.selectedItems()
+        }
+
+    def _on_kind_selection_changed(self):
+        if self._updating:
+            return
+        self._filter_timer.stop()
+        self._apply_filter_now()
+
     def _apply_filter_now(self):
         previous = self._current_entry
 
         self._updating = True
         self.list_view.setUpdatesEnabled(False)
         try:
-            self.proxy.setFilterFixedString(self.filter_edit.text().strip())
+            self.proxy.set_filters(
+                self.filter_edit.text(),
+                self._selected_kinds(),
+            )
             entry = self._restore_or_first_entry(previous)
         finally:
             self.list_view.setUpdatesEnabled(True)

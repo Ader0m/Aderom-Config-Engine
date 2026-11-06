@@ -164,6 +164,9 @@ class ItemEntry:
     icon_width: int = 1
     icon_height: int = 1
     line_number: int = 0
+    # Готовый текст из configs/text/<lang>, а не ключ локализации.
+    name_text: str = ""
+    description_text: str = ""
 
     def field(self, name: str, default: Optional[str] = None) -> Optional[str]:
         """Значение поля без учёта регистра ключа."""
@@ -322,11 +325,11 @@ class CoreApi(Protocol):
         forest,
         log: Optional[Callable[[str], None]] = None,
     ) -> ItemCatalog:
-        """Собрать каталог предметов из корневого файла предметов.
+        """Собрать каталог предметов из резолва ``system.ltx``.
 
-        Разбирается только один корень (``items.ltx``/``item.ltx``/
-        ``item_base.ltx``) вместе с его include/DLTX-зависимостями.
-        Результат отсортирован
+        Основной корень — ``system.ltx`` (учитывает ``mod_system_*.ltx``);
+        для урезанных VFS возможен fallback на ``items.ltx``/
+        ``item_base.ltx``. Результат отсортирован
         по имени секции.
         """
 

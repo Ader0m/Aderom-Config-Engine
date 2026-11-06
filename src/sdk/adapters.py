@@ -216,6 +216,10 @@ class CoreApiAdapter:
                 icon_width=int(getattr(item, "icon_width", 1) or 1),
                 icon_height=int(getattr(item, "icon_height", 1) or 1),
                 line_number=int(getattr(item, "line_number", 0) or 0),
+                name_text=str(getattr(item, "name_text", "") or ""),
+                description_text=str(
+                    getattr(item, "description_text", "") or ""
+                ),
             ))
 
         return ItemCatalog(

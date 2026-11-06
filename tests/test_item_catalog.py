@@ -24,6 +24,20 @@ class _FakeResolver:
         return self.text, []
 
 
+class _FakeLocalization:
+    def signature(self, forest):
+        return "test-localization"
+
+    def load(self, forest, config_dir=None, log=None):
+        return self
+
+    def translate(self, value):
+        return {
+            "Alpha": "Альфа",
+            "desc_alpha": "Описание Альфы",
+        }.get(value, value)
+
+
 class _FakeForest:
     def __init__(self, scan_dir, files, rel_paths=None):
         self.scan_dir = str(scan_dir)
@@ -43,6 +57,7 @@ inv_grid_width = 2
 
 [alpha_item]
 inv_name = Alpha
+description = desc_alpha
 kind = i_misc
 cost = 10
 
@@ -109,6 +124,23 @@ class ItemCatalogTest(unittest.TestCase):
         beta = next(i for i in catalog.items if i.section == "beta_item")
         self.assertEqual(beta.icon_rect, (150, 200, 100, 100))
         self.assertEqual(beta.field("inv_grid_x"), "3")
+
+    def test_item_gets_localized_name_and_description(self):
+        forest = self._forest()
+        service = ItemCatalogService(
+            _FakeResolver(ITEMS_TEXT),
+            localization_service=_FakeLocalization(),
+        )
+
+        catalog = service.build(forest)
+        alpha = next(
+            item for item in catalog.items
+            if item.section == "alpha_item"
+        )
+
+        self.assertEqual(alpha.name_text, "Альфа")
+        self.assertEqual(alpha.description_text, "Описание Альфы")
+        self.assertEqual(alpha.field("inv_name"), "Alpha")
 
     def test_service_sections_are_skipped(self):
         forest = self._forest()

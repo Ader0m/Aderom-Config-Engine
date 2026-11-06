@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Каталог игровых предметов из корневого файла ``items.ltx``.
+"""Каталог игровых предметов из резолва ``system.ltx``.
 
 Модуль решает одну задачу: по уже построенному дереву VFS прочитать
-корневой файл предметов так, как его видит игра (include + DLTX +
-наследование через Resolver4), и вернуть плоский список секций с их
-полями и координатами иконки в атласе.
+корневой файл так, как его видит игра (include + DLTX + наследование
+через Resolver4), и вернуть плоский список предметных секций с их полями
+и координатами иконки в атласе.
+
+Основной источник — ``system.ltx``: только его резолв учитывает
+``mod_system_*.ltx`` и остальные DLTX-патчи. Старые корни
+``items.ltx``/``item_base.ltx`` оставлены как fallback для урезанных VFS.
 
 Правила движка, которые здесь воспроизводятся:
 
@@ -32,7 +36,8 @@ from .vfs_paths import resolve_asset_path
 
 
 # Меняется при изменении правил разбора: старый кэш станет недоступен.
-ITEM_CATALOG_VERSION = 1
+# 2 — в карточке появились локализованные name_text/description_text.
+ITEM_CATALOG_VERSION = 2
 
 DEFAULT_ICON_TEXTURE = r"ui\ui_icon_equipment"
 GRID_SIZE = 50
@@ -82,6 +87,9 @@ class ItemRecord:
     icon_width: int
     icon_height: int
     line_number: int = 0
+    # Локализованные значения inv_name/description из text/<lang>.
+    name_text: str = ""
+    description_text: str = ""
 
     def field(self, name: str, default: Optional[str] = None) -> Optional[str]:
         wanted = str(name).lower()
@@ -115,8 +123,15 @@ class ItemCatalog:
 class ItemCatalogService:
     """Строит каталог предметов через сервис резолвера."""
 
-    def __init__(self, resolver_service, cache_dir=None, max_entries=4):
+    def __init__(
+        self,
+        resolver_service,
+        cache_dir=None,
+        max_entries=4,
+        localization_service=None,
+    ):
         self._resolver = resolver_service
+        self._localization = localization_service
         self._cache = ObjectCache(
             cache_dir=cache_dir,
             max_entries=max_entries,
@@ -125,10 +140,30 @@ class ItemCatalogService:
     # -------------------------------------------------- корневой файл
 
     def find_root(self, forest) -> Optional[Path]:
-        """Найти корневой файл предметов в дереве VFS."""
+        """Найти корневой файл, из которого игра собирает предметы.
+
+        Основной источник — ``system.ltx``: только его резолв учитывает
+        ``mod_system_*.ltx`` и остальные DLTX-патчи. Если system.ltx нет
+        (например, урезанный тестовый VFS), остаётся старый fallback на
+        ``items.ltx``/``item_base.ltx``.
+        """
         files = list(getattr(forest, "files", ()) or ())
         if not files:
             return None
+
+        system_root = getattr(forest, "system_root", None)
+        if system_root:
+            system_path = Path(system_root)
+            try:
+                if system_path.is_file():
+                    return system_path
+            except OSError:
+                pass
+
+        for path in files:
+            path = Path(path)
+            if path.name.lower() == "system.ltx":
+                return path
 
         rel_paths = getattr(forest, "rel_paths", {}) or {}
         scan_dir = getattr(forest, "scan_dir", None)
@@ -174,10 +209,18 @@ class ItemCatalogService:
         except Exception:
             signature = "unknown"
 
-        raw = "%s|%s|%s" % (
+        loc_signature = ""
+        if self._localization is not None:
+            try:
+                loc_signature = self._localization.signature(forest)
+            except Exception:
+                loc_signature = ""
+
+        raw = "%s|%s|%s|%s" % (
             ITEM_CATALOG_VERSION,
             path_key(root),
             signature,
+            loc_signature,
         )
         digest = hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()
         return ("item_catalog", digest), digest
@@ -197,7 +240,8 @@ class ItemCatalogService:
                 source_path=None,
                 items=(),
                 warnings=(
-                    "В VFS не найден файл items.ltx, item.ltx или item_base.ltx.",
+                    "В VFS не найден system.ltx, items.ltx, item.ltx "
+                    "или item_base.ltx.",
                 ),
             )
 
@@ -209,11 +253,23 @@ class ItemCatalogService:
             return cached
 
         text = None
+        cfg = config_dir or getattr(forest, "scan_dir", None)
         if log:
             log("Предметы: корневой файл %s" % root)
 
+        localization = None
+        if self._localization is not None:
+            try:
+                localization = self._localization.load(
+                    forest,
+                    config_dir=cfg,
+                    log=log,
+                )
+            except Exception as exc:
+                if log:
+                    log("Предметы: локализация недоступна: %s" % exc)
+
         try:
-            cfg = config_dir or getattr(forest, "scan_dir", None)
             text, _sources = self._resolver.assemble_resolved(
                 root,
                 forest,
@@ -240,7 +296,7 @@ class ItemCatalogService:
                 )
 
         document = parse_ltx_document(text, source_path=root)
-        items = self._collect(document, forest)
+        items = self._collect(document, forest, localization)
 
         if log:
             log(
@@ -266,7 +322,7 @@ class ItemCatalogService:
 
     # -------------------------------------------------- предметы
 
-    def _collect(self, document, forest) -> list:
+    def _collect(self, document, forest, localization=None) -> list:
         scan_dir = getattr(forest, "scan_dir", None)
         items = []
 
@@ -318,6 +374,16 @@ class ItemCatalogService:
                 icon_texture,
             )
 
+            name_key = self._clean(lower.get("inv_name") or "")
+            description_key = self._clean(lower.get("description") or "")
+
+            if localization is not None:
+                name_text = localization.translate(name_key)
+                description_text = localization.translate(description_key)
+            else:
+                name_text = name_key
+                description_text = description_key
+
             items.append(
                 ItemRecord(
                     section=name,
@@ -329,6 +395,8 @@ class ItemCatalogService:
                     icon_width=grid_w,
                     icon_height=grid_h,
                     line_number=int(getattr(section, "line_number", 0) or 0),
+                    name_text=name_text,
+                    description_text=description_text,
                 )
             )
 
