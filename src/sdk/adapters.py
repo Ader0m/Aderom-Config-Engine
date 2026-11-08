@@ -187,8 +187,23 @@ class CoreApiAdapter:
 
     # --- предметы и иконки -----------------------------------------------
 
-    def build_item_catalog(self, forest, log=None):
-        raw = self._provider.build_item_catalog(forest, log=log)
+    def item_catalog_root(self, forest):
+        raw = self._provider.item_catalog_root(forest)
+        return Path(raw) if raw is not None else None
+
+    def build_item_catalog(
+        self,
+        forest,
+        log=None,
+        resolved_text=None,
+        reuse_snapshot_cache=False,
+    ):
+        raw = self._provider.build_item_catalog(
+            forest,
+            log=log,
+            resolved_text=resolved_text,
+            reuse_snapshot_cache=reuse_snapshot_cache,
+        )
 
         source_path = getattr(raw, "source_path", None)
         if source_path is not None:
@@ -206,6 +221,9 @@ class CoreApiAdapter:
                     ItemField(
                         key=str(getattr(field, "key", "")),
                         value=str(getattr(field, "value", "")),
+                        line_number=int(
+                            getattr(field, "line_number", 0) or 0
+                        ),
                     )
                     for field in (getattr(item, "fields", ()) or ())
                 ),
@@ -451,6 +469,43 @@ class UiApiAdapter:
 
     def dispatch_action(self, action, payload=None):
         return self._platform.dispatch_action(action, payload)
+
+    def is_project_active(self):
+        return self._platform.is_project_active()
+
+    def resolved_draft(self, tab_id):
+        return self._platform.resolved_draft(tab_id)
+
+    def update_resolved_draft(
+        self,
+        tab_id,
+        root_path,
+        title,
+        original_text,
+        current_text,
+        line_sources=(),
+        line_edit=None,
+    ):
+        return self._platform.update_resolved_draft(
+            tab_id,
+            root_path,
+            title,
+            original_text,
+            current_text,
+            line_sources,
+            line_edit=line_edit,
+        )
+
+    def sync_resolved_tab(self, tab_id, text, line_sources, root_path):
+        return self._platform.sync_resolved_tab(
+            tab_id,
+            text,
+            line_sources,
+            root_path,
+        )
+
+    def save_project_now(self):
+        return self._platform.save_project_now()
 
     def open_resolved_tab(self, tab_id, title, text, line_sources, root_path,
                           line_number=None):

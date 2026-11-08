@@ -7,6 +7,11 @@ from sdk import FileOpenHandler
 from sdk.events import Events
 
 
+def resolved_tab_id(relative_path) -> str:
+    """Единый id resolved-вкладки базового модуля."""
+    return "base.resolved:%s" % relative_path
+
+
 class LtxFileOpener:
     """Показывает .ltx так, как его видит игра, либо как исходный патч."""
 
@@ -152,7 +157,7 @@ class LtxFileOpener:
         rel = self.ctx.services.relative_path(self.session.forest, path)
 
         # Уникальный tab_id — чтобы можно было держать несколько резолвов открытыми
-        tab_id = "base.resolved:%s" % rel
+        tab_id = resolved_tab_id(rel)
         self.ctx.ui.open_resolved_tab(
             tab_id,
             "RESOLVED: %s" % rel,

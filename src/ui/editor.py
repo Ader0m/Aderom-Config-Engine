@@ -974,6 +974,101 @@ class ResolvedView(QWidget):
         self._baseline_text = self.text() if text is None else str(text)
         self._set_dirty(self.text() != self._baseline_text)
 
+    def set_dirty_state(self, dirty):
+        """Установить признак изменений без пересчёта всего текста."""
+        self._set_dirty(bool(dirty))
+
+    def apply_line_edit(self, action, line_number, text=""):
+        """Точечная правка строки без замены всего текста.
+
+        Используется карточкой предмета: system.ltx может быть очень
+        большим, и полный ``setText`` на каждую правку недопустим.
+        """
+        editor = self.editor
+        try:
+            line_number = int(line_number)
+        except (TypeError, ValueError):
+            return False
+
+        line_count = editor.lines()
+        old_loading = self._loading
+        old_readonly = editor.isReadOnly()
+        self._loading = True
+        editor.setReadOnly(False)
+
+        def content_length(line):
+            raw = editor.text(line)
+            length = editor.lineLength(line)
+            if raw.endswith("\r\n"):
+                return max(0, length - 2)
+            if raw.endswith("\n") or raw.endswith("\r"):
+                return max(0, length - 1)
+            return max(0, length)
+
+        try:
+            if action == "replace":
+                line = line_number - 1
+                if line < 0 or line >= line_count:
+                    return False
+                editor.setSelection(
+                    line, 0, line, content_length(line)
+                )
+                editor.replaceSelectedText(str(text))
+
+            elif action == "insert":
+                if line_number < 0 or line_number > line_count:
+                    return False
+                if line_number == 0:
+                    editor.setCursorPosition(0, 0)
+                    editor.insert(str(text) + "\n")
+                else:
+                    line = line_number - 1
+                    editor.setCursorPosition(
+                        line,
+                        content_length(line),
+                    )
+                    editor.insert("\n" + str(text))
+
+            elif action == "delete":
+                line = line_number - 1
+                if line < 0 or line >= line_count:
+                    return False
+                if line + 1 < line_count:
+                    editor.setSelection(line, 0, line + 1, 0)
+                elif line > 0:
+                    editor.setSelection(
+                        line - 1,
+                        content_length(line - 1),
+                        line,
+                        content_length(line),
+                    )
+                else:
+                    editor.setSelection(
+                        0, 0, 0, content_length(0)
+                    )
+                editor.removeSelectedText()
+
+            else:
+                return False
+
+            sources = list(self._line_sources)
+            while len(sources) < line_count:
+                sources.append(None)
+
+            if action == "insert":
+                index = min(max(line_number, 0), len(sources))
+                sources.insert(index, None)
+            elif action == "delete":
+                index = line_number - 1
+                if 0 <= index < len(sources):
+                    del sources[index]
+
+            self._line_sources = sources
+            return True
+        finally:
+            editor.setReadOnly(old_readonly)
+            self._loading = old_loading
+
     def _set_dirty(self, dirty):
         dirty = bool(dirty)
         if dirty == self._dirty:

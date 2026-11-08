@@ -193,9 +193,24 @@ class CoreServices:
 
     # -------------------------------------------------- предметы и иконки
 
-    def build_item_catalog(self, forest, log=None):
+    def item_catalog_root(self, forest):
+        """Корень, из которого собирается каталог предметов."""
+        return self.items.find_root(forest)
+
+    def build_item_catalog(
+        self,
+        forest,
+        log=None,
+        resolved_text=None,
+        reuse_snapshot_cache=False,
+    ):
         """Разобрать корневой файл предметов и вернуть каталог."""
-        return self.items.build(forest, log=log)
+        return self.items.build(
+            forest,
+            log=log,
+            resolved_text=resolved_text,
+            reuse_snapshot_cache=reuse_snapshot_cache,
+        )
 
     def read_texture_region(self, path, x, y, width, height):
         """Декодировать прямоугольник DDS в RGBA (с кэшем регионов)."""

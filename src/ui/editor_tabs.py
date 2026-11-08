@@ -212,6 +212,10 @@ class EditorTabs(QTabWidget):
     def has_tab(self, tab_id):
         return tab_id in self._tab_ids
 
+    def get_tab(self, tab_id):
+        """Виджет вкладки по id или ``None``."""
+        return self._tab_ids.get(tab_id)
+
     @property
     def current_tab_id(self):
         return self._tab_id_for_widget(self.currentWidget())

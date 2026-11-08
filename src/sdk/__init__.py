@@ -20,6 +20,8 @@ from .api import (
     ItemEntry,
     ItemField,
     ItemIcon,
+    ResolvedDraftInfo,
+    ResolvedLineEdit,
     TextureRegion,
 )
 from .adapters import (
@@ -54,6 +56,8 @@ __all__ = [
     "ItemEntry",
     "ItemField",
     "ItemIcon",
+    "ResolvedDraftInfo",
+    "ResolvedLineEdit",
     "TextureRegion",
     "CoreApiAdapter",
     "EventApiAdapter",

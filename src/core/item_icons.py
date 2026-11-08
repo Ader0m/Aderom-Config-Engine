@@ -341,6 +341,8 @@ class ItemIconService:
 
     @staticmethod
     def _bundle_key(catalog_key, requests, stamps):
+        # Ключ зависит только от DDS-файлов и версии декодера: правка
+        # system.ltx не должна заставлять заново декодировать иконки.
         unique = {}
         for _section, path, _x, _y, _w, _h in requests:
             pkey = path_key(path)
@@ -354,7 +356,7 @@ class ItemIconService:
             )
         ).hexdigest()
 
-        return ("item_icons", catalog_key or "none", digest)
+        return ("item_icons", digest)
 
     def clear_memory(self):
         self._memory.clear()

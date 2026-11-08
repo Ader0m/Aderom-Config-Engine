@@ -14,6 +14,7 @@ from pathlib import Path
 from PyQt5.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from core.fs import read_text_safe, read_xml_text
+from sdk.api import ResolvedDraftInfo
 from sdk.events import Events
 
 from .file_open_router import FileOpenRouter
@@ -178,6 +179,160 @@ class PlatformApi:
 
     def can_edit_documents(self):
         return self.project.is_active
+
+    def is_project_active(self):
+        return self.project.is_active
+
+    def resolved_draft(self, tab_id):
+        if not self.project.is_active:
+            return None
+        draft = self.project.get_resolved_draft(tab_id)
+        if draft is None:
+            return None
+        return ResolvedDraftInfo(
+            text=draft.current_text,
+            saved_text=draft.saved_text,
+            original_text=draft.original_text,
+            line_sources=tuple(draft.line_sources or ()),
+        )
+
+    def update_resolved_draft(
+        self,
+        tab_id,
+        root_path,
+        title,
+        original_text,
+        current_text,
+        line_sources=(),
+        line_edit=None,
+    ):
+        if not self.project.is_active:
+            self.set_status(
+                "Создайте проект, чтобы изменять файлы",
+                7000,
+            )
+            return False
+
+        try:
+            self.project.update_resolved_draft(
+                tab_id,
+                root_path,
+                title,
+                original_text,
+                current_text,
+                line_sources=line_sources,
+            )
+        except ProjectError as exc:
+            self.show_error(str(exc))
+            return False
+
+        self._update_project_status()
+
+        if line_edit is not None:
+            self.sync_resolved_line_edit(tab_id, line_edit)
+        else:
+            self.sync_resolved_tab(
+                tab_id,
+                current_text,
+                line_sources,
+                root_path,
+            )
+        return True
+
+    def sync_resolved_line_edit(self, tab_id, edit):
+        """Точечно обновить открытую resolved-вкладку."""
+        if self.window is None:
+            return
+        editor = getattr(self.window, "editor", None)
+        if editor is None:
+            return
+
+        getter = getattr(editor, "get_tab", None)
+        view = getter(tab_id) if callable(getter) else None
+        if view is None or not hasattr(view, "apply_line_edit"):
+            return
+
+        view.apply_line_edit(
+            edit.action,
+            edit.line_number,
+            edit.text,
+        )
+
+        draft = (
+            self.project.get_resolved_draft(tab_id)
+            if self.project.is_active
+            else None
+        )
+        if draft is not None:
+            view.set_dirty_state(draft.is_dirty)
+
+    def sync_resolved_tab(self, tab_id, text, line_sources, root_path):
+        """Обновить открытую resolved-вкладку без переключения на неё."""
+        if self.window is None:
+            return
+        editor = getattr(self.window, "editor", None)
+        if editor is None:
+            return
+
+        getter = getattr(editor, "get_tab", None)
+        view = getter(tab_id) if callable(getter) else None
+        if view is None or not hasattr(view, "set_content"):
+            return
+
+        first_line = 0
+        cursor = (0, 0)
+        widget = getattr(view, "editor", None)
+        if widget is not None:
+            try:
+                first_line = widget.firstVisibleLine()
+                cursor = widget.getCursorPosition()
+            except Exception:
+                pass
+
+        view.set_content(text, line_sources, root_path)
+
+        draft = (
+            self.project.get_resolved_draft(tab_id)
+            if self.project.is_active
+            else None
+        )
+        if draft is not None:
+            view.mark_clean(draft.saved_text)
+
+        if widget is not None:
+            try:
+                widget.setFirstVisibleLine(first_line)
+                widget.setCursorPosition(cursor[0], cursor[1])
+            except Exception:
+                pass
+
+    def save_project_now(self):
+        if not self.project.is_active:
+            self.set_status(
+                "Создайте проект, чтобы сохранять изменения",
+                7000,
+            )
+            return 0
+
+        try:
+            saved = self.project.flush()
+        except Exception as exc:
+            self.log("Проект: ошибка сохранения: %s" % exc)
+            return 0
+
+        if self.window is not None:
+            for event in saved:
+                if event.kind == "file":
+                    self.window.editor.mark_clean(event.path, event.text)
+                else:
+                    self.window.editor.mark_tab_clean(event.key)
+
+        self.set_status(
+            "Проект сохранён: %d файл(ов)" % len(saved),
+            4000,
+        )
+        self._update_project_status()
+        return len(saved)
 
     def document_text(self, path):
         """Текст файла для редактора: черновик проекта или оригинал."""

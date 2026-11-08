@@ -36,8 +36,9 @@ from .vfs_paths import resolve_asset_path
 
 
 # Меняется при изменении правил разбора: старый кэш станет недоступен.
-# 2 — в карточке появились локализованные name_text/description_text.
-ITEM_CATALOG_VERSION = 2
+# 2 — локализованные name_text/description_text.
+# 3 — ItemField.line_number для правки system.ltx.
+ITEM_CATALOG_VERSION = 3
 
 DEFAULT_ICON_TEXTURE = r"ui\ui_icon_equipment"
 GRID_SIZE = 50
@@ -68,10 +69,11 @@ _EXCLUDED_PATH_PARTS = ("/settings/", "/trade/", "/plugins/")
 
 @dataclass(frozen=True)
 class ItemField:
-    """Одно поле предмета (ключ и его итоговое значение)."""
+    """Одно поле предмета (ключ, значение и строка в resolved-тексте)."""
 
     key: str
     value: str
+    line_number: int = 0
 
 
 @dataclass(frozen=True)
@@ -136,6 +138,9 @@ class ItemCatalogService:
             cache_dir=cache_dir,
             max_entries=max_entries,
         )
+        # Черновик проекта меняется после каждой правки: его кэшируем
+        # только в памяти, иначе на диске появятся сотни 40-МБ снимков.
+        self._text_cache = ObjectCache(max_entries=1)
 
     # -------------------------------------------------- корневой файл
 
@@ -228,34 +233,116 @@ class ItemCatalogService:
     def clear_memory(self):
         """Сбросить каталоги в памяти (диск остаётся до смены снимка)."""
         self._cache.clear()
+        self._text_cache.clear()
 
     # -------------------------------------------------- сборка
 
-    def build(self, forest, log=None, config_dir=None) -> ItemCatalog:
-        """Прочитать корень предметов и вернуть отсортированный каталог."""
+    def build(self, forest, log=None, config_dir=None,
+              resolved_text=None, reuse_snapshot_cache=False) -> ItemCatalog:
+        """Собрать каталог предметов.
+
+        ``resolved_text`` — готовый текст ``system.ltx``. Если он уже
+        получен из резолвера, ``reuse_snapshot_cache=True`` позволяет
+        использовать дисковый кэш снимка и не вызывать резолвер второй раз.
+        Черновик проекта кэшируется только в памяти: он меняется каждую
+        правку и не должен плодить 40-МБ файлы на диске.
+        """
         root = self.find_root(forest)
-
-        if root is None:
-            return ItemCatalog(
-                source_path=None,
-                items=(),
-                warnings=(
-                    "В VFS не найден system.ltx, items.ltx, item.ltx "
-                    "или item_base.ltx.",
-                ),
-            )
-
-        cache_key, catalog_key = self._snapshot_key(forest, root)
-        cached = self._cache.get(cache_key)
-        if cached is not None:
-            if log:
-                log("Предметы: кэш снимка %s" % root.name)
-            return cached
-
-        text = None
         cfg = config_dir or getattr(forest, "scan_dir", None)
-        if log:
-            log("Предметы: корневой файл %s" % root)
+
+        loc_signature = ""
+        if self._localization is not None:
+            try:
+                loc_signature = self._localization.signature(forest)
+            except Exception:
+                loc_signature = ""
+
+        cache_target = self._cache
+
+        if resolved_text is None:
+            if root is None:
+                return ItemCatalog(
+                    source_path=None,
+                    items=(),
+                    warnings=(
+                        "В VFS не найден system.ltx, items.ltx, item.ltx "
+                        "или item_base.ltx.",
+                    ),
+                )
+
+            cache_key, catalog_key = self._snapshot_key(forest, root)
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                if log:
+                    log("Предметы: кэш снимка %s" % root.name)
+                return cached
+
+            text = None
+            if log:
+                log("Предметы: корневой файл %s" % root)
+
+            try:
+                text, _sources = self._resolver.assemble_resolved(
+                    root,
+                    forest,
+                    cfg,
+                    log=log,
+                )
+            except Exception as exc:
+                if log:
+                    log(
+                        "Предметы: резолв недоступен (%s), читаю исходный файл"
+                        % exc
+                    )
+
+            if not text:
+                try:
+                    text = read_text_safe(root)
+                except OSError as exc:
+                    return ItemCatalog(
+                        source_path=root,
+                        items=(),
+                        warnings=(
+                            "Не удалось прочитать %s: %s" % (root, exc),
+                        ),
+                    )
+        else:
+            text = str(resolved_text)
+
+            if reuse_snapshot_cache and root is not None:
+                cache_key, catalog_key = self._snapshot_key(forest, root)
+                cache_target = self._cache
+
+                cached = self._cache.get(cache_key)
+                if cached is not None:
+                    if log:
+                        log("Предметы: кэш снимка %s" % root.name)
+                    return cached
+            else:
+                text_digest = hashlib.sha1(
+                    text.encode("utf-8", "replace")
+                ).hexdigest()
+                cache_key = (
+                    "item_catalog_text",
+                    ITEM_CATALOG_VERSION,
+                    text_digest,
+                    path_key(root) if root is not None else "",
+                    loc_signature,
+                )
+                catalog_key = text_digest
+                cache_target = self._text_cache
+
+                cached = self._text_cache.get(cache_key)
+                if cached is not None:
+                    if log:
+                        log("Предметы: кэш текста проекта")
+                    return cached
+
+            if log:
+                log(
+                    "Предметы: готовый resolved-текст, строк: %d"
+                    % text.count("\n")
+                )
 
         localization = None
         if self._localization is not None:
@@ -268,32 +355,6 @@ class ItemCatalogService:
             except Exception as exc:
                 if log:
                     log("Предметы: локализация недоступна: %s" % exc)
-
-        try:
-            text, _sources = self._resolver.assemble_resolved(
-                root,
-                forest,
-                cfg,
-                log=log,
-            )
-        except Exception as exc:
-            if log:
-                log(
-                    "Предметы: резолв недоступен (%s), читаю исходный файл"
-                    % exc
-                )
-
-        if not text:
-            try:
-                text = read_text_safe(root)
-            except OSError as exc:
-                return ItemCatalog(
-                    source_path=root,
-                    items=(),
-                    warnings=(
-                        "Не удалось прочитать %s: %s" % (root, exc),
-                    ),
-                )
 
         document = parse_ltx_document(text, source_path=root)
         items = self._collect(document, forest, localization)
@@ -308,7 +369,7 @@ class ItemCatalogService:
         if not items:
             warnings.append(
                 "В %s не найдено секций с иконками или сеткой инвентаря."
-                % root.name
+                % (root.name if root is not None else "тексте")
             )
 
         catalog = ItemCatalog(
@@ -317,7 +378,7 @@ class ItemCatalogService:
             warnings=tuple(warnings),
             cache_key=catalog_key,
         )
-        self._cache.set(cache_key, catalog)
+        cache_target.set(cache_key, catalog)
         return catalog
 
     # -------------------------------------------------- предметы
@@ -352,10 +413,19 @@ class ItemCatalogService:
             if grid_h <= 0:
                 grid_h = 1
 
+            line_by_key = {}
+            for entry in section.entries:
+                key_lower = entry.key.lower()
+                if entry.operation == "delete":
+                    line_by_key.pop(key_lower, None)
+                else:
+                    line_by_key[key_lower] = entry.line_number
+
             fields = [
                 ItemField(
                     key=str(key),
                     value="" if value is None else str(value),
+                    line_number=line_by_key.get(str(key).lower(), 0),
                 )
                 for key, value in values.items()
             ]
@@ -439,6 +509,10 @@ class ItemCatalogService:
         """Записать эффективное значение, сохранив исходный регистр ключа."""
         for index, field in enumerate(fields):
             if field.key.lower() == key:
-                fields[index] = ItemField(key=field.key, value=value)
+                fields[index] = ItemField(
+                    key=field.key,
+                    value=value,
+                    line_number=field.line_number,
+                )
                 return
-        fields.append(ItemField(key=key, value=value))
+        fields.append(ItemField(key=key, value=value, line_number=0))

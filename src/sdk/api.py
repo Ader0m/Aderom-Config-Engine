@@ -144,6 +144,7 @@ class ItemField:
 
     key: str
     value: str
+    line_number: int = 0
 
 
 @dataclass(frozen=True)
@@ -215,6 +216,29 @@ class TextureRegion:
     width: int
     height: int
     rgba: bytes = b""
+
+
+@dataclass(frozen=True)
+class ResolvedDraftInfo:
+    """Черновик resolved-файла активного проекта."""
+
+    text: str
+    saved_text: str = ""
+    original_text: str = ""
+    line_sources: tuple = field(default_factory=tuple)
+
+    @property
+    def is_dirty(self) -> bool:
+        return self.text != self.saved_text
+
+
+@dataclass(frozen=True)
+class ResolvedLineEdit:
+    """Точечная правка одной строки resolved-файла."""
+
+    action: str          # replace | insert | delete
+    line_number: int
+    text: str = ""
 
 
 # ---------------------------------------------------------------- контракты
@@ -320,17 +344,24 @@ class CoreApi(Protocol):
 
     # --- предметы и иконки -----------------------------------------------
 
+    def item_catalog_root(self, forest) -> Optional[Path]:
+        """Корень каталога предметов: ``system.ltx`` или fallback-файл."""
+
     def build_item_catalog(
         self,
         forest,
         log: Optional[Callable[[str], None]] = None,
+        resolved_text: Optional[str] = None,
+        reuse_snapshot_cache: bool = False,
     ) -> ItemCatalog:
         """Собрать каталог предметов из резолва ``system.ltx``.
 
         Основной корень — ``system.ltx`` (учитывает ``mod_system_*.ltx``);
         для урезанных VFS возможен fallback на ``items.ltx``/
-        ``item_base.ltx``. Результат отсортирован
-        по имени секции.
+        ``item_base.ltx``. Результат отсортирован по имени секции.
+
+        ``resolved_text`` — готовый текст (черновик проекта); тогда резолв
+        не выполняется, а кэш ключуется хэшем текста.
         """
 
     def read_texture_region(
@@ -468,6 +499,40 @@ class UiApi(Protocol):
 
     def dispatch_action(self, action: str, payload=None) -> bool:
         """Разослать UI-действие. Возвращает ``True``, если оно перехвачено."""
+
+    def is_project_active(self) -> bool:
+        """Есть ли активный проект (без него правка запрещена)."""
+
+    def resolved_draft(self, tab_id: str) -> Optional[ResolvedDraftInfo]:
+        """Текущий resolved-черновик проекта по id вкладки."""
+
+    def update_resolved_draft(
+        self,
+        tab_id: str,
+        root_path: Path,
+        title: str,
+        original_text: str,
+        current_text: str,
+        line_sources: Sequence[Optional[LineSource]] = (),
+        line_edit: Optional[ResolvedLineEdit] = None,
+    ) -> bool:
+        """Обновить resolved-черновик проекта (без записи в оригинал).
+
+        ``line_edit`` позволяет обновить уже открытую resolved-вкладку
+        точечно, не заменяя весь текст (он может быть в десятки мегабайт).
+        """
+
+    def sync_resolved_tab(
+        self,
+        tab_id: str,
+        text: str,
+        line_sources: Sequence[Optional[LineSource]],
+        root_path: Path,
+    ) -> None:
+        """Обновить уже открытую resolved-вкладку, не переключая фокус."""
+
+    def save_project_now(self) -> int:
+        """Сохранить черновики проекта сейчас (аналог Ctrl+S)."""
 
     def open_resolved_tab(
         self,

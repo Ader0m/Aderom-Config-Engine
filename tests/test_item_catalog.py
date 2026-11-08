@@ -125,6 +125,65 @@ class ItemCatalogTest(unittest.TestCase):
         self.assertEqual(beta.icon_rect, (150, 200, 100, 100))
         self.assertEqual(beta.field("inv_grid_x"), "3")
 
+    def test_fields_point_to_resolved_lines(self):
+        forest = self._forest()
+        catalog = ItemCatalogService(
+            _FakeResolver(ITEMS_TEXT)
+        ).build(forest)
+        base = next(
+            item for item in catalog.items
+            if item.section == "base_item"
+        )
+        field = base.field("inv_name")
+        field_obj = next(
+            item for item in base.fields
+            if item.key == "inv_name"
+        )
+        self.assertEqual(field, "Base")
+        self.assertGreater(field_obj.line_number, 0)
+        self.assertEqual(
+            ITEMS_TEXT.splitlines()[field_obj.line_number - 1].strip(),
+            "inv_name = Base",
+        )
+
+    def test_resolved_text_does_not_call_resolver_twice(self):
+        forest = self._forest()
+
+        class _NoResolve(_FakeResolver):
+            def assemble_resolved(self, *args, **kwargs):
+                raise AssertionError("resolver must not be called")
+
+        catalog = ItemCatalogService(
+            _NoResolve("")
+        ).build(
+            forest,
+            resolved_text=ITEMS_TEXT,
+            reuse_snapshot_cache=True,
+        )
+        self.assertTrue(catalog.items)
+        self.assertEqual(
+            [item.section for item in catalog.items],
+            ["alpha_item", "base_item", "beta_item"],
+        )
+
+    def test_build_accepts_resolved_text_overlay(self):
+        forest = self._forest()
+        overlay = ITEMS_TEXT.replace(
+            "inv_name = Alpha",
+            "inv_name = AlphaChanged",
+        )
+
+        catalog = ItemCatalogService(
+            _FakeResolver("")
+        ).build(forest, resolved_text=overlay)
+
+        alpha = next(
+            item for item in catalog.items
+            if item.section == "alpha_item"
+        )
+        self.assertEqual(alpha.field("inv_name"), "AlphaChanged")
+        self.assertEqual(alpha.name_text, "AlphaChanged")
+
     def test_item_gets_localized_name_and_description(self):
         forest = self._forest()
         service = ItemCatalogService(
