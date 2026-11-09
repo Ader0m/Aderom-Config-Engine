@@ -8,13 +8,18 @@ from tests.support import SRC  # noqa: F401
 
 from core.assembly_service import AssemblyService
 from core.documents.document_diff import diff_texts
+from core.documents.document_model import parse_ltx_document
 from core.patching.dltx_generator import DltxGenerator
 from core.facade import CoreServices
 from core.file_cache import FileCacheSystem
 from core.patching.patch_models import PatchFile, PatchOptions
 from core.patching.patch_planner import PatchPlanner
 from core.patching.patch_targets import patch_file_name, resolve_patch_target
-from core.patching.patch_verifier import ModelPatchVerifier, ResolverPatchVerifier
+from core.patching.patch_verifier import (
+    ModelPatchVerifier,
+    ResolverPatchVerifier,
+    apply_patch_document,
+)
 from core.patching.patch_writer import PatchWriteError, PatchWriter
 from core.reference_graph import DisabledCache, ReferenceGraphBuilder
 from core.resolved_cache import ResolvedCache
@@ -106,6 +111,18 @@ class PatchPipelineTest(unittest.TestCase):
             [root, source],
             {source: {root}},
         )
+
+    def test_apply_patch_does_not_mutate_base_document(self):
+        base = parse_ltx_document("[a]\nx = 1\n[b]\ny = 2\n")
+        patch = parse_ltx_document("![a]\nx = 3\n")
+
+        result, issues = apply_patch_document(base, patch)
+
+        self.assertFalse(issues)
+        self.assertEqual(base.values("a"), {"x": "1"})
+        self.assertEqual(base.values("b"), {"y": "2"})
+        self.assertEqual(result.values("a"), {"x": "3"})
+        self.assertEqual(result.values("b"), {"y": "2"})
 
     def _verified_patch(self, d, suffix="safe"):
         cfg = Path(d) / "gamedata" / "configs"

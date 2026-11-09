@@ -52,13 +52,15 @@ class ResolvedLineChange:
 
         display = getattr(source, "display", "") or ""
         if display:
-            return display
+            value = display
+        else:
+            path = getattr(source, "path", None)
+            if path is None:
+                return "неизвестен"
+            value = str(path)
 
-        path = getattr(source, "path", None)
-        if path is not None:
-            return str(path)
-
-        return "неизвестен"
+        value = value.replace("\\", "/").rstrip("/")
+        return value.rsplit("/", 1)[-1] or value
 
 
 @dataclass(frozen=True)

@@ -68,21 +68,128 @@ KEY_KINDS = frozenset(
 )
 PARENT_KINDS = frozenset({"add_parent", "remove_parent"})
 
+# Ограничение на эвристику переименования секций: сравнение всех пар
+# «удалённая × добавленная» не должно превращаться в квадратичную работу
+# на больших resolved-документах.
+_MAX_RENAME_PAIRS = 400
 
-def _changed_line_count(before: str, after: str) -> int:
-    old_lines = str(before or "").replace("\r\n", "\n").split("\n")
-    new_lines = str(after or "").replace("\r\n", "\n").split("\n")
+
+def _line_diff(
+    original_text: str,
+    edited_text: str,
+    line_sources: Sequence = (),
+) -> Tuple[int, List[str]]:
+    """Число изменённых строк и заметки о победителях за один проход.
+
+    Раньше здесь было два независимых ``SequenceMatcher`` (для счётчика и
+    для заметок) с ``autojunk=False``. На resolved-файле в десятки мегабайт
+    это давало квадратичное время и минуты ожидания. Теперь при равном
+    числе строк достаточно позиционного сравнения, а общий случай
+    разбирается один раз с ``autojunk=True``: для построчных заметок
+    эвристика difflib безопасна, потому что семантические изменения всё
+    равно считает ``diff_documents``.
+    """
+    old_lines = str(original_text or "").replace("\r\n", "\n").split("\n")
+    new_lines = str(edited_text or "").replace("\r\n", "\n").split("\n")
+    sources = list(line_sources or ())
+
+    # Быстрый путь для типичной правки resolved-вида: число строк не
+    # изменилось, значит достаточно сравнить строки по позициям — без
+    # difflib. На файлах в десятки мегабайт это разница в десятки секунд.
+    if len(old_lines) == len(new_lines):
+        changed_indices = [
+            index
+            for index, (old, new) in enumerate(zip(old_lines, new_lines))
+            if old != new
+        ]
+
+        if not changed_indices:
+            return 0, []
+
+        limit = changed_indices[-1] + 1
+        sections, keys, _section_lines, _key_lines = line_context(
+            old_lines[:limit]
+        )
+
+        notes: List[str] = []
+        for index in changed_indices:
+            section = sections[index] if index < len(sections) else None
+            key = keys[index] if index < len(keys) else None
+            source = sources[index] if index < len(sources) else None
+
+            if section and key:
+                notes.append(
+                    "Строка %d: [%s] %s — победитель: %s"
+                    % (index + 1, section, key, _winner_label(source))
+                )
+            else:
+                notes.append(
+                    "Строка %d: структурное изменение"
+                    % (index + 1)
+                )
+
+        return len(changed_indices), notes
+
     matcher = difflib.SequenceMatcher(
         None,
         old_lines,
         new_lines,
-        autojunk=False,
+        autojunk=True,
     )
-    count = 0
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag != "equal":
-            count += max(i2 - i1, j2 - j1)
-    return count
+    opcodes = matcher.get_opcodes()
+
+    changed = 0
+    replace_indices: List[int] = []
+
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "equal":
+            continue
+
+        changed += max(i2 - i1, j2 - j1)
+
+        if tag == "replace" and (i2 - i1) == (j2 - j1):
+            replace_indices.extend(range(i1, i2))
+
+    sections: List[Optional[str]] = []
+    keys: List[Optional[str]] = []
+
+    if replace_indices:
+        # Контекст нужен только до последней изменённой строки, а не по
+        # всему многомегабайтному resolved-тексту.
+        limit = max(replace_indices) + 1
+        sections, keys, _section_lines, _key_lines = line_context(
+            old_lines[:limit]
+        )
+
+    notes: List[str] = []
+
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "equal":
+            continue
+
+        if tag == "replace" and (i2 - i1) == (j2 - j1):
+            for i in range(i1, i2):
+                section = sections[i] if i < len(sections) else None
+                key = keys[i] if i < len(keys) else None
+                source = sources[i] if i < len(sources) else None
+
+                if section and key:
+                    notes.append(
+                        "Строка %d: [%s] %s — победитель: %s"
+                        % (i + 1, section, key, _winner_label(source))
+                    )
+                else:
+                    notes.append(
+                        "Строка %d: структурное изменение"
+                        % (i + 1)
+                    )
+        else:
+            notes.append(
+                "Строки %d–%d: вставка/удаление блока"
+                % (i1 + 1, max(i1 + 1, i2))
+            )
+
+    return changed, notes
 
 
 def _section_values(document: LtxDocument, section: str):
@@ -389,16 +496,20 @@ def _summary_notes(
         if change.kind == "add_section"
     }
 
-    for old in sorted(removed):
-        old_values = _section_values(before, old)
-        for new in sorted(added):
-            if not old_values:
-                continue
-            if old_values == _section_values(after, new):
-                notes.append(
-                    "Секция [%s] преобразована в [%s] (переименование)"
-                    % (old, new)
-                )
+    # Эвристика «переименование» — только для заметок. При массовой
+    # перестройке resolved-документа декартово произведение removed×added
+    # может быть огромным, поэтому ограничиваем перебор.
+    if len(removed) * len(added) <= _MAX_RENAME_PAIRS:
+        for old in sorted(removed):
+            old_values = _section_values(before, old)
+            for new in sorted(added):
+                if not old_values:
+                    continue
+                if old_values == _section_values(after, new):
+                    notes.append(
+                        "Секция [%s] преобразована в [%s] (переименование)"
+                        % (old, new)
+                    )
 
     return notes
 
@@ -408,57 +519,14 @@ def _winner_label(source) -> str:
         return "неизвестен"
     display = getattr(source, "display", "") or ""
     if display:
-        return display
-    path = getattr(source, "path", None)
-    return str(path) if path is not None else "неизвестен"
-
-
-def _winner_notes(
-    original_text: str,
-    edited_text: str,
-    line_sources: Sequence = (),
-) -> List[str]:
-    old_lines = str(original_text or "").replace("\r\n", "\n").split("\n")
-    new_lines = str(edited_text or "").replace("\r\n", "\n").split("\n")
-    sources = list(line_sources or ())
-    sections, keys, _section_lines, _key_lines = line_context(old_lines)
-
-    notes: List[str] = []
-    matcher = difflib.SequenceMatcher(
-        None,
-        old_lines,
-        new_lines,
-        autojunk=False,
-    )
-
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            continue
-
-        if tag == "replace" and (i2 - i1) == (j2 - j1):
-            for offset in range(i2 - i1):
-                i = i1 + offset
-                section = sections[i] if i < len(sections) else None
-                key = keys[i] if i < len(keys) else None
-                source = sources[i] if i < len(sources) else None
-
-                if section and key:
-                    notes.append(
-                        "Строка %d: [%s] %s — победитель: %s"
-                        % (i + 1, section, key, _winner_label(source))
-                    )
-                else:
-                    notes.append(
-                        "Строка %d: структурное изменение"
-                        % (i + 1)
-                    )
-        else:
-            notes.append(
-                "Строки %d–%d: вставка/удаление блока"
-                % (i1 + 1, max(i1 + 1, i2))
-            )
-
-    return notes
+        value = display
+    else:
+        path = getattr(source, "path", None)
+        if path is None:
+            return "неизвестен"
+        value = str(path)
+    value = value.replace("\\", "/").rstrip("/")
+    return value.rsplit("/", 1)[-1] or value
 
 
 def analyze_multiline_edit(
@@ -480,14 +548,18 @@ def analyze_multiline_edit(
     conflicts.extend(duplicate_conflicts)
     conflict_notes.extend(duplicate_notes)
 
-    changed_lines = _changed_line_count(original_text, edited_text)
+    changed_lines, line_notes = _line_diff(
+        original_text,
+        edited_text,
+        line_sources,
+    )
     notes = _summary_notes(
         resolved_changes,
         before,
         after,
         changed_lines,
     )
-    notes.extend(_winner_notes(original_text, edited_text, line_sources))
+    notes.extend(line_notes)
     notes.extend(conflict_notes)
 
     issues: List[DiffIssue] = list(diff.issues)

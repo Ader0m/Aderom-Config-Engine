@@ -12,11 +12,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Tuple
-
-from ..documents.document_diff import DocumentChange, DocumentDiff
+from typing import Optional, Tuple
 
 
 # ---------------------------------------------------------------- цели
@@ -46,9 +44,16 @@ class PatchOptions:
     project_tag: str = ""
     allow_delete_section: bool = False
     allow_delete_key: bool = True
+    allow_delete_xml_element: bool = True
     target_root: Optional[Path] = None
     snapshot_id: str = ""
     encoding: str = "windows-1251"
+
+    # XML: auto | full_copy | new_file | dxml_lua
+    xml_patch_mode: str = "auto"
+    xml_new_file_name: str = ""
+    xml_new_root_tag: str = ""
+    xml_write_full_copy: bool = True
 
 
 # ---------------------------------------------------------------- проблемы
@@ -76,14 +81,33 @@ class PatchPlan:
     target: PatchTarget
     patch_mod: str
     patch_file_rel: Optional[Path]
-    changes: Tuple[DocumentChange, ...] = ()
+    changes: Tuple[object, ...] = ()
     issues: Tuple[PatchIssue, ...] = ()
     warnings: Tuple[PatchIssue, ...] = ()
     preview: str = ""
-    diff: Optional[DocumentDiff] = None
+    diff: Optional[object] = None
     snapshot_id: str = ""
     encoding: str = "windows-1251"
     confirmed: bool = False
+
+    # XML/DXML: каким способом выражается патч.
+    format: str = "ltx"             # ltx | xml | dxml
+    xml_mode: str = ""              # full_copy | new_file | dxml_lua
+    xml_roots: Tuple[Path, ...] = ()
+    xml_root_names: Tuple[str, ...] = ()
+    xml_new_file_rel: Optional[Path] = None
+    xml_new_root_tag: str = ""
+    config_dir: Optional[Path] = None
+    patch_target_dir: str = "configs"   # configs | scripts
+    after_text: str = ""
+
+    @property
+    def is_xml(self) -> bool:
+        return self.format in ("xml", "dxml", "xml_fork")
+
+    @property
+    def is_dxml(self) -> bool:
+        return self.format == "dxml" or self.xml_mode == "dxml_lua"
 
     @property
     def is_empty(self) -> bool:

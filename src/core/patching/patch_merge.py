@@ -41,6 +41,11 @@ def merge_patch_plans(
     if not valid:
         raise ValueError("Нет планов с изменениями")
 
+    if any(getattr(plan, "is_xml", False) for plan in valid):
+        raise ValueError(
+            "XML-планы объединяются через _merge_xml_generated, а не DLTX"
+        )
+
     roots = {
         str(plan.target.root_path).lower()
         for plan in valid

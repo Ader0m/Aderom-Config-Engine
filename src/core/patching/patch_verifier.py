@@ -13,7 +13,6 @@
 
 from __future__ import annotations
 
-import copy
 from pathlib import Path
 from typing import List, Tuple
 
@@ -75,12 +74,40 @@ def _apply_section(
     return True, ""
 
 
+def _mutable_section(result: LtxDocument, name: str) -> None:
+    """Скопировать секцию перед изменением, не трогая остальной документ.
+
+    ``copy.deepcopy`` всего документа на resolved-файле в десятки мегабайт
+    копировал миллионы объектов и занимал минуты. Патч меняет только
+    перечисленные в нём секции, поэтому остальные можно разделять с
+    исходной моделью.
+    """
+    existing = result.sections.get(name)
+    if existing is None:
+        return
+
+    result.sections[name] = LtxSectionModel(
+        name=existing.name,
+        header_kind=existing.header_kind,
+        parents=list(existing.parents),
+        entries=list(existing.entries),
+        line_number=existing.line_number,
+    )
+
+
 def apply_patch_document(
     base: LtxDocument,
     patch: LtxDocument,
 ) -> Tuple[LtxDocument, List[PatchIssue]]:
     """Применить модель патча к модели оригинала."""
-    result = copy.deepcopy(base)
+    result = LtxDocument(
+        source_path=base.source_path,
+        text=base.text,
+        sections=dict(base.sections),
+        deleted_sections=set(base.deleted_sections),
+        includes=base.includes,
+        diagnostics=base.diagnostics,
+    )
     issues: List[PatchIssue] = []
 
     for name in sorted(patch.deleted_sections):
@@ -88,6 +115,7 @@ def apply_patch_document(
         result.sections.pop(name, None)
 
     for name in sorted(patch.sections):
+        _mutable_section(result, name)
         ok, message = _apply_section(result, patch.sections[name])
         if not ok:
             issues.append(
@@ -105,7 +133,15 @@ def apply_patch_document(
 def _compare_documents(
     result: LtxDocument,
     desired: LtxDocument,
+    changed_sections=None,
 ) -> Tuple[List[VerificationCheck], List[PatchIssue]]:
+    """Сравнить применённый патч с желаемым документом.
+
+    ``changed_sections`` ограничивает детальное сравнение секциями, которые
+    реально фигурируют в плане. Для остальных секций diff уже доказал
+    отсутствие изменений, а патч их не трогает: строить для них ``view()``
+    на resolved-документе в десятки мегабайт бессмысленно.
+    """
     checks: List[VerificationCheck] = []
     issues: List[PatchIssue] = []
 
@@ -140,6 +176,9 @@ def _compare_documents(
     common = sorted(result_names & desired_names)
 
     for name in common:
+        if changed_sections is not None and name not in changed_sections:
+            continue
+
         result_section = result.sections[name]
         desired_section = desired.sections[name]
         result_view = result_section.view()
@@ -333,9 +372,15 @@ class ModelPatchVerifier:
         )
         issues.extend(apply_issues)
 
+        changed_sections = {
+            change.section
+            for change in plan.changes
+            if change.section
+        }
         compare_checks, compare_issues = _compare_documents(
             result,
             diff.after,
+            changed_sections=changed_sections or None,
         )
         checks.extend(compare_checks)
         issues.extend(compare_issues)
@@ -445,7 +490,11 @@ class ResolverPatchVerifier:
         patch_filename = Path(generated.files[0].relative_path).name
 
         try:
-            baseline = self.adapter.resolve_sections(root)
+            # Baseline-резолв не нужен: проверяются только изменения плана
+            # в итоговом состоянии после подмешивания патча. Раньше здесь
+            # выполнялся ещё один полный проход резолвера, результат
+            # которого нигде не использовался — это удваивало время
+            # проверки каждого патча.
             patched = self.adapter.resolve_with_virtual_patch(
                 root,
                 patch_filename,

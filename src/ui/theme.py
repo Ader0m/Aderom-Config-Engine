@@ -26,7 +26,7 @@
 
 import os
 import tempfile
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from string import Template
 from typing import Optional
 
@@ -48,6 +48,10 @@ class Palette:
     bg_panel_alt: str = "#2E3033"   # alternate-строки дерева
     bg_titlebar: str = "#3C3F41"    # menubar, toolbar, заголовки
     bg_table_alt: str = "#303235"   # alternate-строки таблиц
+    tab_bg: str = "#313335"         # вкладки редактора
+    tab_bg_selected: str = "#2B2B2B"
+    tab_text: str = "#787878"
+    tab_text_selected: str = "#FFFFFF"
 
     # ============ Рамки / разделители ============
     border: str = "#3C3F41"
@@ -489,13 +493,13 @@ QTabWidget::pane {
 }
 
 QTabBar {
-    background-color: $bg_panel;
+    background-color: $tab_bg;
     qproperty-drawBase: false;
 }
 
 QTabBar::tab {
-    background-color: $bg_panel;
-    color: $text_muted;
+    background-color: $tab_bg;
+    color: $tab_text;
     border: none;
     border-right: 1px solid $border;
     padding: 7px 16px;
@@ -508,8 +512,8 @@ QTabBar::tab:hover {
 }
 
 QTabBar::tab:selected {
-    background-color: $bg_main;
-    color: $text_bright;
+    background-color: $tab_bg_selected;
+    color: $tab_text_selected;
     border-bottom: 2px solid $accent;
 }
 
@@ -541,7 +545,13 @@ QTabBar::close-button:pressed {
 
 /* ============ Нижняя консоль (единая панель во всю ширину) ============ */
 
+QTabWidget#bottomPanel QTabBar,
+QTabWidget#bottomPanel QTabBar::tab {
+    background-color: $bg_panel;
+}
+
 QTabWidget#bottomPanel QTabBar::tab:selected {
+    background-color: $bg_main;
     border-bottom: 2px solid $accent_teal;
 }
 
@@ -989,3 +999,75 @@ def apply_theme(app, palette: Optional[Palette] = None) -> Palette:
         return PALETTE
     app.setStyleSheet(build_stylesheet(palette))
     return palette
+
+
+# Розовые цвета опасного режима Override.
+OVERRIDE_PINK = "#C05A7A"
+OVERRIDE_PINK_SELECTED = "#D66B8B"
+
+
+def apply_override_theme(app, enabled: bool) -> Palette:
+    """Включает/выключает розовые вкладки редактора в режиме Override.
+
+    Рамки и разделители не меняются. Возвращает применённую палитру.
+    """
+    if not enabled:
+        app.setStyleSheet(_get_dark_theme())
+        return PALETTE
+
+    palette = replace(
+        PALETTE,
+        tab_bg=OVERRIDE_PINK,
+        tab_bg_selected=OVERRIDE_PINK_SELECTED,
+        tab_text="#FFE3EC",
+        tab_text_selected="#FFFFFF",
+    )
+    app.setStyleSheet(build_stylesheet(palette))
+    return palette
+
+
+def apply_window_caption(window, enabled: bool) -> None:
+    """Красит нативную шапку окна Windows в розовый/обычный цвет."""
+    if os.name != "nt" or window is None:
+        return
+    try:
+        import ctypes
+
+        hwnd = int(window.winId())
+        dwm = ctypes.windll.dwmapi
+        # DWMWA_CAPTION_COLOR = 35, DWMWA_TEXT_COLOR = 36,
+        # DWMWA_BORDER_COLOR = 34. COLORREF = 0x00BBGGRR.
+        if enabled:
+            caption = _colorref(OVERRIDE_PINK)
+            text = _colorref("#FFFFFF")
+            border = _colorref(OVERRIDE_PINK)
+            for attr, value in (
+                (35, caption),
+                (36, text),
+                (34, border),
+            ):
+                dwm.DwmSetWindowAttribute(
+                    ctypes.c_void_p(hwnd),
+                    attr,
+                    ctypes.byref(ctypes.c_int(value)),
+                    ctypes.sizeof(ctypes.c_int),
+                )
+        else:
+            default = ctypes.c_int(0xFFFFFFFF)
+            for attr in (35, 36, 34):
+                dwm.DwmSetWindowAttribute(
+                    ctypes.c_void_p(hwnd),
+                    attr,
+                    ctypes.byref(default),
+                    ctypes.sizeof(ctypes.c_int),
+                )
+    except Exception:
+        pass
+
+
+def _colorref(color: str) -> int:
+    value = color.lstrip("#")
+    r = int(value[0:2], 16)
+    g = int(value[2:4], 16)
+    b = int(value[4:6], 16)
+    return (b << 16) | (g << 8) | r

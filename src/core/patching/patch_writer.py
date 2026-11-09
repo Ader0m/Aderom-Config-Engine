@@ -86,10 +86,31 @@ class PatchWriter:
             if "overwrite" in parts:
                 raise PatchWriteError("Запись в Overwrite запрещена")
 
-            if tuple(parts[:2]) != ("gamedata", "configs"):
-                raise PatchWriteError(
-                    "Патч должен лежать в gamedata/configs: %s" % rel
-                )
+            if tuple(parts[:2]) == ("gamedata", "configs"):
+                if rel.suffix.lower() not in (".ltx", ".xml"):
+                    raise PatchWriteError(
+                        "В gamedata/configs разрешены только .ltx/.xml: %s"
+                        % rel
+                    )
+                continue
+
+            if tuple(parts[:2]) == ("gamedata", "scripts"):
+                if rel.suffix.lower() != ".script":
+                    raise PatchWriteError(
+                        "В gamedata/scripts разрешены только .script: %s"
+                        % rel
+                    )
+                if len(parts) != 3 or not parts[2].startswith("modxml_"):
+                    raise PatchWriteError(
+                        "DXML-скрипт должен лежать непосредственно в "
+                        "gamedata/scripts и начинаться с modxml_: %s" % rel
+                    )
+                continue
+
+            raise PatchWriteError(
+                "Патч должен лежать в gamedata/configs или "
+                "gamedata/scripts: %s" % rel
+            )
 
         return root
 

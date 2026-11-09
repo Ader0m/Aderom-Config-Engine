@@ -155,6 +155,69 @@ class XmlResolveService:
                     if self._inflight.get(key) is key_lock:
                         self._inflight.pop(key, None)
 
+    def resolve_with_virtual_xml_patch(
+        self,
+        source_path,
+        root_path,
+        plan,
+        log=None,
+    ):
+        """Собрать XML с виртуальным DXML-патчем из плана.
+
+        Возвращает :class:`XmlResolveOutput`. Патч не пишется на диск:
+        колбэк регистрируется только в локальном экземпляре процессора.
+        """
+        from .xml_dxml import DxmlProcessor
+        from .xml_resolver import XmlResolveOutput, XmlResolver
+        from .patching.xml_patch_verifier import apply_changes_to_xml_obj
+
+        config_dir = getattr(plan, "config_dir", None)
+        if config_dir is None:
+            config_dir = self.effective_config_dir(source_path)
+        if config_dir is None:
+            raise ValueError("Не определён каталог configs для XML-проверки")
+
+        resolver = XmlResolver(
+            config_dir=config_dir,
+            scripts_dir=self._scripts_dir,
+            dxml=True,
+        )
+        virtual_name = resolver.virtual_name(root_path)
+        assembled, origins = resolver.assemble_with_origins(virtual_name)
+
+        processor = DxmlProcessor(
+            include_loader=resolver.load_include_text,
+            log=log or (lambda message: None),
+            scripts_dir=resolver.scripts_dir,
+            builtin_patches=bool(resolver._dxml_enabled),
+        )
+
+        document = getattr(getattr(plan, "diff", None), "before", None)
+        if document is None:
+            raise ValueError("В плане нет исходного XML-документа")
+
+        def callback(xml_file_name, xml_obj, flags):
+            apply_changes_to_xml_obj(
+                xml_obj,
+                document,
+                plan.changes,
+            )
+
+        processor.register_callback(callback, name="ace_virtual")
+
+        text, _xml_obj = processor.process_dom(
+            virtual_name,
+            assembled,
+            origins,
+        )
+        return XmlResolveOutput(
+            text=text,
+            virtual_name=virtual_name,
+            dxml_applied=True,
+            notes=tuple(processor.unsupported_scripts),
+            line_sources=(),
+        )
+
     @staticmethod
     def _miss_reason(previous, key):
         if previous is None:

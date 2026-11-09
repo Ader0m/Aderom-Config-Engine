@@ -61,6 +61,7 @@ class PlatformApi:
             )
         self.project = ProjectService(projects_dir)
         self._forest = None
+        self._override_theme_enabled = None
 
         # Отложенная навигация: ключ — нормализованный путь файла.
         # Запрос живёт до события FILE_OPENED ровно для этого пути.
@@ -153,6 +154,7 @@ class PlatformApi:
     # -------------------------------------------------- привязка окна
     def bind_window(self, window):
         self.window = window
+        self._override_theme_enabled = None
         self._window_manager.bind_main_window(window)
         self._shortcut_manager.attach(window)
         self._mouse_manager.attach(window)
@@ -443,10 +445,15 @@ class PlatformApi:
         if not dialog.exec_():
             return
 
-        name, modules, save_mode = dialog.values()
+        name, modules, save_mode, xml_patch_mode = dialog.values()
 
         try:
-            project = self.project.create(name, modules, save_mode)
+            project = self.project.create(
+                name,
+                modules,
+                save_mode,
+                xml_patch_mode=xml_patch_mode,
+            )
         except ProjectError as exc:
             self.show_error(str(exc))
             return
@@ -530,22 +537,21 @@ class PlatformApi:
 
         try:
             project = self.project.set_patch_mode(dialog.save_mode())
+            project = self.project.set_xml_patch_mode(
+                dialog.xml_patch_mode()
+            )
         except ProjectError as exc:
             self.show_error(str(exc))
             return
 
         self._update_project_status()
         self.log(
-            "Проект: режим сохранения изменён на %s"
-            % project.save_mode
+            "Проект: DLTX=%s; DXML=%s"
+            % (project.save_mode, project.xml_patch_mode)
         )
         self.set_status(
-            "Режим проекта: %s"
-            % (
-                "all in one"
-                if project.save_mode == "all_in_one"
-                else "one by one"
-            ),
+            "Проект: DLTX=%s; DXML=%s"
+            % (project.save_mode, project.xml_patch_mode),
             5000,
         )
 
@@ -698,6 +704,8 @@ class PlatformApi:
         skipped = []
 
         for item in preview.items:
+            if not item.is_patch:
+                continue
             if not item.ok:
                 skipped.append(item.title)
                 continue
@@ -760,6 +768,39 @@ class PlatformApi:
         updater = getattr(self.window, "_update_project_menu", None)
         if callable(updater):
             updater()
+
+        self._apply_override_warning()
+
+    def _apply_override_warning(self):
+        """Красные полосы и заголовок при опасном режиме Override."""
+        if self.window is None:
+            return
+
+        mode = self.project.patch_mode() if self.project.is_active else ""
+        xml_mode = (
+            self.project.active.xml_patch_mode
+            if self.project.is_active
+            else ""
+        )
+        enabled = mode == "override" or xml_mode == "xml_override"
+
+        if enabled == self._override_theme_enabled:
+            return
+        self._override_theme_enabled = enabled
+
+        try:
+            from .theme import apply_override_theme, apply_window_caption
+
+            apply_override_theme(QApplication.instance(), enabled)
+            apply_window_caption(self.window, enabled)
+        except Exception as exc:
+            self.log("Theme: не удалось применить Override-оформление: %s" % exc)
+
+        self.window.setWindowTitle(
+            "Внимание - включен опасный режим работы"
+            if enabled
+            else "LTX Explorer"
+        )
 
     # -------------------------------------------------- ui-сервисы
     def on_lexer_status(self, message):
@@ -1047,13 +1088,23 @@ class PlatformApi:
         has_sources = any(src is not None for src in sources)
         started = time.perf_counter()
         view = ResolvedView()
-        view.set_editing_supported(False)
+        view.set_editable(self.can_edit_documents())
+
+        existing = (
+            self.project.get_resolved_draft(tab_id)
+            if self.project.is_active
+            else None
+        )
+        display_text = existing.current_text if existing is not None else text
+
         view.set_content(
-            text,
+            display_text,
             sources,
             str(root_path),
             sources_visible=has_sources,
         )
+        if existing is not None:
+            view.mark_clean(existing.saved_text)
         content_elapsed = time.perf_counter() - started
 
         view.source_activated.connect(
@@ -1065,6 +1116,22 @@ class PlatformApi:
         view.diagnostic.connect(lambda msg: self.log("[xml-resolved] %s" % msg))
         view.diagnostic.connect(lambda msg: self.set_status(msg, 8000))
         view.lexer_status.connect(self.on_lexer_status)
+        view.content_changed.connect(
+            lambda new_text, tid=tab_id, v=view: self.on_resolved_changed(
+                tid,
+                v,
+                new_text,
+            )
+        )
+        view.save_requested.connect(
+            lambda tid=tab_id, v=view: self.save_resolved_document(tid, v)
+        )
+        view.dirty_changed.connect(
+            lambda dirty, tid=tab_id: self.window.editor.set_tab_dirty(
+                tid,
+                dirty,
+            )
+        )
 
         started = time.perf_counter()
         self.window.editor.open_tab(
@@ -1075,6 +1142,9 @@ class PlatformApi:
         )
         tab_elapsed = time.perf_counter() - started
         self._log_slow_view("xml-resolved", title, content_elapsed, tab_elapsed)
+
+        if existing is not None and existing.is_dirty:
+            self.window.editor.set_tab_dirty(tab_id, True)
 
         if line_number is not None:
             view.goto_line(int(line_number))

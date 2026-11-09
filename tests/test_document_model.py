@@ -47,6 +47,21 @@ k = v
         doc = parse_ltx_document(text)
         self.assertEqual(doc.values("sec")["text"], '"first\nsecond"')
 
+    def test_multiline_value_preserves_inner_indent_and_trims_tail(self):
+        text = (
+            '[sec]\n'
+            'text = "first\n'
+            '  second\n'
+            'third"   \n'
+            'next = 1\n'
+        )
+        doc = parse_ltx_document(text)
+        self.assertEqual(
+            doc.values("sec")["text"],
+            '"first\n  second\nthird"',
+        )
+        self.assertEqual(doc.values("sec")["next"], "1")
+
     def test_delete_section(self):
         doc = parse_ltx_document("[a]\nx = 1\n!![b]\ny = 2\n")
         self.assertEqual(doc.deleted_sections, {"b"})
@@ -139,7 +154,7 @@ class ResolvedEditTest(unittest.TestCase):
         change = analysis.changes[0]
         self.assertEqual(change.section, "a")
         self.assertEqual(change.key, "x")
-        self.assertEqual(change.winner_label, "MO2\\Weapons\\a.ltx")
+        self.assertEqual(change.winner_label, "a.ltx")
 
     def test_section_header_change_is_unsupported(self):
         analysis = analyze_resolved_changes(

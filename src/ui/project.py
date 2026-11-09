@@ -18,16 +18,19 @@ import os
 import re
 import shutil
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from core.fs import read_text_safe, read_xml_text
+from core.models import LineSource
 from core.patching.patch_merge import merge_patch_plans
 from core.patching.patch_models import (
     GeneratedPatch,
+    PatchIssue,
     PatchOptions,
     PatchPlan,
+    VerificationResult,
 )
 from core.documents.multiline_edit import analyze_multiline_edit
 
@@ -93,6 +96,7 @@ class Project:
     root_dir: Path
     modules: List[str] = field(default_factory=list)
     save_mode: str = "one_by_one"
+    xml_patch_mode: str = "auto"
     created_at: str = ""
     drafts: Dict[str, ProjectDraft] = field(default_factory=dict)
     resolved_drafts: Dict[str, ProjectResolvedDraft] = field(
@@ -116,6 +120,7 @@ class ProjectInfo:
     created_at: str
     draft_count: int
     save_mode: str = "one_by_one"
+    xml_patch_mode: str = "auto"
 
 
 @dataclass(frozen=True)
@@ -141,9 +146,16 @@ class PreviewItem:
     draft: Optional[ProjectDraft] = None
     resolved: Optional[ProjectResolvedDraft] = None
     notes: Tuple[str, ...] = ()
+    text: str = ""
+
+    @property
+    def is_patch(self) -> bool:
+        return self.kind not in ("info", "script")
 
     @property
     def ok(self) -> bool:
+        if not self.is_patch:
+            return not self.error
         if self.error:
             return False
         if self.plan is None or self.generated is None:
@@ -163,11 +175,17 @@ class ProjectPatchPreview:
 
     @property
     def ok_items(self) -> Tuple[PreviewItem, ...]:
-        return tuple(item for item in self.items if item.ok)
+        return tuple(
+            item for item in self.items
+            if item.is_patch and item.ok
+        )
 
     @property
     def has_errors(self) -> bool:
-        return any(not item.ok for item in self.items)
+        return any(
+            item.is_patch and not item.ok
+            for item in self.items
+        )
 
     @property
     def patch_count(self) -> int:
@@ -198,9 +216,18 @@ class ProjectService:
         if self.active is None:
             return "one_by_one"
         mode = str(self.active.save_mode or "one_by_one")
-        if mode not in ("one_by_one", "all_in_one"):
+        if mode not in (
+            "one_by_one",
+            "all_in_one",
+            "root",
+            "in_place",
+            "override",
+        ):
             return "one_by_one"
         return mode
+
+    def is_root_mode(self) -> bool:
+        return self.patch_mode() in ("all_in_one", "root")
 
     @staticmethod
     def path_key(path) -> str:
@@ -221,10 +248,19 @@ class ProjectService:
         name: str,
         modules: Optional[Iterable[str]] = None,
         save_mode: str = "one_by_one",
+        xml_patch_mode: str = "auto",
     ) -> Project:
         name = (name or "").strip()
         if not name:
             raise ProjectError("Название проекта не может быть пустым")
+
+        save_mode = str(save_mode or "one_by_one").lower().replace("-", "_")
+        xml_patch_mode = str(xml_patch_mode or "auto").lower()
+        xml_patch_mode = {
+            "override": "xml_override",
+            "dxml": "dxml_lua",
+            "lua": "dxml_lua",
+        }.get(xml_patch_mode, xml_patch_mode)
 
         if self.active is not None:
             self.close()
@@ -241,6 +277,7 @@ class ProjectService:
             root_dir=root_dir,
             modules=list(modules or []),
             save_mode=save_mode or "one_by_one",
+            xml_patch_mode=xml_patch_mode or "auto",
             created_at=self._timestamp(),
             drafts={},
         )
@@ -268,7 +305,17 @@ class ProjectService:
             name=str(meta.get("name") or project_id),
             root_dir=root_dir,
             modules=list(meta.get("modules") or []),
-            save_mode=str(meta.get("save_mode") or "one_by_one"),
+            save_mode=str(meta.get("save_mode") or "one_by_one")
+            .lower()
+            .replace("-", "_"),
+            xml_patch_mode={
+                "override": "xml_override",
+                "dxml": "dxml_lua",
+                "lua": "dxml_lua",
+            }.get(
+                str(meta.get("xml_patch_mode") or "auto").lower(),
+                str(meta.get("xml_patch_mode") or "auto").lower(),
+            ),
             created_at=str(meta.get("created_at") or ""),
             drafts={},
             resolved_drafts={},
@@ -325,6 +372,9 @@ class ProjectService:
                     save_mode=str(
                         meta.get("save_mode") or "one_by_one"
                     ),
+                    xml_patch_mode=str(
+                        meta.get("xml_patch_mode") or "auto"
+                    ),
                 )
             )
 
@@ -339,11 +389,40 @@ class ProjectService:
     def set_patch_mode(self, mode: str) -> Project:
         """Переключить режим формирования патча у активного проекта."""
         project = self._require_active()
-        mode = str(mode or "one_by_one")
-        if mode not in ("one_by_one", "all_in_one"):
+        mode = str(mode or "one_by_one").lower().replace("-", "_")
+        if mode not in (
+            "one_by_one",
+            "all_in_one",
+            "root",
+            "in_place",
+            "override",
+        ):
             raise ProjectError("Неизвестный режим формирования патча: %s" % mode)
 
         project.save_mode = mode
+        self._write_meta(project)
+        return project
+
+    def set_xml_patch_mode(self, mode: str) -> Project:
+        """Переключить способ формирования XML-патча."""
+        project = self._require_active()
+        mode = str(mode or "auto")
+        mode = {
+            "override": "xml_override",
+            "dxml": "dxml_lua",
+            "lua": "dxml_lua",
+        }.get(mode.lower(), mode)
+        if mode not in (
+            "auto",
+            "xml",
+            "dxml_lua",
+            "xml_override",
+            "full_copy",
+            "new_file",
+        ):
+            raise ProjectError("Неизвестный режим XML-патча: %s" % mode)
+
+        project.xml_patch_mode = mode
         self._write_meta(project)
         return project
 
@@ -630,20 +709,33 @@ class ProjectService:
             self.dirty_resolved_drafts()
         )
         mode = (
-            "all in one"
-            if self.patch_mode() == "all_in_one"
-            else "one by one"
+            "root"
+            if self.is_root_mode()
+            else ("override" if self.patch_mode() == "override" else "in_place")
         )
         return (
-            "Проект: %s | режим: %s | изменённых файлов: %d | "
+            "Проект: %s | режим: %s | XML: %s | изменённых файлов: %d | "
             "несохранённых: %d"
-            % (self.active.name, mode, changed, dirty)
+            % (
+                self.active.name,
+                mode,
+                self.active.xml_patch_mode or "auto",
+                changed,
+                dirty,
+            )
         )
 
     # -------------------------------------------------- предпросмотр патча
     def build_preview(self, services, forest, log=None) -> ProjectPatchPreview:
         """Собрать предпросмотр в выбранном режиме проекта."""
-        if self.patch_mode() == "all_in_one":
+        if self.patch_mode() == "override":
+            # Override всегда работает по файлам-победителям, без слияния.
+            return self._build_preview_one_by_one(
+                services,
+                forest,
+                log=log,
+            )
+        if self.is_root_mode():
             return self._build_preview_all_in_one(
                 services,
                 forest,
@@ -700,6 +792,7 @@ class ProjectService:
         ]
 
         items: List[PreviewItem] = []
+        script_seen = set()
 
         def add_item(
             index,
@@ -714,7 +807,8 @@ class ProjectService:
             if log:
                 log("Проект: подготовка %s" % title)
 
-            if Path(source_path).suffix.lower() != ".ltx":
+            suffix_low = Path(source_path).suffix.lower()
+            if suffix_low not in (".ltx", ".xml"):
                 items.append(
                     PreviewItem(
                         title=title,
@@ -722,8 +816,8 @@ class ProjectService:
                         plan=None,
                         generated=None,
                         error=(
-                            "Патчи пока поддерживаются только для .ltx; "
-                            "для XML нужен DXML-генератор"
+                            "Патчи поддерживаются только для .ltx и .xml; "
+                            "получено: %s" % (suffix_low or "без расширения")
                         ),
                         kind=kind,
                         draft=draft,
@@ -733,9 +827,18 @@ class ProjectService:
                 )
                 return
 
+            is_xml = suffix_low == ".xml"
+            override_mode = self.patch_mode() == "override"
+            in_place_mode = self.patch_mode() == "in_place"
             notes: Tuple[str, ...] = ()
             resolved_analysis = None
-            if kind == "resolved" and resolved is not None:
+            if (
+                kind == "resolved"
+                and resolved is not None
+                and not is_xml
+                and not override_mode
+                and not in_place_mode
+            ):
                 resolved_analysis = analyze_multiline_edit(
                     original_text,
                     current_text,
@@ -797,10 +900,118 @@ class ProjectService:
                 suffix=suffix,
                 project_tag=project.name,
                 allow_delete_section=True,
+                allow_delete_xml_element=True,
+                xml_patch_mode=project.xml_patch_mode or "auto",
             )
 
             try:
-                if kind == "resolved" and resolved is not None:
+                pre_generated = None
+                fork_result = None
+                fork_notes: Tuple[str, ...] = ()
+                if (
+                    not is_xml
+                    and in_place_mode
+                    and hasattr(services, "plan_ltx_in_place")
+                ):
+                    result = services.plan_ltx_in_place(
+                        source_path,
+                        original_text,
+                        current_text,
+                        line_sources=(
+                            resolved.line_sources
+                            if kind == "resolved" and resolved is not None
+                            else ()
+                        ),
+                        forest=forest,
+                        options=options,
+                        resolved=(
+                            kind == "resolved" and resolved is not None
+                        ),
+                    )
+                    plan = result.plan
+                    pre_generated = result.generated
+                    notes = notes + result.notes + tuple(
+                        issue.message for issue in plan.warnings
+                    )
+                elif (
+                    not is_xml
+                    and override_mode
+                    and hasattr(services, "plan_ltx_override")
+                ):
+                    result = services.plan_ltx_override(
+                        source_path,
+                        original_text,
+                        current_text,
+                        line_sources=(
+                            resolved.line_sources
+                            if kind == "resolved" and resolved is not None
+                            else ()
+                        ),
+                        forest=forest,
+                        options=options,
+                        resolved=(
+                            kind == "resolved" and resolved is not None
+                        ),
+                    )
+                    plan = result.plan
+                    pre_generated = result.generated
+                    notes = notes + tuple(
+                        issue.message for issue in plan.warnings
+                    )
+                elif is_xml:
+                    xml_setting = (
+                        project.xml_patch_mode or "auto"
+                    ).lower()
+                    if xml_setting == "xml_override":
+                        # Override XML: полная перезапись файла тем, что
+                        # получилось в редакторе.
+                        options = replace(
+                            options,
+                            xml_patch_mode="full_copy",
+                        )
+                        xml_setting = "full_copy"
+
+                    fork_mode = xml_setting in ("auto", "xml")
+                    if fork_mode and hasattr(services, "plan_xml_fork"):
+                        result = services.plan_xml_fork(
+                            source_path,
+                            original_text,
+                            current_text,
+                            forest=forest,
+                            options=options,
+                            project_mode=self.patch_mode(),
+                        )
+                        fork_result = result
+                        plan = result.plan
+                        pre_generated = result.generated
+                        fork_notes = tuple(
+                            "Ключ: %s -> %s" % (key.old_key, key.new_key)
+                            for key in result.keys
+                        ) + tuple(
+                            "Ссылка: %s" % (
+                                getattr(ref.path, "name", ref.path)
+                            )
+                            for ref in result.references[:20]
+                        )
+                        notes = notes + fork_notes
+                    elif kind == "resolved" and resolved is not None:
+                        plan = services.patch.plan_xml_resolved_edit(
+                            source_path,
+                            original_text,
+                            current_text,
+                            line_sources=resolved.line_sources,
+                            forest=forest,
+                            options=options,
+                        )
+                    else:
+                        plan = services.patch.plan_xml_document_change(
+                            source_path,
+                            original_text,
+                            current_text,
+                            forest=forest,
+                            options=options,
+                        )
+                elif kind == "resolved" and resolved is not None:
                     plan = services.patch.plan_multiline_edit(
                         source_path,
                         original_text,
@@ -808,6 +1019,7 @@ class ProjectService:
                         line_sources=resolved.line_sources,
                         forest=forest,
                         options=options,
+                        analysis=resolved_analysis,
                     )
                 else:
                     plan = services.patch.plan_document_change(
@@ -818,7 +1030,9 @@ class ProjectService:
                         options,
                     )
 
-                if plan.can_generate and generate:
+                if pre_generated is not None:
+                    generated = pre_generated
+                elif plan.can_generate and generate:
                     generated = services.generate_patch(plan)
                 else:
                     generated = None
@@ -836,6 +1050,31 @@ class ProjectService:
                         notes=notes,
                     )
                 )
+
+                if fork_result is not None:
+                    for ref in fork_result.references:
+                        if ref.kind != "script":
+                            continue
+                        key = (
+                            str(getattr(ref.path, "resolve", lambda: ref.path)()),
+                            ref.line,
+                        )
+                        if key in script_seen:
+                            continue
+                        script_seen.add(key)
+                        items.append(
+                            PreviewItem(
+                                title="Скрипт: %s:%d"
+                                % (Path(ref.path).name, ref.line),
+                                source_path=Path(ref.path),
+                                plan=None,
+                                generated=None,
+                                error="",
+                                kind="script",
+                                notes=(ref.excerpt,),
+                                text=ref.excerpt,
+                            )
+                        )
             except Exception as exc:
                 items.append(
                     PreviewItem(
@@ -879,7 +1118,7 @@ class ProjectService:
         return ProjectPatchPreview(project=project, items=tuple(items))
 
     def _build_preview_all_in_one(self, services, forest, log=None):
-        """Один патч на корень загрузки."""
+        """Один патч на корень загрузки; XML — один пакет на проект."""
         base = self._build_preview_one_by_one(
             services,
             forest,
@@ -894,33 +1133,54 @@ class ProjectService:
             if (
                 item.plan is None
                 or not item.plan.can_generate
-                or item.plan.target.root_path is None
+                or (
+                    item.plan.target.root_path is None
+                    and not item.plan.is_xml
+                )
             ):
                 items.append(item)
                 continue
 
-            key = str(item.plan.target.root_path).lower()
+            if item.plan.is_xml:
+                key = "xml:project"
+            else:
+                key = str(item.plan.target.root_path).lower()
             groups.setdefault(key, []).append(item)
 
         for key in sorted(groups):
             group = groups[key]
-            root_path = group[0].plan.target.root_path
-            title = "%s (all in one)" % Path(root_path).name
+            is_xml = group[0].plan.is_xml
+            root_path = (
+                group[0].source_path
+                if is_xml
+                else group[0].plan.target.root_path
+            )
+            title = (
+                "XML проекта (Root)"
+                if is_xml
+                else "%s (Root)" % Path(root_path).name
+            )
 
-            notes = ["Режим: all in one", "Файлов: %d" % len(group)]
+            notes = ["Режим: Root", "Файлов: %d" % len(group)]
             for item in group:
                 notes.extend(item.notes)
 
             try:
-                merged = merge_patch_plans(
-                    [item.plan for item in group],
-                    patch_mod=group[0].plan.patch_mod,
-                )
-                generated = (
-                    services.generate_patch(merged)
-                    if merged.can_generate
-                    else None
-                )
+                if is_xml:
+                    merged, generated = self._merge_xml_generated(
+                        services,
+                        group,
+                    )
+                else:
+                    merged = merge_patch_plans(
+                        [item.plan for item in group],
+                        patch_mod=group[0].plan.patch_mod,
+                    )
+                    generated = (
+                        services.generate_patch(merged)
+                        if merged.can_generate
+                        else None
+                    )
                 items.append(
                     PreviewItem(
                         title=title,
@@ -947,6 +1207,88 @@ class ProjectService:
 
         return ProjectPatchPreview(project=base.project, items=tuple(items))
 
+    def _merge_xml_generated(self, services, group):
+        """Собрать XML-патч проекта: копии файлов + один файл добавлений."""
+        generated_items = []
+        changes = []
+        issues = []
+        warnings = []
+        checks = []
+        all_ok = True
+        modes = {}
+
+        for item in group:
+            plan = item.plan
+            changes.extend(plan.changes)
+            issues.extend(plan.issues)
+            warnings.extend(plan.warnings)
+
+            source_key = str(item.source_path).lower()
+            mode = plan.xml_mode
+            if source_key in modes and modes[source_key] != mode:
+                issues.append(
+                    PatchIssue(
+                        code="xml_mode_conflict",
+                        message=(
+                            "Один XML-файл изменён и как сырой, и как "
+                            "resolved: выберите один режим, иначе патчи "
+                            "могут противоречить друг другу"
+                        ),
+                        severity="error",
+                    )
+                )
+                all_ok = False
+            modes[source_key] = mode
+
+            if not plan.can_generate:
+                all_ok = False
+                continue
+
+            if getattr(plan, "format", "") == "xml_fork" and item.generated is not None:
+                generated = item.generated
+            else:
+                generated = services.generate_patch(plan)
+            if generated.verification is None or not generated.verification.ok:
+                all_ok = False
+            if generated.verification is not None:
+                checks.extend(generated.verification.checks)
+                issues.extend(generated.verification.issues)
+            generated_items.append((item, generated))
+
+        first_plan = group[0].plan
+        merged_plan = replace(
+            first_plan,
+            changes=tuple(changes),
+            issues=tuple(issues),
+            warnings=tuple(warnings),
+            preview="",
+            diff=None,
+        )
+
+        files = []
+        for _item, generated in generated_items:
+            files.extend(generated.files)
+
+        preview_parts = []
+        for file in files:
+            preview_parts.append("-- Файл: %s" % file.relative_path)
+            preview_parts.append(file.text.rstrip())
+            preview_parts.append("")
+        preview = "\n".join(preview_parts)
+
+        verification = VerificationResult(
+            ok=all_ok and bool(files),
+            checks=tuple(checks),
+            issues=tuple(issues),
+        )
+        generated = GeneratedPatch(
+            plan=merged_plan,
+            files=tuple(files),
+            text=preview,
+            verification=verification,
+        )
+        return merged_plan, generated
+
     # -------------------------------------------------- служебное
     def _require_active(self) -> Project:
         if self.active is None:
@@ -961,6 +1303,7 @@ class ProjectService:
             "created_at": project.created_at,
             "modules": list(project.modules),
             "save_mode": project.save_mode,
+            "xml_patch_mode": project.xml_patch_mode,
         }
         (project.root_dir / self.META_NAME).write_text(
             json.dumps(data, ensure_ascii=False, indent=2),
@@ -1009,6 +1352,9 @@ class ProjectService:
             "original_text": draft.original_text,
             "current_text": draft.current_text,
             "saved_text": draft.saved_text,
+            "line_sources": self._serialize_line_sources(
+                draft.line_sources
+            ),
             "updated_at": draft.updated_at,
             "saved_at": draft.saved_at,
         }
@@ -1031,11 +1377,48 @@ class ProjectService:
                 current_text=str(data.get("current_text") or ""),
                 saved_text=str(data.get("saved_text") or ""),
                 tab_id=str(data.get("tab_id") or ""),
+                line_sources=self._deserialize_line_sources(
+                    data.get("line_sources")
+                ),
                 updated_at=float(data.get("updated_at") or 0.0),
                 saved_at=float(data.get("saved_at") or 0.0),
             )
         except Exception:
             return None
+
+    @staticmethod
+    def _serialize_line_sources(line_sources) -> list:
+        result = []
+        for source in line_sources or ():
+            path = getattr(source, "path", None)
+            result.append(
+                {
+                    "kind": str(getattr(source, "kind", "") or ""),
+                    "display": str(getattr(source, "display", "") or ""),
+                    "path": str(path) if path is not None else "",
+                    "line": int(getattr(source, "line", 0) or 0),
+                    "open_raw": bool(getattr(source, "open_raw", False)),
+                }
+            )
+        return result
+
+    @staticmethod
+    def _deserialize_line_sources(values) -> tuple:
+        result = []
+        for data in values or ():
+            if not isinstance(data, dict):
+                continue
+            path = str(data.get("path") or "")
+            result.append(
+                LineSource(
+                    kind=str(data.get("kind") or "none"),
+                    display=str(data.get("display") or ""),
+                    path=Path(path) if path else None,
+                    line=int(data.get("line") or 0),
+                    open_raw=bool(data.get("open_raw")),
+                )
+            )
+        return tuple(result)
 
     def _read_draft(self, draft_path: Path) -> Optional[ProjectDraft]:
         try:

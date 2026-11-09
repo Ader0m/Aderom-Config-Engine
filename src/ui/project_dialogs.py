@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Callable, Optional
 
 from PyQt5.QtCore import Qt
@@ -39,7 +40,7 @@ class ProjectCreateDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Создать проект")
-        self.resize(520, 260)
+        self.resize(520, 330)
 
         layout = QVBoxLayout(self)
 
@@ -57,19 +58,44 @@ class ProjectCreateDialog(QDialog):
 
         self.save_mode_combo = QComboBox()
         self.save_mode_combo.addItem(
-            "По файлам (one by one)",
-            "one_by_one",
+            "Root — один DLTX-патч на корень",
+            "root",
         )
         self.save_mode_combo.addItem(
-            "Одним патчем на корень (all in one)",
-            "all_in_one",
+            "In-place — DLTX для файла-победителя",
+            "in_place",
+        )
+        self.save_mode_combo.addItem(
+            "Override — полная копия LTX-победителя",
+            "override",
         )
         self.save_mode_combo.setToolTip(
-            "one by one — отдельный патч на каждый изменённый файл; "
-            "all in one — изменения файлов одного корня собираются "
-            "в один патч"
+            "Root — изменения одного корня собираются в один DLTX-файл; "
+            "In-place — патч для файла-победителя строки; "
+            "Override — полная копия LTX-файла-победителя"
         )
-        form.addRow("Режим сохранения:", self.save_mode_combo)
+        form.addRow("DLTX-патчи:", self.save_mode_combo)
+
+        self.xml_mode_combo = QComboBox()
+        self.xml_mode_combo.addItem(
+            "DXML-Lua — правка XML на месте",
+            "dxml_lua",
+        )
+        self.xml_mode_combo.addItem(
+            "XML — подмена ключей",
+            "xml",
+        )
+        self.xml_mode_combo.addItem(
+            "Override — полная копия XML-файла",
+            "xml_override",
+        )
+        self.xml_mode_combo.setCurrentIndex(1)
+        self.xml_mode_combo.setToolTip(
+            "DXML-Lua — изменить XML на месте скриптом; "
+            "XML — создать новый XML с новым ключом и перепривязать "
+            "ссылки; Override — полная копия XML-файла"
+        )
+        form.addRow("DXML-патчи:", self.xml_mode_combo)
 
         layout.addLayout(form)
 
@@ -100,6 +126,7 @@ class ProjectCreateDialog(QDialog):
             self.name_edit.text().strip(),
             [],
             str(self.save_mode_combo.currentData() or "one_by_one"),
+            str(self.xml_mode_combo.currentData() or "auto"),
         )
 
 
@@ -116,7 +143,7 @@ class ProjectSettingsDialog(QDialog):
         self.deleted = False
 
         self.setWindowTitle("Настройки проекта")
-        self.resize(560, 280)
+        self.resize(560, 350)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -138,26 +165,63 @@ class ProjectSettingsDialog(QDialog):
 
         self.save_mode_combo = QComboBox()
         self.save_mode_combo.addItem(
-            "По файлам (one by one)",
-            "one_by_one",
+            "Root — один DLTX-патч на корень",
+            "root",
         )
         self.save_mode_combo.addItem(
-            "Одним патчем на корень (all in one)",
-            "all_in_one",
+            "In-place — DLTX для файла-победителя",
+            "in_place",
         )
-        index = self.save_mode_combo.findData(
-            project.save_mode or "one_by_one"
+        self.save_mode_combo.addItem(
+            "Override — полная копия LTX-победителя",
+            "override",
         )
+        current_mode = {
+            "one_by_one": "in_place",
+            "all_in_one": "root",
+        }.get(project.save_mode or "one_by_one", project.save_mode or "in_place")
+        index = self.save_mode_combo.findData(current_mode)
+        if index < 0:
+            index = self.save_mode_combo.findData("in_place")
         if index >= 0:
             self.save_mode_combo.setCurrentIndex(index)
-        form.addRow("Режим сохранения:", self.save_mode_combo)
+        form.addRow("DLTX-патчи:", self.save_mode_combo)
+
+        self.xml_mode_combo = QComboBox()
+        self.xml_mode_combo.addItem(
+            "DXML-Lua — правка XML на месте",
+            "dxml_lua",
+        )
+        self.xml_mode_combo.addItem(
+            "XML — подмена ключей",
+            "xml",
+        )
+        self.xml_mode_combo.addItem(
+            "Override — полная копия XML-файла",
+            "xml_override",
+        )
+        current_xml = {
+            "auto": "xml",
+        }.get(
+            getattr(project, "xml_patch_mode", "xml") or "xml",
+            getattr(project, "xml_patch_mode", "xml") or "xml",
+        )
+        xml_index = self.xml_mode_combo.findData(current_xml)
+        if xml_index < 0:
+            xml_index = self.xml_mode_combo.findData("xml")
+        if xml_index >= 0:
+            self.xml_mode_combo.setCurrentIndex(xml_index)
+        form.addRow("DXML-патчи:", self.xml_mode_combo)
 
         layout.addLayout(form)
 
         hint = QLabel(
-            "one by one — отдельный патч на каждый изменённый файл. "
-            "all in one — изменения файлов одного корня собираются "
-            "в один патч."
+            "Root — один DLTX-патч на корень загрузки. "
+            "In-place — отдельный DLTX-патч для файла-победителя "
+            "строки. "
+            "Override — полная копия LTX-файла-победителя. "
+            "DXML-Lua — правка XML скриптом; XML — новый файл с новым "
+            "ключом и перепривязкой ссылок; Override — полная копия XML."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: palette(mid);")
@@ -234,6 +298,9 @@ class ProjectSettingsDialog(QDialog):
     def save_mode(self) -> str:
         return str(self.save_mode_combo.currentData() or "one_by_one")
 
+    def xml_patch_mode(self) -> str:
+        return str(self.xml_mode_combo.currentData() or "auto")
+
 
 class ProjectLoadDialog(QDialog):
     """Выбор существующего проекта."""
@@ -247,14 +314,22 @@ class ProjectLoadDialog(QDialog):
 
         self.list = QListWidget()
         for info in projects:
-            mode = (
-                "all in one"
-                if info.save_mode == "all_in_one"
-                else "one by one"
-            )
+            mode = {
+                "all_in_one": "Root",
+                "root": "Root",
+                "in_place": "In-place",
+                "one_by_one": "In-place",
+                "override": "Override",
+            }.get(info.save_mode or "in_place", info.save_mode or "In-place")
+            xml_mode = {
+                "auto": "XML",
+                "dxml_lua": "DXML-Lua",
+                "xml": "XML",
+                "xml_override": "Override",
+            }.get(info.xml_patch_mode or "XML", info.xml_patch_mode or "XML")
             item = QListWidgetItem(
-                "%s  —  файлов: %d  —  %s"
-                % (info.name, info.draft_count, mode)
+                "%s  —  файлов: %d  —  DLTX: %s, DXML: %s"
+                % (info.name, info.draft_count, mode, xml_mode)
             )
             item.setData(Qt.UserRole, info.id)
             item.setToolTip(str(info.root_dir))
@@ -298,16 +373,32 @@ class ProjectPreviewDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        mode = (
-            "all in one"
-            if preview.project.save_mode == "all_in_one"
-            else "one by one"
+        mode = {
+            "all_in_one": "Root",
+            "root": "Root",
+            "in_place": "In-place",
+            "one_by_one": "In-place",
+            "override": "Override",
+        }.get(
+            preview.project.save_mode or "in_place",
+            preview.project.save_mode or "In-place",
+        )
+        xml_mode = {
+            "auto": "XML",
+            "dxml_lua": "DXML-Lua",
+            "xml": "XML",
+            "xml_override": "Override",
+        }.get(
+            preview.project.xml_patch_mode or "XML",
+            preview.project.xml_patch_mode or "XML",
         )
         header = QLabel(
-            "Проект: %s. Режим: %s. Файлов к патчу: %d. Успешно: %d."
+            "Проект: %s. DLTX: %s. DXML: %s. Файлов к патчу: %d. "
+            "Успешно: %d."
             % (
                 preview.project.name,
                 mode,
+                xml_mode,
                 len(preview.items),
                 len(preview.ok_items),
             )
@@ -395,7 +486,9 @@ class ProjectPreviewDialog(QDialog):
             "Режим: %s" % (
                 {
                     "resolved": "resolved",
-                    "root": "all in one",
+                    "root": "Root",
+                    "script": "скрипт",
+                    "info": "информация",
                 }.get(item.kind, "исходный файл")
             ),
             "Изменений: %d" % (
@@ -412,7 +505,14 @@ class ProjectPreviewDialog(QDialog):
             target = item.plan.target.root_path
             lines.append("Корень: %s" % (target or "не определён"))
             lines.append(
-                "Патч-файл: %s" % (item.plan.patch_file_rel or "не определён")
+                "Патч-файл: %s"
+                % (
+                    Path("gamedata")
+                    / (item.plan.patch_target_dir or "configs")
+                    / (item.plan.patch_file_rel or "не определён")
+                    if item.plan.patch_file_rel is not None
+                    else "не определён"
+                )
             )
 
             for issue in item.plan.errors():
@@ -436,7 +536,9 @@ class ProjectPreviewDialog(QDialog):
 
         self.details.setPlainText("\n".join(lines))
 
-        if item.generated is not None:
+        if item.text:
+            self.patch_text.setPlainText(item.text)
+        elif item.generated is not None:
             self.patch_text.setPlainText(item.generated.text)
         elif item.plan is not None:
             self.patch_text.setPlainText(item.plan.preview)

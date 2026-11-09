@@ -95,9 +95,14 @@ def _winner_label(source) -> str:
         return "неизвестен"
     display = getattr(source, "display", "") or ""
     if display:
-        return display
-    path = getattr(source, "path", None)
-    return str(path) if path is not None else "неизвестен"
+        value = display
+    else:
+        path = getattr(source, "path", None)
+        if path is None:
+            return "неизвестен"
+        value = str(path)
+    value = value.replace("\\", "/").rstrip("/")
+    return value.rsplit("/", 1)[-1] or value
 
 
 def _only_blank_after(lines: Sequence[str], index: int) -> bool:

@@ -270,6 +270,7 @@ class SlaxmlParser:
                 "kids": [],
                 "parent": current,
                 "line": line,
+                "attrs": {},
             }
             current["kids"].append(el)
             stack.append(el)
@@ -306,6 +307,7 @@ class SlaxmlParser:
             # Как в simple_dom: атрибут дописывается прямо в строку элемента,
             # без кавычек и без учёта namespace-префикса.
             current["el"] += " " + name + "=" + value
+            current.setdefault("attrs", {})[name] = value
             return True
 
         def close_element():

@@ -31,15 +31,26 @@ from ..fs import read_text_safe, strip_comments
 # ---------------------------------------------------------------- значения
 
 
-def _parse_value(raw: str) -> Tuple[Optional[str], bool]:
-    """Разобрать значение так, как это делает ``CInifile::_parse``.
+def _parse_value_partial(
+    raw: str,
+    inside: bool = False,
+) -> Tuple[str, bool]:
+    """Разобрать фрагмент значения, начав в состоянии ``inside``.
 
-    Возвращает ``(value, inside_quotes)``. Пробелы вне кавычек удаляются,
-    пробелы внутри кавычек сохраняются. Кавычки остаются частью значения,
-    потому что именно так их хранит ``Resolver4``.
+    Отдельная функция нужна для многострочных значений: раньше при
+    добавлении каждой строки заново разбиралось всё накопленное значение,
+    что давало O(n²) на длинных блоках. Теперь каждая строка разбирается
+    один раз, а состояние кавычек переносится.
     """
+    # Быстрые пути без посимвольного разбора.
+    if '"' not in raw:
+        if inside:
+            # Внутри кавычек пробелы сохраняются как есть.
+            return raw, True
+        # Вне кавычек пробелы удаляются полностью.
+        return "".join(raw.split()), False
+
     out: List[str] = []
-    inside = False
     i = 0
     n = len(raw)
 
@@ -64,7 +75,17 @@ def _parse_value(raw: str) -> Tuple[Optional[str], bool]:
         out.append(ch)
         i += 1
 
-    text = "".join(out)
+    return "".join(out), inside
+
+
+def _parse_value(raw: str) -> Tuple[Optional[str], bool]:
+    """Разобрать значение так, как это делает ``CInifile::_parse``.
+
+    Возвращает ``(value, inside_quotes)``. Пробелы вне кавычек удаляются,
+    пробелы внутри кавычек сохраняются. Кавычки остаются частью значения,
+    потому что именно так их хранит ``Resolver4``.
+    """
+    text, inside = _parse_value_partial(raw, False)
     return (text if text else None), inside
 
 
@@ -90,6 +111,9 @@ def _split_csv(text: str) -> List[str]:
 
 def _find_unquoted(text: str, needle: str) -> int:
     """Позиция символа вне кавычек или -1."""
+    if '"' not in text:
+        return text.find(needle)
+
     inside = False
     i = 0
     n = len(text)
@@ -420,8 +444,10 @@ def parse_ltx_document(text: str, source_path=None) -> LtxDocument:
             value, inside = _parse_value(raw_value)
             while inside and i + 1 < len(lines):
                 i += 1
-                raw_value += "\n" + lines[i]
-                value, inside = _parse_value(raw_value)
+                # Продолжение многострочного значения разбираем только
+                # для новой строки, не переразбирая всё накопленное.
+                piece, inside = _parse_value_partial(lines[i], True)
+                value = (value or "") + "\n" + piece
                 multiline = True
 
             if inside:

@@ -227,6 +227,11 @@ def diff_documents(before: LtxDocument, after: LtxDocument) -> DocumentDiff:
         before_keys = set(before_view.present)
         after_keys = set(after_view.present)
 
+        # Один проход по entries вместо поиска строки для каждого ключа:
+        # на больших секциях resolved-документа старый вариант был O(n²).
+        before_lines = _entry_lines(before_section)
+        after_lines = _entry_lines(after_section)
+
         for key in sorted(after_keys - before_keys):
             changes.append(
                 DocumentChange(
@@ -235,7 +240,7 @@ def diff_documents(before: LtxDocument, after: LtxDocument) -> DocumentDiff:
                     key=key,
                     new_value=after_view.present[key],
                     risk="safe",
-                    line_after=_entry_line(after_section, key),
+                    line_after=after_lines.get(key, 0),
                 )
             )
 
@@ -247,7 +252,7 @@ def diff_documents(before: LtxDocument, after: LtxDocument) -> DocumentDiff:
                     key=key,
                     old_value=before_view.present[key],
                     risk="confirm",
-                    line_before=_entry_line(before_section, key),
+                    line_before=before_lines.get(key, 0),
                 )
             )
 
@@ -263,8 +268,8 @@ def diff_documents(before: LtxDocument, after: LtxDocument) -> DocumentDiff:
                         old_value=old_value,
                         new_value=new_value,
                         risk="safe",
-                        line_before=_entry_line(before_section, key),
-                        line_after=_entry_line(after_section, key),
+                        line_before=before_lines.get(key, 0),
+                        line_after=after_lines.get(key, 0),
                     )
                 )
 
@@ -293,7 +298,7 @@ def diff_documents(before: LtxDocument, after: LtxDocument) -> DocumentDiff:
                         key=key,
                         new_value=op[1],
                         risk="safe",
-                        line_after=_entry_line(after_section, key),
+                        line_after=after_lines.get(key, 0),
                         note="Добавлена операция над списком",
                     )
                 )
@@ -359,12 +364,12 @@ def diff_texts(
 # ---------------------------------------------------------------- helpers
 
 
-def _entry_line(section: LtxSectionModel, key: str) -> int:
-    line = 0
+def _entry_lines(section: LtxSectionModel) -> Dict[str, int]:
+    """Карта «ключ → номер последней строки» за один проход."""
+    lines: Dict[str, int] = {}
     for entry in section.entries:
-        if entry.key == key:
-            line = entry.line_number
-    return line
+        lines[entry.key] = entry.line_number
+    return lines
 
 
 

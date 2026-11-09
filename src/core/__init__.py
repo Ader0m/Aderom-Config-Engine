@@ -110,6 +110,22 @@ from .documents.multiline_edit import (
     MultiLineEditAnalysis,
     analyze_multiline_edit,
 )
+from .documents.xml_model import (
+    XmlDocument,
+    XmlModelError,
+    XmlNode,
+    parse_xml_document,
+    parse_xml_file,
+    serialize_xml_document,
+)
+from .documents.xml_diff import (
+    XmlChange,
+    XmlDiffIssue,
+    XmlDocumentDiff,
+    apply_xml_changes,
+    diff_xml_documents,
+    diff_xml_texts,
+)
 from .patching.patch_models import (
     GeneratedPatch,
     PatchFile,
@@ -143,6 +159,18 @@ from .patching.patch_verifier import (
     ModelPatchVerifier,
     ResolverPatchVerifier,
     apply_patch_document,
+)
+from .patching.xml_patch_verifier import (
+    XmlModelPatchVerifier,
+    XmlResolverPatchVerifier,
+    apply_changes_to_xml_obj,
+)
+from .patching.xml_fork import XmlForkError, XmlForkService, XmlForkResult
+from .patching.ltx_override import LtxOverrideError, LtxOverrideResult, LtxOverrideService
+from .patching.ltx_in_place import (
+    LtxInPlaceError,
+    LtxInPlaceResult,
+    LtxInPlaceService,
 )
 from .patching.patch_writer import PatchWriteError, PatchWriter
 from .reference_graph import ReferenceGraphBuilder
@@ -256,6 +284,18 @@ __all__ = [
     "EditConflict",
     "MultiLineEditAnalysis",
     "analyze_multiline_edit",
+    "XmlNode",
+    "XmlDocument",
+    "XmlModelError",
+    "parse_xml_document",
+    "parse_xml_file",
+    "serialize_xml_document",
+    "XmlChange",
+    "XmlDiffIssue",
+    "XmlDocumentDiff",
+    "diff_xml_documents",
+    "diff_xml_texts",
+    "apply_xml_changes",
 
     # patching
     "PatchPlanner",
@@ -265,6 +305,18 @@ __all__ = [
     "PatchGenerationError",
     "render_dltx",
     "DxmlGenerator",
+    "XmlModelPatchVerifier",
+    "XmlResolverPatchVerifier",
+    "apply_changes_to_xml_obj",
+    "XmlForkService",
+    "XmlForkResult",
+    "XmlForkError",
+    "LtxOverrideService",
+    "LtxOverrideResult",
+    "LtxOverrideError",
+    "LtxInPlaceService",
+    "LtxInPlaceResult",
+    "LtxInPlaceError",
     "PatchTarget",
     "PatchOptions",
     "PatchPlan",

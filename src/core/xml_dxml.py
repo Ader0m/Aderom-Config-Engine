@@ -299,7 +299,11 @@ class XmlObject:
         res_el = "<" + str(args["name"])
         if attr_string:
             res_el += " " + attr_string
-        return {"el": res_el, "kids": args.get("kids") or []}
+        return {
+            "el": res_el,
+            "kids": args.get("kids") or [],
+            "attrs": dict(attr),
+        }
 
     def get_element_attr(self, el):
         data = self.get_element(el)
@@ -319,6 +323,7 @@ class XmlObject:
         converted = self.convert_element(data)
         if converted:
             el["el"] = converted["el"]
+            el["attrs"] = dict(data.get("attr") or {})
             self._mark_node(el)
 
     def remove_element_attr(self, el, args):
@@ -337,6 +342,7 @@ class XmlObject:
         converted = self.convert_element(data)
         if converted:
             el["el"] = converted["el"]
+            el["attrs"] = dict(data.get("attr") or {})
             self._mark_node(el)
 
     # -------------------------------------------------- вставка
