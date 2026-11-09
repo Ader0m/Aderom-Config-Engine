@@ -22,17 +22,17 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from core.fs import read_text_safe, read_xml_text
+from core.tools.fs import read_text_safe, read_xml_text
 from core.models import LineSource
-from core.patching.patch_merge import merge_patch_plans
-from core.patching.patch_models import (
+from core.patching.ltx.merge import merge_patch_plans
+from core.patching.models import (
     GeneratedPatch,
     PatchIssue,
     PatchOptions,
     PatchPlan,
     VerificationResult,
 )
-from core.documents.multiline_edit import analyze_multiline_edit
+from core.patching.ltx.multiline import analyze_multiline_edit
 
 
 class ProjectError(Exception):

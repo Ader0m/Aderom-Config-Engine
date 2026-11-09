@@ -13,7 +13,7 @@ from pathlib import Path
 
 from PyQt5.QtWidgets import QApplication, QFileDialog, QMessageBox
 
-from core.fs import read_text_safe, read_xml_text
+from core.tools.fs import read_text_safe, read_xml_text
 from sdk.api import ResolvedDraftInfo
 from sdk.events import Events
 

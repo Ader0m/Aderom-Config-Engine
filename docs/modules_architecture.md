@@ -15,6 +15,24 @@
 Модуль зависит **только от `sdk`**. Он не импортирует `core` и внутренности
 `ui`. PyQt допустим только для собственных окон и виджетов модуля.
 
+Публичная поверхность `core` — `core/__init__.py`, `core/facade.py` и
+`core/models.py`. Остальное сгруппировано по ответственности:
+
+```text
+core/tools/      файлы, пути, кэш, процессы, текст
+core/tree/       дерево файлов, запросы, граф связей, include/DLTX-модели
+core/resolver/   LTX-резолвер, сборка, предсборка, атрибуция
+core/xml/        SLAXML, DXML, XML-резолв
+core/items/      DDS, каталог предметов, иконки, локализация
+core/patching/   общие модели/цели/писатель
+  ltx/           DLTX: документ, diff, план, генератор, проверка, режимы
+  xml/           XML/DXML: документ, diff, план, генератор, проверка, форк
+```
+
+`core/patching/ltx` и `core/patching/xml` имеют симметричный вход:
+`LtxPatchService.plan(...)` и `XmlPatchService.plan(...)`, а внутри —
+одинаковый маршрут `document → diff → planner → generator → verifier`.
+
 `base_module` — обязательный модуль платформы. Он загружается всегда и задаёт
 базовый пользовательский сценарий: открытие каталога, построение дерева,
 просмотр `.ltx`, базовые действия дерева и редактора. При этом он использует
@@ -25,12 +43,12 @@
 отдельно — «Открыть исходный XML» в редакторе приложения или
 «Открыть XML в Notepad++». Резолв-путь `.ltx` при этом не меняется.
 
-Для XML также доступен `XmlResolver` (`core/xml_resolver.py`) —
+Для XML также доступен `XmlResolver` (`core/xml/resolver.py`) —
 Python-порт логики движка `themrdemonized/xray-monolith`:
 `CXml::ParseFile` (include-сборка относительно `$game_config$`,
 включая `*.xml`) и `COnXmlRead`/DXML (`dxml_core.script`,
 `xml_obj`, `on_xml_read`). Штатные `modxml_*.script` портированы в
-`core/xml_dxml.py`; остальные Lua-патчи не исполняются и попадают в
+`core/xml/dxml.py`; остальные Lua-патчи не исполняются и попадают в
 `XmlResolveResult.notes`. XML читается строго как `windows-1251`
 (с отбрасыванием BOM), без автоопределения кодировки. Для результата
 строится построчная атрибуция, как у LTX: `оригинал`, включённый файл
@@ -55,9 +73,11 @@ Python-порт логики движка `themrdemonized/xray-monolith`:
 
 Режим `dxml_lua` оставлен для правки XML на месте: он генерирует
 `gamedata/scripts/modxml_*.script` и не создаёт новый ключ.
-DLTX In-place реализован в `core/patching/ltx_in_place.py`: он определяет
+DLTX In-place реализован в `core/patching/ltx/in_place.py`: он определяет
 файл-победителя каждой строки и создаёт `mod_*`-патч рядом с ним, а
-Override (`core/patching/ltx_override.py`) пишет полную копию победителя.
+Override (`core/patching/ltx/override.py`) пишет полную копию победителя.
+Единые входы планирования — `core/patching/ltx/service.py` и
+`core/patching/xml/service.py`.
 Остальные модули дополняют приложение и не должны требовать своего порядка
 загрузки. Любой дополнительный модуль может быть не загружен — приложение
 обязано сохранять работоспособность без него.

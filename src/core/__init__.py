@@ -2,19 +2,22 @@
 """
 core — ядро приложения.
 
-Этот пакет отвечает за:
-- дерево зависимостей файлов;
-- запросы к дереву;
-- подключение внешнего резолвера;
-- кэш;
-- каркас планирования патчей;
-- каркас генерации DLTX/DXML;
-- каркас графа связей.
+Публичная поверхность пакета: ``facade.py`` и ``models.py``. Остальное
+сгруппировано по ответственности:
+
+- ``tools`` — файлы, пути, кэш, процессы и текст;
+- ``tree`` — дерево, запросы, граф, include/DLTX-модели;
+- ``resolver`` — LTX-резолвер, сборка, предсборка, атрибуция;
+- ``xml`` — SLAXML, DXML и XML-резолв;
+- ``items`` — DDS, каталог предметов, иконки, локализация;
+- ``patching/ltx`` и ``patching/xml`` — симметричные патч-конвейеры.
 """
 
-from .models import LtxForest, LineSource
+from core.models import LtxForest, LineSource
 
-from .fs import (
+from core.resolver.attribution import build_source_map, pretty_source
+from core.tools.external import open_in_notepad_pp, open_with_shell
+from core.tools.fs import (
     RESOLVER_CANDIDATES,
     TEXT_FILE_SUFFIXES,
     normalize_path,
@@ -24,8 +27,6 @@ from .fs import (
     read_text_safe,
     read_xml_text,
     strip_comments,
-    extract_includes,
-    resolve_include_targets,
     scan_files,
     scan_ltx_files,
     scan_xml_files,
@@ -33,15 +34,13 @@ from .fs import (
     build_search_bases,
     find_resolver_script,
     load_resolver_module,
-    get_dltx_mods_for_root,
-    build_source_map,
-    pretty_source,
 )
+from core.tree.dltx_model import get_dltx_mods_for_root
+from core.tree.include_model import extract_includes, resolve_include_targets
 
-from .external import open_in_notepad_pp, open_with_shell
-from .vfs_paths import resolve_asset_path, resolve_physical_path
-from .dds import DdsError, DdsInfo, TextureRegion, read_dds_info, read_dds_region
-from .item_catalog import (
+from core.tools.vfs import resolve_asset_path, resolve_physical_path
+from core.items.dds import DdsError, DdsInfo, TextureRegion, read_dds_info, read_dds_region
+from core.items.catalog import (
     DEFAULT_ICON_TEXTURE,
     ITEM_CATALOG_VERSION,
     GRID_SIZE,
@@ -50,23 +49,25 @@ from .item_catalog import (
     ItemField,
     ItemRecord,
 )
-from .item_icons import ICON_CACHE_VERSION, ItemIconService
-from .localization import (
+from core.items.icons import ICON_CACHE_VERSION, ItemIconService
+from core.items.localization import (
     LOCALIZATION_VERSION,
     LocalizationService,
     LocalizationTable,
 )
-from .object_cache import ObjectCache
+from core.tools.cache import (
+    FileCacheSystem,
+    ObjectCache,
+    ResolvedCache,
+    invalidate_forest_signatures,
+)
 
-from .file_cache import FileCacheSystem
-from .resolved_cache import ResolvedCache, invalidate_forest_signatures
-
-from .tree_builder import (
+from core.tree.builder import (
     TreeBuilder,
     build_forest,
 )
 
-from .tree_query_service import (
+from core.tree.query import (
     TreeQueryService,
     node_sort_key,
     sort_nodes,
@@ -74,12 +75,14 @@ from .tree_query_service import (
     generate_report,
 )
 
-from .resolver_adapter import (
+from core.resolver.ltx import (
     LtxResolverAdapter,
     Assembler,
 )
 
-from .documents.document_model import (
+from core.patching.ltx.document import (
+    DocumentSession,
+    FileDocumentTracker,
     LtxDocument,
     LtxEntry,
     LtxSectionModel,
@@ -87,7 +90,7 @@ from .documents.document_model import (
     parse_ltx_document,
     parse_ltx_file,
 )
-from .documents.document_diff import (
+from core.patching.ltx.diff import (
     DocumentChange,
     DocumentDiff,
     DiffIssue,
@@ -95,22 +98,19 @@ from .documents.document_diff import (
     diff_documents,
     diff_texts,
 )
-from .documents.document_session import DocumentSession, FileDocumentTracker
-from .documents.resolved_edit import (
+from core.patching.ltx.changes import (
     ResolvedEditAnalysis,
     ResolvedLineChange,
-    analyze_resolved_changes,
-)
-from .documents.single_line_edit import (
     SingleLineEditAnalysis,
+    analyze_resolved_changes,
     analyze_single_line_edit,
 )
-from .documents.multiline_edit import (
+from core.patching.ltx.multiline import (
     EditConflict,
     MultiLineEditAnalysis,
     analyze_multiline_edit,
 )
-from .documents.xml_model import (
+from core.patching.xml.document import (
     XmlDocument,
     XmlModelError,
     XmlNode,
@@ -118,7 +118,7 @@ from .documents.xml_model import (
     parse_xml_file,
     serialize_xml_document,
 )
-from .documents.xml_diff import (
+from core.patching.xml.diff import (
     XmlChange,
     XmlDiffIssue,
     XmlDocumentDiff,
@@ -126,17 +126,20 @@ from .documents.xml_diff import (
     diff_xml_documents,
     diff_xml_texts,
 )
-from .patching.patch_models import (
+from core.patching.models import (
     GeneratedPatch,
     PatchFile,
     PatchIssue,
     PatchOptions,
     PatchPlan,
+    PatchResult,
     PatchTarget,
     VerificationCheck,
     VerificationResult,
 )
-from .patching.patch_targets import (
+from core.patching.ltx.service import LtxPatchService
+from core.patching.xml.service import XmlPatchService
+from core.patching.targets import (
     choose_load_last_suffix,
     patch_file_name,
     patch_file_rel,
@@ -147,34 +150,34 @@ from .patching.patch_targets import (
     unique_suffix,
     validate_patch_mod_root,
 )
-from .patching.patch_merge import merge_patch_plans
-from .patching.patch_planner import PatchPlanner, PatchPlanningError
-from .patching.dltx_generator import (
+from core.patching.ltx.merge import merge_patch_plans
+from core.patching.planner import PatchPlanner, PatchPlanningError
+from core.patching.ltx.generator import (
     DltxGenerator,
     PatchGenerationError,
     render_dltx,
 )
-from .patching.dxml_generator import DxmlGenerator
-from .patching.patch_verifier import (
+from core.patching.xml.generator import DxmlGenerator
+from core.patching.ltx.verifier import (
     ModelPatchVerifier,
     ResolverPatchVerifier,
     apply_patch_document,
 )
-from .patching.xml_patch_verifier import (
+from core.patching.xml.verifier import (
     XmlModelPatchVerifier,
     XmlResolverPatchVerifier,
     apply_changes_to_xml_obj,
 )
-from .patching.xml_fork import XmlForkError, XmlForkService, XmlForkResult
-from .patching.ltx_override import LtxOverrideError, LtxOverrideResult, LtxOverrideService
-from .patching.ltx_in_place import (
+from core.patching.xml.fork import XmlForkError, XmlForkService, XmlForkResult
+from core.patching.ltx.override import LtxOverrideError, LtxOverrideResult, LtxOverrideService
+from core.patching.ltx.in_place import (
     LtxInPlaceError,
     LtxInPlaceResult,
     LtxInPlaceService,
 )
-from .patching.patch_writer import PatchWriteError, PatchWriter
-from .reference_graph import ReferenceGraphBuilder
-from .xml_slaxml import (
+from core.patching.writer import PatchWriteError, PatchWriter
+from core.tree.graph import ReferenceGraphBuilder
+from core.xml.slaxml import (
     SlaxmlParser,
     SlaxmlError,
     SourceRef,
@@ -182,9 +185,9 @@ from .xml_slaxml import (
     pretty_dom,
     pretty_xml,
 )
-from .xml_dxml import DxmlProcessor, DxmlError, XmlObject
-from .xml_resolver import XmlResolver, XmlResolveOutput, XmlResolveError
-from .xml_resolve_service import XmlResolveService
+from core.xml.dxml import DxmlProcessor, DxmlError, XmlObject
+from core.xml.resolver import XmlResolver, XmlResolveOutput, XmlResolveError
+from core.xml.service import XmlResolveService
 
 
 __all__ = [
@@ -298,6 +301,9 @@ __all__ = [
     "apply_xml_changes",
 
     # patching
+    "LtxPatchService",
+    "XmlPatchService",
+    "PatchResult",
     "PatchPlanner",
     "PatchPlanningError",
     "merge_patch_plans",

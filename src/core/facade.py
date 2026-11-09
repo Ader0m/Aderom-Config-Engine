@@ -16,30 +16,32 @@ CoreServices — тонкий фасад над сервисами ядра.
 from dataclasses import replace
 from pathlib import Path
 
-from .external import open_in_notepad_pp, open_with_shell
-from .fs import find_system_ltx, detect_config_dir
-from .item_catalog import ItemCatalogService
-from .item_icons import ItemIconService
-from .localization import LocalizationService
-from .tree_query_service import search_nodes, sort_nodes
-from .xml_resolve_service import XmlResolveService
-from .prebuild_service import PrebuildService
-from .patching.patch_models import VerificationResult
-from .patching.patch_planner import PatchPlanner
-from .patching.dltx_generator import DltxGenerator
-from .patching.dxml_generator import DxmlGenerator
-from .patching.patch_verifier import (
+from core.tools.external import open_in_notepad_pp, open_with_shell
+from core.tools.fs import find_system_ltx, detect_config_dir
+from core.items.catalog import ItemCatalogService
+from core.items.icons import ItemIconService
+from core.items.localization import LocalizationService
+from core.tree.query import search_nodes, sort_nodes
+from core.xml.service import XmlResolveService
+from core.resolver.prebuild import PrebuildService
+from core.patching.models import VerificationResult
+from core.patching.planner import PatchPlanner
+from core.patching.ltx.generator import DltxGenerator
+from core.patching.xml.generator import DxmlGenerator
+from core.patching.ltx.verifier import (
     ModelPatchVerifier,
     ResolverPatchVerifier,
 )
-from .patching.xml_patch_verifier import (
+from core.patching.xml.verifier import (
     XmlModelPatchVerifier,
     XmlResolverPatchVerifier,
 )
-from .patching.xml_fork import XmlForkService
-from .patching.ltx_override import LtxOverrideService
-from .patching.ltx_in_place import LtxInPlaceService
-from .patching.patch_writer import PatchWriter
+from core.patching.xml.fork import XmlForkService
+from core.patching.ltx.override import LtxOverrideService
+from core.patching.ltx.in_place import LtxInPlaceService
+from core.patching.ltx.service import LtxPatchService
+from core.patching.xml.service import XmlPatchService
+from core.patching.writer import PatchWriter
 
 
 class CoreServices:
@@ -105,6 +107,10 @@ class CoreServices:
             require_verification=True,
             require_resolver=True,
         )
+
+        # Единые формато-специфичные входы (тот же план/результат).
+        self.ltx_patch = LtxPatchService(self)
+        self.xml_patch = XmlPatchService(self)
 
         # Для обратной совместимости (модули пока используют старые имена)
         self._adapter = None  # Устаревшее, использовать через .resolver
@@ -481,6 +487,52 @@ class CoreServices:
             forest=forest,
             options=options,
             resolved=resolved,
+        )
+
+    def plan_ltx_patch(
+        self,
+        source_path,
+        baseline_text,
+        edited_text,
+        mode="root",
+        line_sources=(),
+        forest=None,
+        options=None,
+        resolved=False,
+    ):
+        """Единый вход LTX: root / in_place / override."""
+        return self.ltx_patch.plan(
+            source_path,
+            baseline_text,
+            edited_text,
+            mode=mode,
+            line_sources=line_sources,
+            forest=forest,
+            options=options,
+            resolved=resolved,
+        )
+
+    def plan_xml_patch(
+        self,
+        source_path,
+        baseline_text,
+        edited_text,
+        mode="auto",
+        line_sources=(),
+        forest=None,
+        options=None,
+        project_mode=None,
+    ):
+        """Единый вход XML: auto/fork, full_copy, dxml_lua."""
+        return self.xml_patch.plan(
+            source_path,
+            baseline_text,
+            edited_text,
+            mode=mode,
+            line_sources=line_sources,
+            forest=forest,
+            options=options,
+            project_mode=project_mode,
         )
 
     def generate_patch(self, plan):
