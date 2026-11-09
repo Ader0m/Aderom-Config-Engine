@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 
 from tests.support import SRC  # noqa: F401
 
-from core.item_icons import ItemIconService
+from core.items.icons import ItemIconService
 
 
 def _dds_rgba(width, height, pixels):

@@ -6,13 +6,13 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from core.documents.xml_model import parse_xml_document
-from core.patching.dxml_generator import DxmlGenerator
-from core.patching.dltx_generator import DltxGenerator
-from core.patching.patch_models import PatchOptions, VerificationResult
-from core.patching.patch_planner import PatchPlanner
-from core.patching.xml_fork import XmlForkService
-from core.patching.xml_patch_verifier import XmlModelPatchVerifier
+from core.patching.xml.document import parse_xml_document
+from core.patching.xml.generator import DxmlGenerator
+from core.patching.ltx.generator import DltxGenerator
+from core.patching.models import PatchOptions, VerificationResult
+from core.patching.planner import PatchPlanner
+from core.patching.xml.fork import XmlForkService
+from core.patching.xml.verifier import XmlModelPatchVerifier
 
 
 class Services:

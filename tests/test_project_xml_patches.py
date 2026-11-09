@@ -6,9 +6,9 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from core.patching.dxml_generator import DxmlGenerator
-from core.patching.patch_planner import PatchPlanner
-from core.patching.xml_patch_verifier import XmlModelPatchVerifier
+from core.patching.xml.generator import DxmlGenerator
+from core.patching.planner import PatchPlanner
+from core.patching.xml.verifier import XmlModelPatchVerifier
 from ui.project import ProjectService
 
 
@@ -51,7 +51,7 @@ class Services:
 class ForkServices(Services):
     def __init__(self):
         super().__init__()
-        from core.patching.xml_fork import XmlForkService
+        from core.patching.xml.fork import XmlForkService
 
         self.xml_fork = XmlForkService(self)
 

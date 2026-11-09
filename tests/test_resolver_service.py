@@ -9,11 +9,11 @@ from unittest.mock import patch
 
 from tests.support import SRC  # noqa: F401
 
-from core import resolver_service as resolver_service_module
-from core.file_cache import FileCacheSystem
+from core.resolver import service as resolver_service_module
+from core.tools.cache import FileCacheSystem
 from core.models import LineSource
-from core.resolved_cache import ResolvedCache
-from core.resolver_service import ResolverService
+from core.tools.cache import ResolvedCache
+from core.resolver.service import ResolverService
 
 
 class FakeAdapter:

@@ -6,27 +6,27 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from core.assembly_service import AssemblyService
-from core.documents.document_diff import diff_texts
-from core.documents.document_model import parse_ltx_document
-from core.patching.dltx_generator import DltxGenerator
+from core.resolver.assembly import AssemblyService
+from core.patching.ltx.diff import diff_texts
+from core.patching.ltx.document import parse_ltx_document
+from core.patching.ltx.generator import DltxGenerator
 from core.facade import CoreServices
-from core.file_cache import FileCacheSystem
-from core.patching.patch_models import PatchFile, PatchOptions
-from core.patching.patch_planner import PatchPlanner
-from core.patching.patch_targets import patch_file_name, resolve_patch_target
-from core.patching.patch_verifier import (
+from core.tools.cache import FileCacheSystem
+from core.patching.models import PatchFile, PatchOptions
+from core.patching.planner import PatchPlanner
+from core.patching.targets import patch_file_name, resolve_patch_target
+from core.patching.ltx.verifier import (
     ModelPatchVerifier,
     ResolverPatchVerifier,
     apply_patch_document,
 )
-from core.patching.patch_writer import PatchWriteError, PatchWriter
-from core.reference_graph import DisabledCache, ReferenceGraphBuilder
-from core.resolved_cache import ResolvedCache
-from core.resolver_service import ResolverService
-from core.tree_builder import TreeBuilder
-from core.tree_query_service import TreeQueryService
-from core.xml_resolve_service import XmlResolveService
+from core.patching.writer import PatchWriteError, PatchWriter
+from core.tree.graph import DisabledCache, ReferenceGraphBuilder
+from core.tools.cache import ResolvedCache
+from core.resolver.service import ResolverService
+from core.tree.builder import TreeBuilder
+from core.tree.query import TreeQueryService
+from core.xml.service import XmlResolveService
 
 
 class _Forest:
@@ -66,7 +66,7 @@ class PatchTargetTest(unittest.TestCase):
         )
 
     def test_patch_suffix_sorts_after_existing_mods(self):
-        from core.patching.patch_targets import choose_load_last_suffix
+        from core.patching.targets import choose_load_last_suffix
 
         root = Path("C:/game/system.ltx")
         self.assertEqual(
@@ -679,7 +679,7 @@ class PatchPipelineTest(unittest.TestCase):
                 )
             )
 
-            from core.patching.patch_models import PatchFile
+            from core.patching.models import PatchFile
 
             bad_text = generated.text.replace("cost = 150", "cost = 999")
             bad_file = replace(

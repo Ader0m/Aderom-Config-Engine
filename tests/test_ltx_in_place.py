@@ -6,10 +6,10 @@ from pathlib import Path
 from tests.support import SRC  # noqa: F401
 
 from core.models import LineSource
-from core.patching.ltx_in_place import LtxInPlaceService
-from core.patching.ltx_override import LtxOverrideService
-from core.patching.patch_models import PatchOptions
-from core.patching.patch_planner import PatchPlanner
+from core.patching.ltx.in_place import LtxInPlaceService
+from core.patching.ltx.override import LtxOverrideService
+from core.patching.models import PatchOptions
+from core.patching.planner import PatchPlanner
 from ui.project import ProjectService
 
 

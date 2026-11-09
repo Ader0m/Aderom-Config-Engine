@@ -6,7 +6,7 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from core.documents.document_session import DocumentSession, FileDocumentTracker
+from core.patching.ltx.document import DocumentSession, FileDocumentTracker
 
 
 class DocumentSessionTest(unittest.TestCase):

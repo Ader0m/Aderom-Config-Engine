@@ -3,7 +3,7 @@ import unittest
 
 from tests.support import SRC  # noqa: F401
 
-from core.documents.single_line_edit import analyze_single_line_edit
+from core.patching.ltx.changes import analyze_single_line_edit
 
 
 class SingleLineEditTest(unittest.TestCase):

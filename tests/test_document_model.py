@@ -5,9 +5,9 @@ from tests.support import SRC  # noqa: F401
 
 from types import SimpleNamespace
 
-from core.documents.document_diff import diff_texts
-from core.documents.document_model import parse_ltx_document
-from core.documents.resolved_edit import analyze_resolved_changes
+from core.patching.ltx.diff import diff_texts
+from core.patching.ltx.document import parse_ltx_document
+from core.patching.ltx.changes import analyze_resolved_changes
 
 
 class DocumentModelTest(unittest.TestCase):

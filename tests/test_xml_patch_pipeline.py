@@ -5,19 +5,19 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from core.patching.dxml_generator import DxmlGenerator
-from core.patching.patch_models import (
+from core.patching.xml.generator import DxmlGenerator
+from core.patching.models import (
     GeneratedPatch,
     PatchOptions,
     VerificationResult,
 )
-from core.patching.patch_planner import PatchPlanner
-from core.patching.patch_writer import PatchWriteError, PatchWriter
-from core.patching.xml_patch_verifier import (
+from core.patching.planner import PatchPlanner
+from core.patching.writer import PatchWriteError, PatchWriter
+from core.patching.xml.verifier import (
     XmlModelPatchVerifier,
     XmlResolverPatchVerifier,
 )
-from core.xml_resolve_service import XmlResolveService
+from core.xml.service import XmlResolveService
 
 
 BEFORE = """<root>

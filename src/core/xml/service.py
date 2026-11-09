@@ -184,7 +184,7 @@ class XmlResolveService:
         """
         from core.xml.dxml import DxmlProcessor
         from core.xml.resolver import XmlResolveOutput, XmlResolver
-        from core.patching.xml.verifier import apply_changes_to_xml_obj
+        from core.xml.changes import apply_changes_to_xml_obj
 
         config_dir = getattr(plan, "config_dir", None)
         if config_dir is None:

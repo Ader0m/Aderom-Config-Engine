@@ -3,12 +3,12 @@ import unittest
 
 from tests.support import SRC  # noqa: F401
 
-from core.documents.xml_diff import (
+from core.patching.xml.diff import (
     apply_xml_changes,
     diff_xml_documents,
     diff_xml_texts,
 )
-from core.documents.xml_model import (
+from core.patching.xml.document import (
     parse_xml_document,
     selector_segments,
     serialize_xml_document,

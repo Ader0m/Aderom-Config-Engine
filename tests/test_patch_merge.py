@@ -4,9 +4,9 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from core.documents.document_diff import DocumentChange
-from core.patching.patch_merge import merge_patch_plans
-from core.patching.patch_models import PatchPlan, PatchTarget
+from core.patching.ltx.diff import DocumentChange
+from core.patching.ltx.merge import merge_patch_plans
+from core.patching.models import PatchPlan, PatchTarget
 
 
 def _plan(source, value, key="cost", root="C:/game/system.ltx"):

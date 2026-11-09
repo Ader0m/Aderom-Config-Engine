@@ -166,8 +166,8 @@ from core.patching.ltx.verifier import (
 from core.patching.xml.verifier import (
     XmlModelPatchVerifier,
     XmlResolverPatchVerifier,
-    apply_changes_to_xml_obj,
 )
+from core.xml.changes import apply_changes_to_xml_obj
 from core.patching.xml.fork import XmlForkError, XmlForkService, XmlForkResult
 from core.patching.ltx.override import LtxOverrideError, LtxOverrideResult, LtxOverrideService
 from core.patching.ltx.in_place import (

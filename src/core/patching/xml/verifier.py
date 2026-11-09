@@ -13,8 +13,15 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Sequence, Tuple
 
+from core.patching.models import (
+    GeneratedPatch,
+    PatchIssue,
+    VerificationCheck,
+    VerificationResult,
+)
+from core.patching.verifier import BasePatchVerifier
 from core.patching.xml.diff import (
     XmlChange,
     XmlDocumentDiff,
@@ -24,16 +31,8 @@ from core.patching.xml.document import (
     XmlDocument,
     XmlModelError,
     parse_xml_document,
-    selector_segments,
 )
-from core.xml.dxml import XmlObject
-from core.patching.models import (
-    GeneratedPatch,
-    PatchIssue,
-    VerificationCheck,
-    VerificationResult,
-)
-from core.patching.verifier import BasePatchVerifier
+from core.xml.changes import apply_changes_to_xml_obj
 
 
 def _check_documents(
@@ -332,92 +331,6 @@ class XmlModelPatchVerifier(BasePatchVerifier):
                 )
             )
         return ok
-
-
-# ---------------------------------------------------------------- virtual DXML
-
-
-def _find_xml_obj_element(
-    xml_obj: XmlObject,
-    document: XmlDocument,
-    path,
-):
-    node = document.find(path)
-    if node is None:
-        return None
-    selector, ordinal, is_root = selector_segments(document, node)
-    if is_root:
-        return xml_obj.get_root()
-    result = xml_obj.query(selector)
-    index = max(0, ordinal - 1)
-    return result[index] if index < len(result) else None
-
-
-def apply_changes_to_xml_obj(
-    xml_obj: XmlObject,
-    document: XmlDocument,
-    changes: Sequence[XmlChange],
-) -> None:
-    """Применить изменения плана к живому ``xml_obj`` DXML.
-
-    Атрибуты применяются последними: селекторы потомков используют
-    старые ``id``/``name`` и должны найти родителя до их изменения.
-    """
-    ordered = [
-        change for change in changes
-        if change.kind not in ("xml_set_attr", "xml_add_attr", "xml_delete_attr")
-    ] + [
-        change for change in changes
-        if change.kind in ("xml_set_attr", "xml_add_attr", "xml_delete_attr")
-    ]
-
-    for change in ordered:
-        try:
-            element = _find_xml_obj_element(xml_obj, document, change.path)
-        except Exception:
-            element = None
-
-        if change.kind in ("xml_set_attr", "xml_add_attr"):
-            if element is not None:
-                xml_obj.set_element_attr(
-                    element,
-                    {change.attribute or "": change.new_value or ""},
-                )
-        elif change.kind == "xml_delete_attr":
-            if element is not None:
-                xml_obj.remove_element_attr(
-                    element,
-                    [change.attribute or ""],
-                )
-        elif change.kind == "xml_set_text":
-            if element is not None:
-                xml_obj.set_text(element, change.new_value or "")
-        elif change.kind == "xml_delete_element":
-            if element is not None:
-                xml_obj.remove_element(element)
-        elif change.kind == "xml_add_element":
-            parent = (
-                _find_xml_obj_element(xml_obj, document, change.parent_path)
-                if change.parent_path
-                else xml_obj.xml_table
-            )
-            if parent is not None:
-                xml_obj.insert_from_xml_string(
-                    change.node_xml,
-                    parent,
-                    max(1, int(change.position or 1)),
-                )
-        elif change.kind == "xml_replace_element":
-            if element is not None:
-                parent = element.get("parent") if isinstance(element, dict) else None
-                position = xml_obj.get_element_position(element) or 1
-                xml_obj.remove_element(element)
-                if parent is not None:
-                    xml_obj.insert_from_xml_string(
-                        change.node_xml,
-                        parent,
-                        position,
-                    )
 
 
 class XmlResolverPatchVerifier:

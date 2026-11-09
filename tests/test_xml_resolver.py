@@ -7,7 +7,7 @@ from unittest.mock import patch
 from tests.support import SRC  # noqa: F401
 
 from core.models import LineSource
-from core.xml_resolver import XmlResolveError, XmlResolver
+from core.xml.resolver import XmlResolveError, XmlResolver
 
 
 class XmlResolverTest(unittest.TestCase):

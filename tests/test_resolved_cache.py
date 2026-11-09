@@ -6,15 +6,15 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from core.file_cache import FileCacheSystem
+from core.tools.cache import FileCacheSystem
 from core.models import LineSource
-from core.resolved_cache import (
+from core.tools.cache import (
     ResolvedCache,
     file_subtree_signature,
     invalidate_forest_signatures,
     resolver_signature,
 )
-from core.tree_builder import TreeBuilder
+from core.tree.builder import TreeBuilder
 from tests.helpers import touch_after, write_text
 
 
