@@ -5,7 +5,7 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from core.resolver_adapter import LtxResolverAdapter
+from core.resolver.ltx import LtxResolverAdapter
 
 
 class _Item:

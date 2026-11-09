@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 from tests.helpers import write_text
 from tests.support import SRC  # noqa: F401
 
-from core.item_catalog import DEFAULT_ICON_TEXTURE, ItemCatalogService
+from core.items.catalog import DEFAULT_ICON_TEXTURE, ItemCatalogService
 
 
 class _FakeResolver:

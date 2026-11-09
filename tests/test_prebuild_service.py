@@ -9,7 +9,7 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from core.prebuild_service import PrebuildService
+from core.resolver.prebuild import PrebuildService
 
 
 class FakeAdapter:

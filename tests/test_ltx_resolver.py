@@ -5,12 +5,12 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from core.file_cache import FileCacheSystem
+from core.tools.cache import FileCacheSystem
 from core.models import LineSource
-from core.prebuild_service import PrebuildService
-from core.resolved_cache import ResolvedCache
-from core.resolver_service import ResolverService
-from core.tree_builder import TreeBuilder
+from core.resolver.prebuild import PrebuildService
+from core.tools.cache import ResolvedCache
+from core.resolver.service import ResolverService
+from core.tree.builder import TreeBuilder
 
 
 class LtxResolverTest(unittest.TestCase):

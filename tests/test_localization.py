@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 from tests.helpers import write_text, touch_after
 from tests.support import SRC  # noqa: F401
 
-from core.localization import LocalizationService, clean_text
+from core.items.localization import LocalizationService, clean_text
 
 
 ENGLISH = """<?xml version="1.0" encoding="windows-1251"?>

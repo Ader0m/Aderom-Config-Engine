@@ -6,8 +6,8 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from core.resolved_cache import ResolvedCache
-from core.xml_resolve_service import XmlResolveService
+from core.tools.cache import ResolvedCache
+from core.xml.service import XmlResolveService
 
 
 class XmlResolveServiceTest(unittest.TestCase):

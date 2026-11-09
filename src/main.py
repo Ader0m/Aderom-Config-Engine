@@ -32,14 +32,14 @@ def main():
     from PyQt5.QtWidgets import QApplication
 
     from core.facade import CoreServices
-    from core.file_cache import FileCacheSystem
-    from core.tree_builder import TreeBuilder
-    from core.tree_query_service import TreeQueryService
-    from core.reference_graph import ReferenceGraphBuilder, DisabledCache
-    from core.resolver_service import ResolverService
-    from core.assembly_service import AssemblyService
-    from core.resolved_cache import ResolvedCache
-    from core.xml_resolve_service import XmlResolveService
+    from core.tools.cache import FileCacheSystem
+    from core.tree.builder import TreeBuilder
+    from core.tree.query import TreeQueryService
+    from core.tree.graph import ReferenceGraphBuilder, DisabledCache
+    from core.resolver.service import ResolverService
+    from core.resolver.assembly import AssemblyService
+    from core.tools.cache import ResolvedCache
+    from core.xml.service import XmlResolveService
 
     from sdk import SDK_VERSION, ModuleContext
     from ui.module_loader import ModuleLoader

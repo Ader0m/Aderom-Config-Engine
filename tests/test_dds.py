@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 
 from tests.support import SRC  # noqa: F401
 
-from core.dds import DdsError, read_dds_info, read_dds_region
+from core.items.dds import DdsError, read_dds_info, read_dds_region
 
 
 def _header(width, height, *, fourcc=b"\0\0\0\0", pf_flags=0x41,

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from core.vfs_paths import clear_cache, resolve_physical_path
+from core.tools.vfs import clear_cache, resolve_physical_path
 
 
 class VfsPathsTest(unittest.TestCase):

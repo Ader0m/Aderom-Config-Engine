@@ -6,7 +6,7 @@ from pathlib import Path
 from tests.support import SRC  # noqa: F401
 
 from core.models import LineSource
-from core.reference_graph import ReferenceGraphBuilder
+from core.tree.graph import ReferenceGraphBuilder
 
 
 class FakeForest:

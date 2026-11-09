@@ -8,8 +8,8 @@ from pathlib import Path
 from tests.support import SRC  # noqa: F401
 from tests.helpers import write_text
 
-from core.file_cache import FileCacheSystem
-from core.tree_builder import TreeBuilder
+from core.tools.cache import FileCacheSystem
+from core.tree.builder import TreeBuilder
 
 
 class TreeBuilderTest(unittest.TestCase):

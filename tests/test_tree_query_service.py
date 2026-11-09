@@ -8,9 +8,9 @@ from pathlib import Path
 from tests.support import SRC  # noqa: F401
 from tests.helpers import write_text
 
-from core.file_cache import FileCacheSystem
-from core.tree_builder import TreeBuilder
-from core.tree_query_service import TreeQueryService
+from core.tools.cache import FileCacheSystem
+from core.tree.builder import TreeBuilder
+from core.tree.query import TreeQueryService
 
 
 class TreeQueryServiceTest(unittest.TestCase):

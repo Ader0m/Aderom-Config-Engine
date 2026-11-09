@@ -16,22 +16,32 @@ CoreServices — тонкий фасад над сервисами ядра.
 from dataclasses import replace
 from pathlib import Path
 
-from .external import open_in_notepad_pp, open_with_shell
-from .fs import find_system_ltx, detect_config_dir
-from .item_catalog import ItemCatalogService
-from .item_icons import ItemIconService
-from .localization import LocalizationService
-from .tree_query_service import search_nodes, sort_nodes
-from .xml_resolve_service import XmlResolveService
-from .prebuild_service import PrebuildService
-from .patching.patch_models import VerificationResult
-from .patching.patch_planner import PatchPlanner
-from .patching.dltx_generator import DltxGenerator
-from .patching.patch_verifier import (
+from core.tools.external import open_in_notepad_pp, open_with_shell
+from core.tools.fs import find_system_ltx, detect_config_dir
+from core.items.catalog import ItemCatalogService
+from core.items.icons import ItemIconService
+from core.items.localization import LocalizationService
+from core.tree.query import search_nodes, sort_nodes
+from core.xml.service import XmlResolveService
+from core.resolver.prebuild import PrebuildService
+from core.patching.models import VerificationResult
+from core.patching.planner import PatchPlanner
+from core.patching.ltx.generator import DltxGenerator
+from core.patching.xml.generator import DxmlGenerator
+from core.patching.ltx.verifier import (
     ModelPatchVerifier,
     ResolverPatchVerifier,
 )
-from .patching.patch_writer import PatchWriter
+from core.patching.xml.verifier import (
+    XmlModelPatchVerifier,
+    XmlResolverPatchVerifier,
+)
+from core.patching.xml.fork import XmlForkService
+from core.patching.ltx.override import LtxOverrideService
+from core.patching.ltx.in_place import LtxInPlaceService
+from core.patching.ltx.service import LtxPatchService
+from core.patching.xml.service import XmlPatchService
+from core.patching.writer import PatchWriter
 
 
 class CoreServices:
@@ -85,12 +95,22 @@ class CoreServices:
         # Запись по умолчанию требует успешной проверки.
         self.patch = PatchPlanner(resolver_service, cache)
         self.dltx = DltxGenerator(resolver_service, cache)
+        self.dxml = DxmlGenerator(resolver_service, cache)
         self.patch_verifier = ModelPatchVerifier()
         self.resolver_patch_verifier = ResolverPatchVerifier()
+        self.xml_patch_verifier = XmlModelPatchVerifier()
+        self.xml_resolver_patch_verifier = XmlResolverPatchVerifier(self.xml)
+        self.xml_fork = XmlForkService(self)
+        self.ltx_override = LtxOverrideService()
+        self.ltx_in_place = LtxInPlaceService(self)
         self.patch_writer = PatchWriter(
             require_verification=True,
             require_resolver=True,
         )
+
+        # Единые формато-специфичные входы (тот же план/результат).
+        self.ltx_patch = LtxPatchService(self)
+        self.xml_patch = XmlPatchService(self)
 
         # Для обратной совместимости (модули пока используют старые имена)
         self._adapter = None  # Устаревшее, использовать через .resolver
@@ -372,8 +392,162 @@ class CoreServices:
             options=options,
         )
 
+    def plan_xml_document_patch(
+        self,
+        source_path,
+        baseline_text,
+        draft_text,
+        forest,
+        options=None,
+    ):
+        """Построить план изменения сырого XML-файла."""
+        return self.patch.plan_xml_document_change(
+            source_path,
+            baseline_text,
+            draft_text,
+            forest,
+            options=options,
+        )
+
+    def plan_xml_resolved_patch(
+        self,
+        source_path,
+        baseline_text,
+        edited_text,
+        line_sources=(),
+        forest=None,
+        options=None,
+    ):
+        """Построить план правки resolved-вида XML."""
+        return self.patch.plan_xml_resolved_edit(
+            source_path,
+            baseline_text,
+            edited_text,
+            line_sources=line_sources,
+            forest=forest,
+            options=options,
+        )
+
+    def plan_xml_fork(
+        self,
+        source_path,
+        baseline_text,
+        edited_text,
+        forest=None,
+        options=None,
+        project_mode="one_by_one",
+    ):
+        """Форк XML-ключа и перепривязка ссылок."""
+        return self.xml_fork.plan(
+            source_path,
+            baseline_text,
+            edited_text,
+            forest=forest,
+            options=options,
+            project_mode=project_mode,
+        )
+
+    def plan_ltx_override(
+        self,
+        source_path,
+        baseline_text,
+        edited_text,
+        line_sources=(),
+        forest=None,
+        options=None,
+        resolved=False,
+    ):
+        """DLTX Override: полная копия LTX-файла-победителя."""
+        return self.ltx_override.plan(
+            source_path,
+            baseline_text,
+            edited_text,
+            line_sources=line_sources,
+            forest=forest,
+            options=options,
+            resolved=resolved,
+        )
+
+    def plan_ltx_in_place(
+        self,
+        source_path,
+        baseline_text,
+        edited_text,
+        line_sources=(),
+        forest=None,
+        options=None,
+        resolved=False,
+    ):
+        """DLTX In-place: патч для файла-победителя каждой строки."""
+        return self.ltx_in_place.plan(
+            source_path,
+            baseline_text,
+            edited_text,
+            line_sources=line_sources,
+            forest=forest,
+            options=options,
+            resolved=resolved,
+        )
+
+    def plan_ltx_patch(
+        self,
+        source_path,
+        baseline_text,
+        edited_text,
+        mode="root",
+        line_sources=(),
+        forest=None,
+        options=None,
+        resolved=False,
+    ):
+        """Единый вход LTX: root / in_place / override."""
+        return self.ltx_patch.plan(
+            source_path,
+            baseline_text,
+            edited_text,
+            mode=mode,
+            line_sources=line_sources,
+            forest=forest,
+            options=options,
+            resolved=resolved,
+        )
+
+    def plan_xml_patch(
+        self,
+        source_path,
+        baseline_text,
+        edited_text,
+        mode="auto",
+        line_sources=(),
+        forest=None,
+        options=None,
+        project_mode=None,
+    ):
+        """Единый вход XML: auto/fork, full_copy, dxml_lua."""
+        return self.xml_patch.plan(
+            source_path,
+            baseline_text,
+            edited_text,
+            mode=mode,
+            line_sources=line_sources,
+            forest=forest,
+            options=options,
+            project_mode=project_mode,
+        )
+
     def generate_patch(self, plan):
         """Сгенерировать патч и проверить доступными способами."""
+        if plan.is_xml:
+            generated = self.dxml.generate(plan)
+            model = self.xml_patch_verifier.verify(generated)
+            resolver = self.xml_resolver_patch_verifier.verify(generated)
+            combined = VerificationResult(
+                ok=model.ok and resolver.ok,
+                checks=tuple(model.checks) + tuple(resolver.checks),
+                issues=tuple(model.issues) + tuple(resolver.issues),
+            )
+            return replace(generated, verification=combined)
+
         generated = self.dltx.generate(plan)
         resolver = self.verify_patch_with_resolver(generated)
 
@@ -394,10 +568,15 @@ class CoreServices:
 
     def verify_patch(self, generated):
         """Проверить уже сгенерированный патч моделью документа."""
+        if generated.plan.is_xml:
+            return self.xml_patch_verifier.verify(generated)
         return self.patch_verifier.verify(generated)
 
     def verify_patch_with_resolver(self, generated):
         """Проверить патч настоящим Resolver4 без записи в VFS."""
+        if generated.plan.is_xml:
+            return self.xml_resolver_patch_verifier.verify(generated)
+
         adapter = None
         getter = getattr(self.resolver, "get_adapter", None)
         if callable(getter):

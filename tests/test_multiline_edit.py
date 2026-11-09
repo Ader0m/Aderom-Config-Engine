@@ -6,11 +6,11 @@ from types import SimpleNamespace
 
 from tests.support import SRC  # noqa: F401
 
-from core.patching.dltx_generator import DltxGenerator
-from core.documents.multiline_edit import analyze_multiline_edit
-from core.patching.patch_models import PatchOptions
-from core.patching.patch_planner import PatchPlanner
-from core.patching.patch_verifier import ModelPatchVerifier
+from core.patching.ltx.generator import DltxGenerator
+from core.patching.ltx.multiline import analyze_multiline_edit
+from core.patching.models import PatchOptions
+from core.patching.planner import PatchPlanner
+from core.patching.ltx.verifier import ModelPatchVerifier
 
 
 class _Forest:

@@ -5,15 +5,15 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from core.assembly_service import AssemblyService
+from core.resolver.assembly import AssemblyService
 from core.facade import CoreServices
-from core.file_cache import FileCacheSystem
-from core.reference_graph import DisabledCache, ReferenceGraphBuilder
-from core.resolved_cache import ResolvedCache
-from core.resolver_service import ResolverService
-from core.tree_builder import TreeBuilder
-from core.tree_query_service import TreeQueryService
-from core.xml_resolve_service import XmlResolveService
+from core.tools.cache import FileCacheSystem
+from core.tree.graph import DisabledCache, ReferenceGraphBuilder
+from core.tools.cache import ResolvedCache
+from core.resolver.service import ResolverService
+from core.tree.builder import TreeBuilder
+from core.tree.query import TreeQueryService
+from core.xml.service import XmlResolveService
 from ui.project import ProjectError, ProjectService
 
 
