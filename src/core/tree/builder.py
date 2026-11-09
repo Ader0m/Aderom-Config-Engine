@@ -6,7 +6,7 @@ from pathlib import Path
 
 from core.models import LtxForest
 from core.resolver.attribution import describe_real_path
-from core.tools.cache import FileCacheSystem
+from core.tools.cache import FileCacheSystem, overlay_content_signature
 from core.tools.fs import (
     normalize_path,
     rel_path,
@@ -32,17 +32,30 @@ class TreeBuilder:
     def __init__(self, cache=None):
         self.cache = cache or FileCacheSystem()
 
-    def build(self, scan_dir, system_root=None, log=None, use_cache=True):
+    def build(
+        self,
+        scan_dir,
+        system_root=None,
+        log=None,
+        use_cache=True,
+        overlay=None,
+    ):
         """
         Построить дерево.
 
         Если system_root передан, scan_dir используется как есть.
         Если system_root не передан, ищем system.ltx сами.
+
+        ``overlay`` — карта ``{абсолютный путь: текст}`` с черновиками
+        проекта. Новые файлы добавляются в дерево, а содержимое
+        существующих читается из overlay, а не с диска.
         """
         log = log or (lambda m: None)
 
         if scan_dir is None:
             raise ValueError("scan_dir не задан")
+
+        overlay = self._normalize_overlay(overlay)
 
         if system_root is not None:
             scan = normalize_path(scan_dir)
@@ -59,27 +72,61 @@ class TreeBuilder:
             else:
                 scan = system.parent
 
-        key = ("tree_builder", str(scan), str(system))
+        key = (
+            "tree_builder",
+            str(scan),
+            str(system),
+            overlay_content_signature(overlay),
+        )
 
         if use_cache:
             cached = self.cache.get(key)
             if cached is not None:
                 return cached
 
-        forest = self._build(scan, system, log)
+        forest = self._build(scan, system, log, overlay)
 
         if use_cache:
             self.cache.set(key, forest)
 
         return forest
 
-    def _build(self, scan_dir, system_root, log):
+    @staticmethod
+    def _normalize_overlay(overlay):
+        source_files = getattr(overlay, "source_files", None)
+        if source_files is None:
+            source_files = overlay or {}
+
+        result = {}
+        for path, text in source_files.items():
+            try:
+                result[normalize_path(path)] = str(text or "")
+            except (TypeError, ValueError, OSError):
+                continue
+        return result
+
+    def _build(self, scan_dir, system_root, log, overlay=None):
         scan_dir = normalize_path(scan_dir)
         system_root = normalize_path(system_root) if system_root else None
+        overlay = overlay or {}
 
         # Один обход ФС на оба типа: LTX — дерево зависимостей,
         # XML — независимые файлы для просмотра без резолва.
         tree_files = scan_files(scan_dir, {".ltx", ".xml"})
+        known = set(tree_files)
+
+        for path in overlay:
+            if path in known:
+                continue
+            if path.suffix.lower() not in (".ltx", ".xml"):
+                continue
+            try:
+                path.relative_to(scan_dir)
+            except ValueError:
+                continue
+            tree_files.append(path)
+
+        tree_files.sort(key=lambda path: str(path).lower())
         files = [f for f in tree_files if f.suffix.lower() == ".ltx"]
         xml_files = [f for f in tree_files if f.suffix.lower() == ".xml"]
         file_set = set(files)
@@ -107,7 +154,9 @@ class TreeBuilder:
 
         for parent in files:
             try:
-                text = read_text_safe(parent)
+                text = overlay.get(parent)
+                if text is None:
+                    text = read_text_safe(parent)
             except Exception as e:
                 log("Не удалось прочитать %s: %s" % (parent, e))
                 continue
@@ -148,6 +197,29 @@ class TreeBuilder:
                     raw_children[root].add(mod)
                     raw_parents[mod].add(root)
                     dltx_children[root].add(mod)
+                    attached += 1
+
+        # Виртуальные mod_*.ltx проекта могут относиться к файлу, который
+        # сам подключён через #include. Прикрепляем их к такому файлу,
+        # чтобы созданный черновик был виден в дереве.
+        virtual_ltx = {
+            path for path in overlay
+            if path.suffix.lower() == ".ltx"
+            and path not in known
+        }
+        if virtual_ltx:
+            for target in files:
+                if target in virtual_ltx:
+                    continue
+                folder_files = by_folder.get(target.parent, [])
+                for mod in get_dltx_mods_for_root(target, folder_files):
+                    if mod not in virtual_ltx or raw_parents.get(mod):
+                        continue
+                    if mod == target:
+                        continue
+                    raw_children[target].add(mod)
+                    raw_parents[mod].add(target)
+                    dltx_children[target].add(mod)
                     attached += 1
 
         log("DLTX mod_*.ltx присоединено к корням: %d" % attached)
@@ -263,6 +335,176 @@ class TreeBuilder:
             xml_files=xml_files,
             total_xml_files=len(xml_files),
         )
+
+
+def _sort_roots(forest):
+    system_root = Path(forest.system_root) if forest.system_root else None
+    forest.roots.sort(
+        key=lambda path: (
+            0 if system_root is not None and path == system_root else 1,
+            forest.rel_paths.get(path, str(path)).lower(),
+        )
+    )
+    forest.roots_set = set(forest.roots)
+
+
+def _recount_subtrees(forest):
+    children = forest.display_children or {}
+    counts = {}
+    visiting = set()
+
+    def calc(node):
+        if node in counts:
+            return counts[node]
+        if node in visiting:
+            return 1
+
+        visiting.add(node)
+        total = 1
+        for child in children.get(node, ()):
+            total += calc(child)
+        visiting.discard(node)
+        counts[node] = total
+        return total
+
+    for node in list(forest.files) + list(forest.xml_files):
+        calc(node)
+
+    system_root = Path(forest.system_root) if forest.system_root else None
+    forest.subtree_counts = counts
+    if system_root is not None:
+        forest.system_tree_files = counts.get(system_root, 0)
+
+
+def add_virtual_file(forest, path, text) -> bool:
+    """Добавить новый виртуальный файл в уже построенное дерево."""
+    path = normalize_path(path)
+    scan_dir = normalize_path(forest.scan_dir)
+    suffix = path.suffix.lower()
+
+    if suffix not in (".ltx", ".xml"):
+        return False
+    if path in forest.files or path in forest.xml_files:
+        return False
+
+    try:
+        relative = path.relative_to(scan_dir)
+    except ValueError:
+        return False
+
+    forest.rel_paths[path] = rel_path(path, scan_dir)
+    try:
+        forest.real_paths[path] = describe_real_path(
+            path.resolve(),
+            scan_dir.resolve(),
+        )
+    except OSError:
+        forest.real_paths[path] = str(path)
+
+    if suffix == ".xml":
+        forest.xml_files.append(path)
+        forest.total_xml_files = len(forest.xml_files)
+        forest.display_children.setdefault(path, [])
+        forest.roots.append(path)
+        _sort_roots(forest)
+        _recount_subtrees(forest)
+        return True
+
+    forest.files.append(path)
+    forest.total_files = len(forest.files)
+    forest.display_children.setdefault(path, [])
+    file_set = set(forest.files)
+
+    for include in extract_includes(str(text or "")):
+        for child in resolve_include_targets(include, path):
+            if child == path or child not in file_set:
+                continue
+            forest.include_children.setdefault(path, set()).add(child)
+            forest.include_parents.setdefault(child, set()).add(path)
+            forest.display_children.setdefault(path, []).append(child)
+            forest.node_parent[child] = path
+            if child in forest.roots_set:
+                forest.roots = [item for item in forest.roots if item != child]
+
+    parent = None
+    folder_files = [
+        item for item in file_set
+        if item.parent == path.parent and item != path
+    ]
+    folder_files.append(path)
+    for target in sorted(folder_files, key=lambda item: item.name.lower()):
+        if target == path:
+            continue
+        if path in get_dltx_mods_for_root(target, folder_files):
+            parent = target
+            break
+
+    if parent is not None:
+        forest.dltx_attachments.setdefault(parent, set()).add(path)
+        forest.include_children.setdefault(parent, set()).add(path)
+        forest.include_parents.setdefault(path, set()).add(parent)
+        forest.display_children.setdefault(parent, []).append(path)
+        forest.node_parent[path] = parent
+    else:
+        forest.roots.append(path)
+
+    for key in (parent, path):
+        if key is None:
+            continue
+        forest.display_children[key].sort(
+            key=lambda item: forest.rel_paths.get(
+                item, str(item)
+            ).lower()
+        )
+
+    _sort_roots(forest)
+    _recount_subtrees(forest)
+    return True
+
+
+def remove_virtual_file(forest, path) -> bool:
+    """Убрать виртуальный файл из построенного дерева."""
+    path = normalize_path(path)
+
+    in_ltx = path in forest.files
+    in_xml = path in forest.xml_files
+    if not in_ltx and not in_xml:
+        return False
+
+    parent = forest.node_parent.pop(path, None)
+    if parent is not None:
+        forest.display_children[parent] = [
+            item for item in forest.display_children.get(parent, ())
+            if item != path
+        ]
+        forest.include_children.get(parent, set()).discard(path)
+        forest.include_parents.get(path, set()).discard(parent)
+        forest.dltx_attachments.get(parent, set()).discard(path)
+
+    for child in list(forest.include_children.get(path, ())):
+        forest.include_parents.get(child, set()).discard(path)
+        if not forest.include_parents.get(child):
+            forest.roots.append(child)
+
+    forest.include_children.pop(path, None)
+    forest.include_parents.pop(path, None)
+    forest.dltx_attachments.pop(path, None)
+    forest.display_children.pop(path, None)
+    forest.node_parent.pop(path, None)
+    forest.rel_paths.pop(path, None)
+    forest.real_paths.pop(path, None)
+
+    if in_ltx:
+        forest.files = [item for item in forest.files if item != path]
+    if in_xml:
+        forest.xml_files = [item for item in forest.xml_files if item != path]
+
+    forest.roots = [item for item in forest.roots if item != path]
+    forest.total_files = len(forest.files)
+    forest.total_xml_files = len(forest.xml_files)
+    _sort_roots(forest)
+    _recount_subtrees(forest)
+    return True
 
 
 # ------------------------------------------------------------ совместимость

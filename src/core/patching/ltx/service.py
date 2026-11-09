@@ -3,7 +3,7 @@
 
 Режимы:
 
-- ``root`` / ``one_by_one`` / ``all_in_one`` — DLTX-дельта для корня;
+- ``root`` — DLTX-дельта для корня;
 - ``in_place`` — DLTX-патч рядом с файлом-победителем каждой строки;
 - ``override`` — полная копия файла-победителя.
 
@@ -84,7 +84,7 @@ class LtxPatchService:
                 plans=result.plans,
             )
 
-        if mode not in ("root", "one_by_one", "all_in_one"):
+        if mode != "root":
             raise ValueError("Неизвестный режим LTX-патча: %s" % mode)
 
         if resolved:

@@ -125,8 +125,8 @@ class ProjectCreateDialog(QDialog):
         return (
             self.name_edit.text().strip(),
             [],
-            str(self.save_mode_combo.currentData() or "one_by_one"),
-            str(self.xml_mode_combo.currentData() or "auto"),
+            str(self.save_mode_combo.currentData() or "root"),
+            str(self.xml_mode_combo.currentData() or "xml"),
         )
 
 
@@ -176,13 +176,9 @@ class ProjectSettingsDialog(QDialog):
             "Override — полная копия LTX-победителя",
             "override",
         )
-        current_mode = {
-            "one_by_one": "in_place",
-            "all_in_one": "root",
-        }.get(project.save_mode or "one_by_one", project.save_mode or "in_place")
-        index = self.save_mode_combo.findData(current_mode)
+        index = self.save_mode_combo.findData(project.save_mode)
         if index < 0:
-            index = self.save_mode_combo.findData("in_place")
+            index = self.save_mode_combo.findData("root")
         if index >= 0:
             self.save_mode_combo.setCurrentIndex(index)
         form.addRow("DLTX-патчи:", self.save_mode_combo)
@@ -200,13 +196,7 @@ class ProjectSettingsDialog(QDialog):
             "Override — полная копия XML-файла",
             "xml_override",
         )
-        current_xml = {
-            "auto": "xml",
-        }.get(
-            getattr(project, "xml_patch_mode", "xml") or "xml",
-            getattr(project, "xml_patch_mode", "xml") or "xml",
-        )
-        xml_index = self.xml_mode_combo.findData(current_xml)
+        xml_index = self.xml_mode_combo.findData(project.xml_patch_mode)
         if xml_index < 0:
             xml_index = self.xml_mode_combo.findData("xml")
         if xml_index >= 0:
@@ -296,10 +286,10 @@ class ProjectSettingsDialog(QDialog):
         )
 
     def save_mode(self) -> str:
-        return str(self.save_mode_combo.currentData() or "one_by_one")
+        return str(self.save_mode_combo.currentData() or "root")
 
     def xml_patch_mode(self) -> str:
-        return str(self.xml_mode_combo.currentData() or "auto")
+        return str(self.xml_mode_combo.currentData() or "xml")
 
 
 class ProjectLoadDialog(QDialog):
@@ -315,18 +305,15 @@ class ProjectLoadDialog(QDialog):
         self.list = QListWidget()
         for info in projects:
             mode = {
-                "all_in_one": "Root",
                 "root": "Root",
                 "in_place": "In-place",
-                "one_by_one": "In-place",
                 "override": "Override",
-            }.get(info.save_mode or "in_place", info.save_mode or "In-place")
+            }.get(info.save_mode, info.save_mode)
             xml_mode = {
-                "auto": "XML",
                 "dxml_lua": "DXML-Lua",
                 "xml": "XML",
                 "xml_override": "Override",
-            }.get(info.xml_patch_mode or "XML", info.xml_patch_mode or "XML")
+            }.get(info.xml_patch_mode, info.xml_patch_mode)
             item = QListWidgetItem(
                 "%s  —  файлов: %d  —  DLTX: %s, DXML: %s"
                 % (info.name, info.draft_count, mode, xml_mode)
@@ -374,23 +361,17 @@ class ProjectPreviewDialog(QDialog):
         layout = QVBoxLayout(self)
 
         mode = {
-            "all_in_one": "Root",
             "root": "Root",
             "in_place": "In-place",
-            "one_by_one": "In-place",
             "override": "Override",
-        }.get(
-            preview.project.save_mode or "in_place",
-            preview.project.save_mode or "In-place",
-        )
+        }.get(preview.project.save_mode, preview.project.save_mode)
         xml_mode = {
-            "auto": "XML",
             "dxml_lua": "DXML-Lua",
             "xml": "XML",
             "xml_override": "Override",
         }.get(
-            preview.project.xml_patch_mode or "XML",
-            preview.project.xml_patch_mode or "XML",
+            preview.project.xml_patch_mode,
+            preview.project.xml_patch_mode,
         )
         header = QLabel(
             "Проект: %s. DLTX: %s. DXML: %s. Файлов к патчу: %d. "
@@ -489,6 +470,7 @@ class ProjectPreviewDialog(QDialog):
                     "root": "Root",
                     "script": "скрипт",
                     "info": "информация",
+                    "new_file": "новый файл",
                 }.get(item.kind, "исходный файл")
             ),
             "Изменений: %d" % (

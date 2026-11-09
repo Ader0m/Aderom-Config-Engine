@@ -95,7 +95,7 @@ class XmlForkTest(unittest.TestCase):
                 project_tag="proj",
                 patch_mod="ACE Patch - proj",
             ),
-            project_mode="one_by_one",
+            project_mode="in_place",
         )
         self.assertTrue(result.keys)
         self.assertEqual(result.keys[0].old_key, "old_key")

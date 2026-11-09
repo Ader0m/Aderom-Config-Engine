@@ -17,7 +17,8 @@ from dataclasses import replace
 from pathlib import Path
 
 from core.tools.external import open_in_notepad_pp, open_with_shell
-from core.tools.fs import find_system_ltx, detect_config_dir
+from core.tools.fs import find_system_ltx, detect_config_dir, read_text_safe
+from core.tree.builder import add_virtual_file, remove_virtual_file
 from core.items.catalog import ItemCatalogService
 from core.items.icons import ItemIconService
 from core.items.localization import LocalizationService
@@ -133,9 +134,9 @@ class CoreServices:
 
     # -------------------------------------------------- фоновая предсборка
 
-    def start_prebuild(self, forest, config_dir):
+    def start_prebuild(self, forest, config_dir, overlay=None):
         """Запустить фоновую сборку всех LTX после построения дерева."""
-        self.prebuild.start(forest, config_dir)
+        self.prebuild.start(forest, config_dir, overlay=overlay)
 
     def prebuild_status(self):
         return self.prebuild.status()
@@ -152,8 +153,15 @@ class CoreServices:
         """Найти system.ltx в указанной директории."""
         return find_system_ltx(sel)
 
-    def build_tree(self, scan_dir, system_root, log=None, clean=False):
-        """Построить дерево файлов."""
+    def build_tree(
+        self,
+        scan_dir,
+        system_root,
+        log=None,
+        clean=False,
+        overlay=None,
+    ):
+        """Построить дерево файлов с наложением черновиков проекта."""
         if clean:
             self.invalidate_cache()
         return self.tree_builder.build(
@@ -161,6 +169,7 @@ class CoreServices:
             system_root=system_root,
             log=log,
             use_cache=True,
+            overlay=overlay,
         )
 
     def sort_nodes(self, forest, nodes, col="path", reverse=False):
@@ -175,6 +184,18 @@ class CoreServices:
         """Получить относительный путь файла."""
         return forest.rel_paths.get(path, str(path))
 
+    def add_virtual_file(self, forest, path, text):
+        """Добавить новый черновик в существующее дерево VFS."""
+        return add_virtual_file(forest, path, text)
+
+    def remove_virtual_file(self, forest, path):
+        """Убрать виртуальный файл из дерева VFS."""
+        return remove_virtual_file(forest, path)
+
+    def read_text(self, path):
+        """Прочитать текстовый файл с автоопределением кодировки."""
+        return read_text_safe(path)
+
     # -------------------------------------------------- резолвер (прокси для обратной совместимости)
 
     def resolver_pass(self, forest, config_dir, log=None):
@@ -185,13 +206,20 @@ class CoreServices:
         """
         return self.resolver.run_pass(forest, config_dir, log=log)
 
-    def assemble_text(self, root_path, forest, config_dir, log=None):
+    def assemble_text(self, root_path, forest, config_dir, log=None,
+                      overlay=None):
         """
         Собрать текст конфигурации.
 
         .. deprecated:: Используйте `self.resolver.assemble_text()`.
         """
-        return self.resolver.assemble_text(root_path, forest, config_dir, log=log)
+        return self.resolver.assemble_text(
+            root_path,
+            forest,
+            config_dir,
+            log=log,
+            overlay=overlay,
+        )
 
     # -------------------------------------------------- сборка (прокси для обратной совместимости)
 
@@ -252,6 +280,7 @@ class CoreServices:
         section_name: str,
         vfs_mode: bool = False,
         log=None,
+        overlay=None,
     ):
         """Построить граф связей для секции.
 
@@ -274,6 +303,7 @@ class CoreServices:
                     forest,
                     config_dir,
                     log=None,
+                    overlay=overlay,
                 )
                 return text, line_sources
             except Exception as exc:
@@ -352,9 +382,16 @@ class CoreServices:
         """Определить каталог конфигов."""
         return detect_config_dir(candidates)
 
-    def assemble_resolved(self, root_path, forest, config_dir, log=None):
+    def assemble_resolved(self, root_path, forest, config_dir, log=None,
+                          overlay=None):
         """Чистый резолв + построчный маппинг владельцев."""
-        return self.resolver.assemble_resolved(root_path, forest, config_dir, log=log)
+        return self.resolver.assemble_resolved(
+            root_path,
+            forest,
+            config_dir,
+            log=log,
+            overlay=overlay,
+        )
 
     # -------------------------------------------------- XML-резолв
 
@@ -435,7 +472,7 @@ class CoreServices:
         edited_text,
         forest=None,
         options=None,
-        project_mode="one_by_one",
+        project_mode="root",
     ):
         """Форк XML-ключа и перепривязка ссылок."""
         return self.xml_fork.plan(

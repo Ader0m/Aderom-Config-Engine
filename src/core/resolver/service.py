@@ -16,10 +16,12 @@ ResolverService — сервис ядра для оркестрации рабо
 - генерацию патчей (это делает PatchPlanner).
 """
 
+import inspect
 import logging
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 from core.resolver.attribution import build_source_map
 from core.resolver.base import miss_reason
@@ -33,6 +35,7 @@ from core.tools.cache import (
     ResolvedCache,
     file_subtree_signature,
     path_key,
+    project_overlay_signature,
     resolver_signature,
 )
 
@@ -42,6 +45,68 @@ logger = logging.getLogger(__name__)
 # чтобы было видно, где именно теряются секунды при открытии файла.
 _SLOW_KEY_SECONDS = 0.25
 _SLOW_CACHE_SECONDS = 0.25
+
+
+def _accepts_overlay(func) -> bool:
+    """Поддерживает ли адаптер необязательный аргумент ``overlay``."""
+    try:
+        parameters = inspect.signature(func).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == "overlay"
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
+def _filter_overlay(forest, root_path, overlay):
+    """Оставить resolved-правки, входящие в поддерево root_path."""
+    if overlay is None:
+        return None
+
+    resolved = getattr(overlay, "resolved_edits", None)
+    if not resolved:
+        return overlay
+
+    root_key = path_key(root_path)
+    parent_map = {
+        path_key(node): parent
+        for node, parent in (
+            getattr(forest, "node_parent", {}) or {}
+        ).items()
+    }
+
+    result = {}
+    for candidate, value in resolved.items():
+        node = Path(candidate)
+        seen = set()
+        while True:
+            key = path_key(node)
+            if key == root_key:
+                result[Path(candidate)] = value
+                break
+            if key in seen:
+                break
+            seen.add(key)
+            parent = parent_map.get(key)
+            if parent is None:
+                break
+            node = Path(parent)
+
+    if not result:
+        return SimpleNamespace(
+            source_files=getattr(overlay, "source_files", {}) or {},
+            resolved_edits={},
+        )
+
+    if len(result) == len(resolved):
+        return overlay
+
+    return SimpleNamespace(
+        source_files=getattr(overlay, "source_files", {}) or {},
+        resolved_edits=result,
+    )
 
 
 class ResolverService:
@@ -106,7 +171,8 @@ class ResolverService:
         """
         return self._ensure_adapter(forest, config_dir)
 
-    def _resolved_key(self, kind, root_path, forest, config_dir):
+    def _resolved_key(self, kind, root_path, forest, config_dir,
+                      overlay=None):
         """Ключ кэша: результат зависит от файла и его зависимостей.
 
         Подпись поддерева включает mtime+size самого файла, include-файлов
@@ -121,7 +187,13 @@ class ResolverService:
         открытие уже собранного файла не должно её пересчитывать.
         """
         root_key = path_key(root_path)
-        identity = (id(forest), kind, root_key)
+        overlay_key = project_overlay_signature(overlay)
+        identity = (
+            id(forest),
+            kind,
+            root_key,
+            overlay_key,
+        )
 
         with self._key_lock:
             cached = self._key_cache.get(identity)
@@ -140,6 +212,7 @@ class ResolverService:
             resolver_signature(
                 getattr(self._adapter, "resolver_script", None)
             ),
+            overlay_key,
         )
 
         with self._key_lock:
@@ -155,14 +228,20 @@ class ResolverService:
         return key
 
     def _cache_call(self, kind, root_path, forest, config_dir,
-                    compute, log=None):
+                    compute, log=None, overlay=None):
         """Кэш + дедупликация одновременного резолва одного файла.
 
         Пользователь может открыть файл, который уже резолвится фоновой
         предсборкой: второй поток дождётся результата, а не запустит
         повторный проход.
         """
-        key = self._resolved_key(kind, root_path, forest, config_dir)
+        key = self._resolved_key(
+            kind,
+            root_path,
+            forest,
+            config_dir,
+            overlay=overlay,
+        )
         return self._cache_call_key(key, root_path, compute, log=log)
 
     def _cache_call_key(self, key, root_path, compute, log=None):
@@ -268,19 +347,26 @@ class ResolverService:
         """Проверка готовности по уже посчитанному ключу."""
         return self._resolved_cache.has(key)
 
-    def resolved_key(self, root_path, forest, config_dir):
+    def resolved_key(self, root_path, forest, config_dir, overlay=None):
         """Публичный ключ resolved-кэша для предсборки."""
         return self._resolved_key(
             "resolved",
             root_path,
             forest,
             config_dir,
+            overlay=overlay,
         )
 
-    def store_resolved(self, root_path, forest, config_dir, value, key=None):
+    def store_resolved(self, root_path, forest, config_dir, value, key=None,
+                       overlay=None):
         """Положить результат фоновой сборки в кэш."""
         if key is None:
-            key = self.resolved_key(root_path, forest, config_dir)
+            key = self.resolved_key(
+                root_path,
+                forest,
+                config_dir,
+                overlay=overlay,
+            )
         self._resolved_cache.set(key, value)
 
     # -------------------------------------------------- проход резолвера
@@ -319,7 +405,8 @@ class ResolverService:
 
     # -------------------------------------------------- сборка текста
 
-    def assemble_text(self, root_path, forest, config_dir, log=None):
+    def assemble_text(self, root_path, forest, config_dir, log=None,
+                      overlay=None):
         """
         Собрать финальный текст конфигурации для файла.
 
@@ -330,6 +417,7 @@ class ResolverService:
             forest: Построенное дерево файлов.
             config_dir: Каталог конфигов.
             log: Опциональная функция логирования.
+            overlay: Черновики проекта ``{путь: текст}``.
 
         Returns:
             str: Итоговый текст конфигурации.
@@ -341,9 +429,25 @@ class ResolverService:
         if adapter is None:
             raise RuntimeError("Resolver4.py не найден")
 
+        overlay = _filter_overlay(forest, root_path, overlay)
+        supports_overlay = overlay is not None and _accepts_overlay(
+            adapter.assemble_text
+        )
+
         def compute():
             sm = build_source_map(forest)
-            return (adapter.assemble_text(root_path, sm), None)
+            kwargs = {}
+            if supports_overlay:
+                kwargs["overlay"] = overlay
+                kwargs["log"] = log
+            return (
+                adapter.assemble_text(
+                    root_path,
+                    sm,
+                    **kwargs,
+                ),
+                None,
+            )
 
         return self._cache_call(
             "text",
@@ -352,17 +456,32 @@ class ResolverService:
             config_dir,
             compute,
             log=log,
+            overlay=overlay,
         )[0]
 
     def assemble_resolved(self, root_path, forest, config_dir, log=None,
-                          key=None):
+                          key=None, overlay=None):
         adapter = self._ensure_adapter(forest, config_dir)
         if adapter is None:
             raise RuntimeError("Resolver4.py не найден")
 
+        overlay = _filter_overlay(forest, root_path, overlay)
+        supports_overlay = overlay is not None and _accepts_overlay(
+            adapter.assemble_resolved
+        )
+
         def compute():
             sm, abs_map = self.source_maps(forest)
-            return adapter.assemble_resolved(root_path, sm, abs_map)
+            kwargs = {}
+            if supports_overlay:
+                kwargs["overlay"] = overlay
+                kwargs["log"] = log
+            return adapter.assemble_resolved(
+                root_path,
+                sm,
+                abs_map,
+                **kwargs,
+            )
 
         if key is not None:
             return self._cache_call_key(key, root_path, compute, log=log)
@@ -374,6 +493,7 @@ class ResolverService:
             config_dir,
             compute,
             log=log,
+            overlay=overlay,
         )
 
     def assemble_to_file(self, root_path, forest, out_dir, config_dir=None):

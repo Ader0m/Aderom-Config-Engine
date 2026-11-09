@@ -121,6 +121,12 @@ class SectionGraphFeature:
         token = self._request_seq
         progress_key = "base.section_graph.progress.%d" % token
         forest = self.session.forest
+        overlay_fn = getattr(
+            self.ctx.ui,
+            "project_overlay",
+            None,
+        )
+        overlay = overlay_fn() if callable(overlay_fn) else None
 
         suffix = " (VFS)" if vfs_mode else ""
         self.ctx.ui.set_status(
@@ -140,6 +146,7 @@ class SectionGraphFeature:
                 section_name,
                 vfs_mode=vfs_mode,
                 log=log,
+                overlay=overlay,
             )
 
         def on_log(message, key=progress_key):

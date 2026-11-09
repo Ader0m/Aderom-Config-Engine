@@ -1,15 +1,26 @@
 # -*- coding: utf-8 -*-
 """LtxResolverAdapter — адаптер к внешнему резолверу Resolver4.py."""
 
+import hashlib
 from pathlib import Path
 
 from core.models import LineSource
+from core.patching.ltx.multiline import analyze_multiline_edit
 from core.resolver.attribution import pretty_source
 from core.tools.text import safe_filename_component
 from core.tools.fs import (
     find_resolver_script,
     load_resolver_module,
 )
+
+
+def _log(log, message):
+    if log is None:
+        return
+    try:
+        log(message)
+    except Exception:
+        pass
 
 
 class LtxResolverAdapter:
@@ -34,6 +45,7 @@ class LtxResolverAdapter:
         self.cache = cache
 
         self._mod = load_resolver_module(self.resolver_script)
+        self._resolved_change_cache = {}
 
         cls = getattr(self._mod, "LtxResolver", None)
         if cls is None:
@@ -63,21 +75,305 @@ class LtxResolverAdapter:
                 verbose=False,
             )
 
-    def pass_only(self, root_path) -> int:
+    def _make_with_overlay(self, root_path, overlay=None, log=None):
+        """Создать резолвер и наложить виртуальные файлы проекта."""
+        resolver = self._make(root_path)
+
+        source_files = getattr(overlay, "source_files", None)
+        if source_files is None:
+            source_files = overlay
+        if not source_files:
+            return resolver
+
+        import os
+
+        from core.tools.fs import pattern_match
+
+        files = {}
+        new_ltx = []
+        for path, text in source_files.items():
+            current = os.path.normcase(os.path.abspath(str(path)))
+            files[current] = str(text or "")
+            if str(path).lower().endswith(".ltx"):
+                try:
+                    if not os.path.isfile(str(path)):
+                        new_ltx.append(str(path))
+                except OSError:
+                    new_ltx.append(str(path))
+
+        original_read_lines = resolver._read_lines
+        original_load_file = resolver._load_file
+        original_file_list = resolver._file_list
+        original_load_mods = resolver._load_mod_files
+        depth_step = getattr(self._mod, "MOD_DEPTH_STEP", -200)
+        loaded_virtual = set()
+
+        def read_lines(path):
+            current = os.path.normcase(os.path.abspath(str(path)))
+            if current in files:
+                return (
+                    files[current]
+                    .replace("\r\n", "\n")
+                    .replace("\r", "\n")
+                    .split("\n")
+                )
+            return original_read_lines(path)
+
+        def load_file(fn, inc_path, name, current_file_name, depth):
+            current = os.path.normcase(os.path.abspath(str(fn)))
+            if current in files:
+                if current in loaded_virtual:
+                    return
+                loaded_virtual.add(current)
+                previous = current_file_name[0]
+                current_file_name[0] = name
+                resolver._ltx_load(
+                    fn,
+                    inc_path,
+                    False,
+                    current_file_name,
+                    depth,
+                )
+                current_file_name[0] = previous
+                return
+            return original_load_file(
+                fn,
+                inc_path,
+                name,
+                current_file_name,
+                depth,
+            )
+
+        def file_list(folder, mask):
+            result = list(original_file_list(folder, mask))
+            folder_norm = os.path.normcase(
+                os.path.abspath(str(folder))
+            )
+            for path in files:
+                if os.path.dirname(path) != folder_norm:
+                    continue
+                name = os.path.basename(path)
+                if pattern_match(name, mask):
+                    result.append(name.lower())
+            return sorted(set(result), key=lambda value: value.lower())
+
+        root_norm = os.path.normcase(os.path.abspath(str(root_path)))
+
+        def load_mods(current_file_name, folder):
+            original_load_mods(current_file_name, folder)
+
+            # Новые LTX-файлы проекта не существуют на диске и потому не
+            # попадают в обычный обход. Подключаем их как дополнительные
+            # DLTX-патчи текущего корня.
+            depth = depth_step
+            for path in sorted(new_ltx, key=lambda value: value.lower()):
+                current = os.path.normcase(os.path.abspath(path))
+                name = os.path.basename(path)
+                if current == root_norm:
+                    _log(
+                        log,
+                        "DLTX overlay: %s — Пропущено "
+                        "(это корневой файл)" % name,
+                    )
+                    continue
+                if current in loaded_virtual:
+                    _log(
+                        log,
+                        "DLTX overlay: %s — Пропущено "
+                        "(уже загружен штатно)" % name,
+                    )
+                    continue
+                resolver._load_file(
+                    path,
+                    os.path.dirname(path),
+                    os.path.basename(path),
+                    current_file_name,
+                    depth,
+                )
+                _log(
+                    log,
+                    "DLTX overlay: %s — Выполнено" % name,
+                )
+                depth += depth_step
+
+        resolver._read_lines = read_lines
+        resolver._load_file = load_file
+        resolver._file_list = file_list
+        resolver._load_mod_files = load_mods
+        return resolver
+
+    def _resolved_changes(self, original_text, current_text,
+                          line_sources=()):
+        key = (
+            hashlib.sha1(
+                str(original_text or "").encode("utf-8", "replace")
+            ).hexdigest(),
+            hashlib.sha1(
+                str(current_text or "").encode("utf-8", "replace")
+            ).hexdigest(),
+        )
+        cached = self._resolved_change_cache.get(key)
+        if cached is not None:
+            return cached
+
+        analysis = analyze_multiline_edit(
+            original_text,
+            current_text,
+            line_sources=line_sources,
+        )
+        value = (analysis.changes, analysis.issues)
+        self._resolved_change_cache[key] = value
+        if len(self._resolved_change_cache) > 16:
+            first = next(iter(self._resolved_change_cache))
+            self._resolved_change_cache.pop(first, None)
+        return value
+
+    def _apply_resolved_overrides(self, resolver, overrides, log=None):
+        if not overrides:
+            return
+
+        item_cls = getattr(self._mod, "Item", None)
+        sect_cls = getattr(self._mod, "Sect", None)
+        if item_cls is None or sect_cls is None:
+            return
+
+        by_name = {
+            str(name).lower(): sect
+            for name, sect in (getattr(resolver, "data", ()) or ())
+        }
+
+        def ensure_section(name):
+            section = by_name.get(name)
+            if section is None:
+                section = sect_cls(name)
+                by_name[name] = section
+            return section
+
+        for root_path, value in sorted(
+            overrides.items(),
+            key=lambda item: str(item[0]).lower(),
+        ):
+            original_text, current_text = value[0], value[1]
+            line_sources = value[2] if len(value) > 2 else ()
+            if original_text == current_text:
+                continue
+
+            changes, issues = self._resolved_changes(
+                original_text,
+                current_text,
+                line_sources,
+            )
+            if any(issue.severity == "error" for issue in issues):
+                _log(
+                    log,
+                    "Resolved overlay: %s — Пропущено (ошибки правки)"
+                    % Path(root_path).name,
+                )
+                continue
+
+            applied = 0
+            for change in changes:
+                kind = change.kind
+                section = str(change.section or "").lower()
+                key = change.key
+
+                if kind == "delete_section":
+                    by_name.pop(section, None)
+                    applied += 1
+                    continue
+
+                if kind == "add_section":
+                    snapshot = change.section_snapshot
+                    if snapshot is None:
+                        continue
+                    target = ensure_section(section)
+                    target.data = [
+                        item_cls(key_name, key_value, str(root_path), 0, 0)
+                        for key_name, key_value in snapshot.values
+                    ]
+                    applied += 1
+                    continue
+
+                if kind in ("add_parent", "remove_parent"):
+                    continue
+
+                if not key:
+                    continue
+
+                target = ensure_section(section)
+
+                if kind == "delete_key":
+                    target.data = [
+                        item for item in target.data
+                        if item.first != key
+                    ]
+                    applied += 1
+                    continue
+
+                if kind in (
+                    "set_key",
+                    "add_key",
+                    "list_append",
+                    "list_remove",
+                ):
+                    new_value = change.new_value
+                    existing = None
+                    for item in target.data:
+                        if item.first == key:
+                            existing = item
+                            break
+                    if existing is None:
+                        target.data.append(
+                            item_cls(
+                                key,
+                                new_value,
+                                str(root_path),
+                                0,
+                                0,
+                            )
+                        )
+                    else:
+                        existing.second = new_value
+                        existing.filename = str(root_path)
+                    applied += 1
+
+            _log(
+                log,
+                "Resolved overlay: %s — Выполнено (изменений: %d)"
+                % (Path(root_path).name, applied),
+            )
+
+        resolver.data = sorted(
+            by_name.items(),
+            key=lambda entry: str(entry[0]).lower(),
+        )
+
+    def pass_only(self, root_path, overlay=None, log=None) -> int:
         """
         Делает проход резолвером и возвращает количество секций.
         """
-        r = self._make(root_path)
+        r = self._make_with_overlay(root_path, overlay, log=log)
         r.load()
+        self._apply_resolved_overrides(
+            r,
+            getattr(overlay, "resolved_edits", None),
+            log=log,
+        )
 
         return len(getattr(r, "data", []))
 
-    def assemble_text(self, root_path, source_map=None) -> str:
+    def assemble_text(self, root_path, source_map=None, overlay=None,
+                      log=None) -> str:
         """
         Собирает итоговый текст через внешний резолвер.
         """
-        r = self._make(root_path)
+        r = self._make_with_overlay(root_path, overlay, log=log)
         r.load()
+        self._apply_resolved_overrides(
+            r,
+            getattr(overlay, "resolved_edits", None),
+            log=log,
+        )
 
         sm = source_map or {}
 
@@ -125,7 +421,8 @@ class LtxResolverAdapter:
 
         return "\n".join(lines)
 
-    def assemble_resolved(self, root_path, source_map=None, abs_map=None):
+    def assemble_resolved(self, root_path, source_map=None, abs_map=None,
+                          overlay=None, log=None):
         """Чистый резолв + карта владельцев построчно.
 
         Returns:
@@ -135,8 +432,13 @@ class LtxResolverAdapter:
               - ``None`` — владельца нет (преамбула, пустые строки,
                 продолжения многострочных значений).
         """
-        r = self._make(root_path)
+        r = self._make_with_overlay(root_path, overlay, log=log)
         r.load()
+        self._apply_resolved_overrides(
+            r,
+            getattr(overlay, "resolved_edits", None),
+            log=log,
+        )
 
         sm = source_map or {}
         abs_map = abs_map or {}

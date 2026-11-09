@@ -28,8 +28,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
-from core.patching.ltx.document import parse_ltx_document
-from core.tools.fs import read_text_safe
+from core.patching.ltx.document import (
+    parse_ltx_document,
+    parse_section_header,
+)
+from core.tools.fs import read_text_safe, strip_comments
 from core.tools.cache import ObjectCache
 from core.tools.cache import file_subtree_signature, path_key
 from core.tools.vfs import resolve_asset_path
@@ -38,7 +41,9 @@ from core.tools.vfs import resolve_asset_path
 # Меняется при изменении правил разбора: старый кэш станет недоступен.
 # 2 — локализованные name_text/description_text.
 # 3 — ItemField.line_number для правки system.ltx.
-ITEM_CATALOG_VERSION = 3
+# 4 — список всех секций (поля и родители) для создания предметов.
+# 5 — имена родителей из исходных LTX (resolved-текст уже без наследования).
+ITEM_CATALOG_VERSION = 5
 
 DEFAULT_ICON_TEXTURE = r"ui\ui_icon_equipment"
 GRID_SIZE = 50
@@ -112,6 +117,19 @@ class ItemRecord:
 
 
 @dataclass(frozen=True)
+class ItemSection:
+    """Секция resolved-файла предметов и её собственные поля.
+
+    Нужна при создании нового предмета: по имени секции можно найти
+    родителя и перечислить все его поля, чтобы записать их пустыми.
+    """
+
+    name: str
+    fields: Tuple[str, ...] = ()
+    parents: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ItemCatalog:
     """Результат разбора корневого файла предметов."""
 
@@ -120,6 +138,10 @@ class ItemCatalog:
     warnings: Tuple[str, ...] = ()
     # Идентификатор снимка каталога: используется кэшем иконок.
     cache_key: str = ""
+    # Все объявленные секции документа, включая служебные базы.
+    sections: Tuple[ItemSection, ...] = ()
+    # Родители, объявленные в исходных LTX (``[child]:parent``).
+    parent_names: Tuple[str, ...] = ()
 
 
 class ItemCatalogService:
@@ -357,7 +379,8 @@ class ItemCatalogService:
                     log("Предметы: локализация недоступна: %s" % exc)
 
         document = parse_ltx_document(text, source_path=root)
-        items = self._collect(document, forest, localization)
+        items, sections = self._collect(document, forest, localization)
+        parent_names = self._collect_parent_names(forest)
 
         if log:
             log(
@@ -377,21 +400,33 @@ class ItemCatalogService:
             items=tuple(items),
             warnings=tuple(warnings),
             cache_key=catalog_key,
+            sections=tuple(sections),
+            parent_names=parent_names,
         )
         cache_target.set(cache_key, catalog)
         return catalog
 
     # -------------------------------------------------- предметы
 
-    def _collect(self, document, forest, localization=None) -> list:
+    def _collect(self, document, forest, localization=None) -> tuple:
         scan_dir = getattr(forest, "scan_dir", None)
         items = []
+        sections = []
 
         for name, section in document.sections.items():
+            view = section.view()
+            sections.append(
+                ItemSection(
+                    name=name,
+                    fields=tuple(str(key) for key in view.present),
+                    parents=tuple(section.effective_parents()),
+                )
+            )
+
             if self._is_service_section(name):
                 continue
 
-            values = section.view().present
+            values = view.present
             lower = {str(key).lower(): value for key, value in values.items()}
 
             if not self._looks_like_item(lower):
@@ -471,7 +506,43 @@ class ItemCatalogService:
             )
 
         items.sort(key=lambda item: item.section.lower())
-        return items
+        sections.sort(key=lambda item: item.name.lower())
+        return items, sections
+
+    @staticmethod
+    def _collect_parent_names(forest) -> Tuple[str, ...]:
+        """Собрать имена родителей из исходных LTX-файлов.
+
+        Resolver4 разворачивает наследование, поэтому в resolved-тексте
+        заголовков ``[child]:parent`` уже нет. Для выбора родителя нужен
+        исходный VFS до резолва.
+        """
+        names = set()
+
+        for path in getattr(forest, "files", ()) or ():
+            try:
+                text = read_text_safe(path)
+            except OSError:
+                continue
+
+            if ":" not in text or "]" not in text:
+                continue
+
+            for line in text.splitlines():
+                if ":" not in line or "]" not in line:
+                    continue
+                header = parse_section_header(strip_comments(line).strip())
+                if header is None:
+                    continue
+
+                _kind, _name, parents, _rest = header
+                for token in parents:
+                    token = str(token or "").strip().lower()
+                    if not token or token.startswith("!"):
+                        continue
+                    names.add(token)
+
+        return tuple(sorted(names))
 
     @staticmethod
     def _is_service_section(name: str) -> bool:

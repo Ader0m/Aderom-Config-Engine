@@ -55,7 +55,7 @@ def _default_workers():
     return default_workers("ACE_PREBUILD_WORKERS")
 
 
-def _init_worker(resolver_script, source_map, abs_map):
+def _init_worker(resolver_script, source_map, abs_map, overlay=None):
     """Инициализация процесса-воркера (один раз на процесс)."""
     from core.resolver.ltx import LtxResolverAdapter
 
@@ -65,6 +65,7 @@ def _init_worker(resolver_script, source_map, abs_map):
     )
     _WORKER_STATE["source_map"] = source_map
     _WORKER_STATE["abs_map"] = abs_map
+    _WORKER_STATE["overlay"] = overlay or {}
 
 
 def _worker_resolve(job):
@@ -75,6 +76,7 @@ def _worker_resolve(job):
             str(root_path),
             _WORKER_STATE["source_map"],
             _WORKER_STATE["abs_map"],
+            overlay=_WORKER_STATE.get("overlay"),
         )
         return root_path, key, value, None
     except Exception as exc:
@@ -116,7 +118,7 @@ class PrebuildService:
         self._error = None
 
     # -------------------------------------------------- управление
-    def start(self, forest, config_dir):
+    def start(self, forest, config_dir, overlay=None):
         """Запустить предсборку для нового дерева (старую остановить)."""
         with self._lock:
             old = self._thread
@@ -144,6 +146,10 @@ class PrebuildService:
                 if key in seen:
                     continue
                 seen.add(key)
+                # Виртуальный XML проекта может ещё не существовать на
+                # диске; его разрешение не нужно для каталога предметов.
+                if not path.is_file():
+                    continue
                 xml_targets.append(path)
 
         def _size(path):
@@ -172,6 +178,7 @@ class PrebuildService:
                     ltx_targets,
                     xml_targets,
                     stop_event,
+                    overlay or {},
                 ),
                 name="ltx-prebuild",
                 daemon=True,
@@ -223,9 +230,16 @@ class PrebuildService:
             }
 
     # -------------------------------------------------- рабочий поток
-    def _run(self, forest, config_dir, ltx_targets, xml_targets, stop_event):
+    def _run(self, forest, config_dir, ltx_targets, xml_targets,
+             stop_event, overlay=None):
         try:
-            self._run_ltx(forest, config_dir, ltx_targets, stop_event)
+            self._run_ltx(
+                forest,
+                config_dir,
+                ltx_targets,
+                stop_event,
+                overlay=overlay,
+            )
             if not stop_event.is_set():
                 self._run_xml(config_dir, xml_targets, stop_event)
         except Exception as exc:
@@ -251,7 +265,8 @@ class PrebuildService:
                     total,
                 )
 
-    def _run_ltx(self, forest, config_dir, targets, stop_event):
+    def _run_ltx(self, forest, config_dir, targets, stop_event,
+                 overlay=None):
         # Подпись Resolver4.py входит в ключ кэша, поэтому адаптер
         # должен быть найден до расчёта ключей.
         adapter = self._resolver.ensure_adapter(forest, config_dir)
@@ -260,7 +275,12 @@ class PrebuildService:
         for path in targets:
             if stop_event.is_set():
                 break
-            key = self._resolver.resolved_key(path, forest, config_dir)
+            key = self._resolver.resolved_key(
+                path,
+                forest,
+                config_dir,
+                overlay=overlay,
+            )
             if self._resolver.has_resolved_key(key):
                 self._advance(stop_event)
             else:
@@ -278,10 +298,14 @@ class PrebuildService:
                 config_dir,
                 log=None,
                 key=key,
+                overlay=overlay,
             )
 
         if workers > 1 and adapter is not None:
             source_map, abs_map = self._resolver.source_maps(forest)
+            overlay_files = getattr(overlay, "source_files", None)
+            if overlay_files is None:
+                overlay_files = overlay or {}
 
             self._run_parallel(
                 missing,
@@ -292,6 +316,7 @@ class PrebuildService:
                     str(adapter.resolver_script),
                     source_map,
                     abs_map,
+                    dict(overlay_files),
                 ),
                 worker=_worker_resolve,
                 store=lambda path, key, value: self._resolver.store_resolved(
@@ -300,6 +325,7 @@ class PrebuildService:
                     config_dir,
                     value,
                     key=key,
+                    overlay=overlay,
                 ),
                 label="Предсборка",
                 fallback=lambda: self._run_sequential(

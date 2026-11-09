@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional, Protocol, Sequence
@@ -30,6 +31,64 @@ class LineSource(Protocol):
     path: Optional[Path]
     line: int
     open_raw: bool
+
+
+@dataclass(frozen=True)
+class ProjectOverlay:
+    """Единый слой правок проекта поверх VFS.
+
+    ``source_files`` — черновики реальных файлов ``{path: text}``.
+    ``resolved_edits`` — правки resolved-корней:
+    ``{root_path: (original_text, current_text, line_sources)}``.
+    """
+
+    source_files: dict = field(default_factory=dict)
+    resolved_edits: dict = field(default_factory=dict)
+    new_files: frozenset = field(default_factory=frozenset)
+
+    @property
+    def revision(self) -> str:
+        digest = hashlib.sha1()
+
+        for path, text in sorted(
+            self.source_files.items(),
+            key=lambda item: str(item[0]).lower(),
+        ):
+            digest.update(str(path).lower().encode("utf-8", "replace"))
+            digest.update(b"\0")
+            digest.update(
+                hashlib.sha1(
+                    str(text).encode("utf-8", "replace")
+                ).digest()
+            )
+            digest.update(b"\1")
+
+        for path, value in sorted(
+            self.resolved_edits.items(),
+            key=lambda item: str(item[0]).lower(),
+        ):
+            digest.update(str(path).lower().encode("utf-8", "replace"))
+            digest.update(b"\2")
+            digest.update(
+                hashlib.sha1(
+                    str(value[0]).encode("utf-8", "replace")
+                ).digest()
+            )
+            digest.update(b"\0")
+            digest.update(
+                hashlib.sha1(
+                    str(value[1]).encode("utf-8", "replace")
+                ).digest()
+            )
+            digest.update(b"\1")
+
+        return digest.hexdigest()
+
+    def source_map(self) -> dict:
+        return dict(self.source_files)
+
+    def resolved_map(self) -> dict:
+        return dict(self.resolved_edits)
 
 
 @dataclass(frozen=True)
@@ -189,6 +248,20 @@ class ItemEntry:
 
 
 @dataclass(frozen=True)
+class ItemSection:
+    """Секция файла предметов: имя, поля и родители.
+
+    ``fields`` — ключи, объявленные в секции; по ним создаётся новый
+    предмет с пустыми значениями. ``parents`` — токены наследования
+    из заголовка ``[section]:parent1,parent2``.
+    """
+
+    name: str
+    fields: tuple[str, ...] = field(default_factory=tuple)
+    parents: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
 class ItemCatalog:
     """Отсортированный список предметов и файл, из которого он собран."""
 
@@ -197,6 +270,10 @@ class ItemCatalog:
     warnings: tuple[str, ...] = field(default_factory=tuple)
     # Идентификатор снимка каталога для кэша иконок.
     cache_key: str = ""
+    # Все секции документа, включая служебные родительские секции.
+    sections: tuple[ItemSection, ...] = field(default_factory=tuple)
+    # Родители, встречающиеся в заголовках исходных LTX.
+    parent_names: tuple[str, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -264,14 +341,27 @@ class CoreApi(Protocol):
         system_root: Path,
         log: Optional[Callable[[str], None]] = None,
         clean: bool = False,
+        overlay=None,
     ):
-        """Построить дерево и вернуть непрозрачный handle для SDK."""
+        """Построить дерево и вернуть непрозрачный handle для SDK.
+
+        ``overlay`` — карта ``{path: text}`` с черновиками проекта.
+        """
 
     def tree_summary(self, forest) -> TreeSummary:
         """Вернуть сводку по построенному дереву."""
 
     def relative_path(self, forest, path: Path) -> str:
         """Относительный путь файла в дереве."""
+
+    def forest_scan_dir(self, forest) -> Optional[Path]:
+        """Каталог, который сканировало дерево (``gamedata/configs``)."""
+
+    def forest_system_root(self, forest) -> Optional[Path]:
+        """Корневой ``system.ltx`` построенного дерева."""
+
+    def add_virtual_file(self, forest, path: Path, text: str) -> bool:
+        """Добавить новый черновик в уже построенное дерево VFS."""
 
     def patch_target(self, forest, path: Path) -> Optional[Path]:
         """Базовый файл, к которому применяется DLTX-патч."""
@@ -281,7 +371,7 @@ class CoreApi(Protocol):
 
     # --- фоновая предсборка ----------------------------------------------
 
-    def start_prebuild(self, forest, config_dir: Path) -> None:
+    def start_prebuild(self, forest, config_dir: Path, overlay=None) -> None:
         """Запустить фоновую сборку всех LTX-файлов дерева."""
 
     def prebuild_status(self) -> dict:
@@ -309,6 +399,7 @@ class CoreApi(Protocol):
         forest,
         config_dir: Path,
         log: Optional[Callable[[str], None]] = None,
+        overlay: Optional[ProjectOverlay] = None,
     ) -> str:
         """Собрать итоговый текст файла так, как его видит игра."""
 
@@ -321,6 +412,7 @@ class CoreApi(Protocol):
         forest,
         config_dir: Path,
         log: Optional[Callable[[str], None]] = None,
+        overlay: Optional[ProjectOverlay] = None,
     ) -> tuple[str, list[Optional[LineSource]]]:
          """Собрать чистый резолв + маппинг (source_per_line)."""
 
@@ -397,6 +489,7 @@ class CoreApi(Protocol):
         section_name: str,
         vfs_mode: bool = False,
         log: Optional[Callable[[str], None]] = None,
+        overlay: Optional[ProjectOverlay] = None,
     ) -> SectionGraph:
         """Построить граф связей для секции.
 
@@ -502,6 +595,18 @@ class UiApi(Protocol):
 
     def is_project_active(self) -> bool:
         """Есть ли активный проект (без него правка запрещена)."""
+
+    def project_name(self) -> str:
+        """Имя активного проекта или пустая строка."""
+
+    def project_overlay(self) -> ProjectOverlay:
+        """Единый слой правок активного проекта для VFS."""
+
+    def read_project_text(self, path: Path) -> str:
+        """Текст файла из черновика проекта (или с диска, если черновика нет)."""
+
+    def write_project_text(self, path: Path, text: str) -> bool:
+        """Записать текст в черновик проекта, не меняя оригинальный файл."""
 
     def resolved_draft(self, tab_id: str) -> Optional[ResolvedDraftInfo]:
         """Текущий resolved-черновик проекта по id вкладки."""

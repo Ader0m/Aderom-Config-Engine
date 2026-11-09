@@ -19,6 +19,18 @@ class LtxFileOpener:
         self.ctx = ctx
         self.session = session
 
+    def _project_overlay(self):
+        fn = getattr(self.ctx.ui, "project_overlay", None)
+        if not callable(fn):
+            return None
+        try:
+            return fn()
+        except Exception as exc:
+            self.ctx.ui.log(
+                "Слой правок проекта недоступен: %s" % exc
+            )
+            return None
+
     def open(self, path) -> bool:
         path = Path(path)
         if not self.session.has_tree:
@@ -43,7 +55,16 @@ class LtxFileOpener:
         self.ctx.ui.log("DLTX-патч: %s" % path.name)
 
         try:
-            raw_content = self.ctx.services.read_text(path)
+            # Виртуальный черновик проекта может ещё не существовать
+            # на диске, поэтому сначала спрашиваем текст у платформы.
+            reader = getattr(self.ctx.ui, "read_project_text", None)
+            raw_content = (
+                reader(path)
+                if callable(reader)
+                else self.ctx.services.read_text(path)
+            )
+            if not raw_content and Path(path).is_file():
+                raw_content = self.ctx.services.read_text(path)
         except Exception as exc:
             self._open_failed(path)
             self.ctx.ui.show_error("Не удалось прочитать: %s" % exc)
@@ -109,6 +130,7 @@ class LtxFileOpener:
 
         forest = self.session.forest
         config_dir = self.session.config_dir
+        overlay = self._project_overlay()
 
         def work(log):
             # ВАЖНО: именно assemble_resolved, а не assemble_text —
@@ -118,6 +140,7 @@ class LtxFileOpener:
                 forest,
                 config_dir,
                 log=log,
+                overlay=overlay,
             )
 
         try:

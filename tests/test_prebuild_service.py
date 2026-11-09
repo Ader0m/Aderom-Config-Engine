@@ -25,7 +25,7 @@ class FakeResolver:
     def _key(self, path):
         return str(path)
 
-    def resolved_key(self, path, forest, config_dir):
+    def resolved_key(self, path, forest, config_dir, overlay=None):
         return self._key(path)
 
     def has_resolved_key(self, key):
@@ -43,14 +43,14 @@ class FakeResolver:
     def source_maps(self, forest):
         return {}, {}
 
-    def assemble_resolved(self, path, forest, config_dir, log=None, key=None):
+    def assemble_resolved(self, path, forest, config_dir, log=None, key=None, overlay=None):
         path = str(path)
         self.calls.append(path)
         value = ("text:%s" % Path(path).name, [])
         self.cached.add(key if key is not None else path)
         return value
 
-    def store_resolved(self, path, forest, config_dir, value, key=None):
+    def store_resolved(self, path, forest, config_dir, value, key=None, overlay=None):
         self.cached.add(key if key is not None else str(path))
 
 
@@ -60,7 +60,7 @@ class BlockingResolver(FakeResolver):
         self.entered = threading.Event()
         self.release = threading.Event()
 
-    def assemble_resolved(self, path, forest, config_dir, log=None, key=None):
+    def assemble_resolved(self, path, forest, config_dir, log=None, key=None, overlay=None):
         path = str(path)
         self.calls.append(path)
         self.entered.set()
@@ -71,7 +71,7 @@ class BlockingResolver(FakeResolver):
 
 
 class FailingResolver(FakeResolver):
-    def assemble_resolved(self, path, forest, config_dir, log=None, key=None):
+    def assemble_resolved(self, path, forest, config_dir, log=None, key=None, overlay=None):
         self.calls.append(str(path))
         raise RuntimeError("boom")
 

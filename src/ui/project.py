@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -27,9 +28,12 @@ from core.models import LineSource
 from core.patching.ltx.merge import merge_patch_plans
 from core.patching.models import (
     GeneratedPatch,
+    PatchFile,
     PatchIssue,
     PatchOptions,
     PatchPlan,
+    PatchTarget,
+    VerificationCheck,
     VerificationResult,
 )
 from core.patching.ltx.multiline import analyze_multiline_edit
@@ -50,6 +54,8 @@ class ProjectDraft:
     original_text: str
     current_text: str
     saved_text: str
+    is_new: bool = False
+    revision: int = 0
     updated_at: float = 0.0
     saved_at: float = 0.0
 
@@ -95,8 +101,8 @@ class Project:
     name: str
     root_dir: Path
     modules: List[str] = field(default_factory=list)
-    save_mode: str = "one_by_one"
-    xml_patch_mode: str = "auto"
+    save_mode: str = "root"
+    xml_patch_mode: str = "xml"
     created_at: str = ""
     drafts: Dict[str, ProjectDraft] = field(default_factory=dict)
     resolved_drafts: Dict[str, ProjectResolvedDraft] = field(
@@ -119,8 +125,8 @@ class ProjectInfo:
     root_dir: Path
     created_at: str
     draft_count: int
-    save_mode: str = "one_by_one"
-    xml_patch_mode: str = "auto"
+    save_mode: str = "root"
+    xml_patch_mode: str = "xml"
 
 
 @dataclass(frozen=True)
@@ -202,10 +208,13 @@ class ProjectService:
     DRAFTS_DIR = "drafts"
     RESOLVED_DIR = "resolved"
 
+    PREVIEW_CACHE_SIZE = 128
+
     def __init__(self, base_dir):
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.active: Optional[Project] = None
+        self._preview_cache = OrderedDict()
 
     # -------------------------------------------------- свойства
     @property
@@ -214,20 +223,11 @@ class ProjectService:
 
     def patch_mode(self) -> str:
         if self.active is None:
-            return "one_by_one"
-        mode = str(self.active.save_mode or "one_by_one")
-        if mode not in (
-            "one_by_one",
-            "all_in_one",
-            "root",
-            "in_place",
-            "override",
-        ):
-            return "one_by_one"
-        return mode
+            return "root"
+        return str(self.active.save_mode or "root")
 
     def is_root_mode(self) -> bool:
-        return self.patch_mode() in ("all_in_one", "root")
+        return self.patch_mode() == "root"
 
     @staticmethod
     def path_key(path) -> str:
@@ -247,24 +247,28 @@ class ProjectService:
         self,
         name: str,
         modules: Optional[Iterable[str]] = None,
-        save_mode: str = "one_by_one",
-        xml_patch_mode: str = "auto",
+        save_mode: str = "root",
+        xml_patch_mode: str = "xml",
     ) -> Project:
         name = (name or "").strip()
         if not name:
             raise ProjectError("Название проекта не может быть пустым")
 
-        save_mode = str(save_mode or "one_by_one").lower().replace("-", "_")
-        xml_patch_mode = str(xml_patch_mode or "auto").lower()
-        xml_patch_mode = {
-            "override": "xml_override",
-            "dxml": "dxml_lua",
-            "lua": "dxml_lua",
-        }.get(xml_patch_mode, xml_patch_mode)
+        save_mode = str(save_mode or "root").lower().replace("-", "_")
+        xml_patch_mode = str(xml_patch_mode or "xml").lower()
+        if save_mode not in ("root", "in_place", "override"):
+            raise ProjectError(
+                "Неизвестный режим формирования патча: %s" % save_mode
+            )
+        if xml_patch_mode not in ("dxml_lua", "xml", "xml_override"):
+            raise ProjectError(
+                "Неизвестный режим XML-патча: %s" % xml_patch_mode
+            )
 
         if self.active is not None:
             self.close()
 
+        self._preview_cache.clear()
         project_id = self._make_project_id(name)
         root_dir = self._project_dir(project_id)
         root_dir.mkdir(parents=True, exist_ok=False)
@@ -276,8 +280,8 @@ class ProjectService:
             name=name,
             root_dir=root_dir,
             modules=list(modules or []),
-            save_mode=save_mode or "one_by_one",
-            xml_patch_mode=xml_patch_mode or "auto",
+            save_mode=save_mode,
+            xml_patch_mode=xml_patch_mode,
             created_at=self._timestamp(),
             drafts={},
         )
@@ -295,27 +299,26 @@ class ProjectService:
         if self.active is not None:
             self.close()
 
+        self._preview_cache.clear()
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except Exception as exc:
             raise ProjectError("Не удалось прочитать проект: %s" % exc)
 
+        save_mode = str(meta["save_mode"]).lower().replace("-", "_")
+        xml_patch_mode = str(meta["xml_patch_mode"]).lower()
+        if save_mode not in ("root", "in_place", "override"):
+            raise ProjectError("Неизвестный режим формирования патча: %s" % save_mode)
+        if xml_patch_mode not in ("dxml_lua", "xml", "xml_override"):
+            raise ProjectError("Неизвестный режим XML-патча: %s" % xml_patch_mode)
+
         project = Project(
-            id=str(meta.get("id") or project_id),
-            name=str(meta.get("name") or project_id),
+            id=str(meta["id"]),
+            name=str(meta["name"]),
             root_dir=root_dir,
             modules=list(meta.get("modules") or []),
-            save_mode=str(meta.get("save_mode") or "one_by_one")
-            .lower()
-            .replace("-", "_"),
-            xml_patch_mode={
-                "override": "xml_override",
-                "dxml": "dxml_lua",
-                "lua": "dxml_lua",
-            }.get(
-                str(meta.get("xml_patch_mode") or "auto").lower(),
-                str(meta.get("xml_patch_mode") or "auto").lower(),
-            ),
+            save_mode=save_mode,
+            xml_patch_mode=xml_patch_mode,
             created_at=str(meta.get("created_at") or ""),
             drafts={},
             resolved_drafts={},
@@ -362,25 +365,32 @@ class ProjectService:
             if resolved_dir.is_dir():
                 draft_count += len(list(resolved_dir.glob("*.json")))
 
+            try:
+                save_mode = str(meta["save_mode"]).lower().replace("-", "_")
+                xml_patch_mode = str(meta["xml_patch_mode"]).lower()
+                if save_mode not in ("root", "in_place", "override"):
+                    continue
+                if xml_patch_mode not in ("dxml_lua", "xml", "xml_override"):
+                    continue
+            except (KeyError, TypeError):
+                continue
+
             result.append(
                 ProjectInfo(
-                    id=str(meta.get("id") or entry.name),
-                    name=str(meta.get("name") or entry.name),
+                    id=str(meta["id"]),
+                    name=str(meta["name"]),
                     root_dir=entry,
                     created_at=str(meta.get("created_at") or ""),
                     draft_count=draft_count,
-                    save_mode=str(
-                        meta.get("save_mode") or "one_by_one"
-                    ),
-                    xml_patch_mode=str(
-                        meta.get("xml_patch_mode") or "auto"
-                    ),
+                    save_mode=save_mode,
+                    xml_patch_mode=xml_patch_mode,
                 )
             )
 
         return result
 
     def close(self) -> None:
+        self._preview_cache.clear()
         if self.active is None:
             return
         self.flush()
@@ -389,40 +399,24 @@ class ProjectService:
     def set_patch_mode(self, mode: str) -> Project:
         """Переключить режим формирования патча у активного проекта."""
         project = self._require_active()
-        mode = str(mode or "one_by_one").lower().replace("-", "_")
-        if mode not in (
-            "one_by_one",
-            "all_in_one",
-            "root",
-            "in_place",
-            "override",
-        ):
+        mode = str(mode or "root").lower().replace("-", "_")
+        if mode not in ("root", "in_place", "override"):
             raise ProjectError("Неизвестный режим формирования патча: %s" % mode)
 
         project.save_mode = mode
+        self._preview_cache.clear()
         self._write_meta(project)
         return project
 
     def set_xml_patch_mode(self, mode: str) -> Project:
         """Переключить способ формирования XML-патча."""
         project = self._require_active()
-        mode = str(mode or "auto")
-        mode = {
-            "override": "xml_override",
-            "dxml": "dxml_lua",
-            "lua": "dxml_lua",
-        }.get(mode.lower(), mode)
-        if mode not in (
-            "auto",
-            "xml",
-            "dxml_lua",
-            "xml_override",
-            "full_copy",
-            "new_file",
-        ):
+        mode = str(mode or "xml").lower()
+        if mode not in ("dxml_lua", "xml", "xml_override"):
             raise ProjectError("Неизвестный режим XML-патча: %s" % mode)
 
         project.xml_patch_mode = mode
+        self._preview_cache.clear()
         self._write_meta(project)
         return project
 
@@ -450,6 +444,8 @@ class ProjectService:
                 "Отказ: каталог проекта находится вне хранилища проектов"
             )
 
+        self._preview_cache.clear()
+
         if not target.exists():
             self.active = None
             return True
@@ -469,6 +465,8 @@ class ProjectService:
         key = self.path_key(path)
         draft = project.drafts.get(key)
 
+        new_text = str(text or "")
+
         if draft is None:
             if path.is_file():
                 original = (
@@ -481,15 +479,19 @@ class ProjectService:
             draft = ProjectDraft(
                 path=path,
                 original_text=original,
-                current_text=str(text or ""),
+                current_text=new_text,
                 saved_text=original,
+                is_new=not path.is_file(),
+                revision=0,
                 updated_at=time.time(),
                 saved_at=0.0,
             )
             project.drafts[key] = draft
-        else:
-            draft.current_text = str(text or "")
+        elif draft.current_text != new_text:
+            draft.current_text = new_text
+            draft.revision += 1
             draft.updated_at = time.time()
+            self._invalidate_preview_cache(path)
 
         return draft
 
@@ -564,6 +566,7 @@ class ProjectService:
         if draft is None:
             return False
 
+        self._invalidate_preview_cache(path)
         draft_file = project.root_dir / self.DRAFTS_DIR / self._draft_filename(path)
         try:
             if draft_file.is_file():
@@ -719,35 +722,217 @@ class ProjectService:
             % (
                 self.active.name,
                 mode,
-                self.active.xml_patch_mode or "auto",
+                self.active.xml_patch_mode,
                 changed,
                 dirty,
             )
         )
 
+    # -------------------------------------------------- кэш предпросмотра
+    @staticmethod
+    def _digest(text) -> str:
+        return hashlib.sha1(
+            str(text or "").encode("utf-8", "replace")
+        ).hexdigest()
+
+    @staticmethod
+    def _line_sources_signature(line_sources) -> str:
+        digest = hashlib.sha1()
+        for source in line_sources or ():
+            digest.update(str(getattr(source, "kind", "")).encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(str(getattr(source, "path", "")).encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(str(getattr(source, "line", 0)).encode("ascii"))
+            digest.update(b"\1")
+        return digest.hexdigest()
+
+    def _preview_project_key(self, forest):
+        project = self._require_active()
+        return (
+            project.id,
+            id(forest),
+            str(getattr(forest, "scan_dir", "")),
+            len(getattr(forest, "files", ()) or ()),
+            len(getattr(forest, "xml_files", ()) or ()),
+            project.save_mode,
+            project.xml_patch_mode,
+            project.name,
+        )
+
+    def _draft_preview_key(self, draft, forest):
+        return (
+            "draft",
+            self._preview_project_key(forest),
+            self.path_key(draft.path),
+            bool(draft.is_new),
+            int(draft.revision),
+            self._digest(draft.original_text),
+            self._digest(draft.current_text),
+        )
+
+    def _resolved_preview_key(self, draft, forest):
+        return (
+            "resolved",
+            self._preview_project_key(forest),
+            str(draft.tab_id),
+            self.path_key(draft.root_path),
+            self._digest(draft.original_text),
+            self._digest(draft.current_text),
+            self._line_sources_signature(draft.line_sources),
+        )
+
+    def _invalidate_preview_cache(self, path=None):
+        if path is None:
+            self._preview_cache.clear()
+            return
+
+        wanted = self.path_key(path)
+        for key in list(self._preview_cache):
+            if len(key) > 2 and key[2] == wanted:
+                self._preview_cache.pop(key, None)
+
+    def _cached_preview_items(self, key, factory):
+        cached = self._preview_cache.get(key)
+        if cached is not None:
+            self._preview_cache.move_to_end(key)
+            return list(cached)
+
+        items = tuple(factory())
+        self._preview_cache[key] = items
+        self._preview_cache.move_to_end(key)
+        while len(self._preview_cache) > self.PREVIEW_CACHE_SIZE:
+            self._preview_cache.popitem(last=False)
+        return list(items)
+
     # -------------------------------------------------- предпросмотр патча
     def build_preview(self, services, forest, log=None) -> ProjectPatchPreview:
         """Собрать предпросмотр в выбранном режиме проекта."""
-        if self.patch_mode() == "override":
-            # Override всегда работает по файлам-победителям, без слияния.
-            return self._build_preview_one_by_one(
-                services,
-                forest,
-                log=log,
-            )
         if self.is_root_mode():
-            return self._build_preview_all_in_one(
+            return self._build_preview_root(
                 services,
                 forest,
                 log=log,
             )
-        return self._build_preview_one_by_one(
+        return self._build_preview_per_file(
             services,
             forest,
             log=log,
         )
 
-    def _build_preview_one_by_one(
+    @staticmethod
+    def _preview_draft_items(add_item, *args, **kwargs):
+        output = []
+        add_item(*args, output=output, **kwargs)
+        return tuple(output)
+
+    @staticmethod
+    def _patch_relative_path(forest, path):
+        scan_dir = Path(getattr(forest, "scan_dir", "") or "")
+        if not str(scan_dir):
+            raise ProjectError("Не определён каталог gamedata/configs")
+
+        relative = Path(
+            os.path.relpath(str(path), str(scan_dir))
+        )
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ProjectError(
+                "Новый файл находится вне gamedata/configs: %s" % path
+            )
+        return relative
+
+    def _new_file_preview(self, project, forest, draft, title):
+        try:
+            relative_path = self._patch_relative_path(
+                forest,
+                draft.path,
+            )
+        except ProjectError as exc:
+            return PreviewItem(
+                title=title,
+                source_path=Path(draft.path),
+                plan=None,
+                generated=None,
+                error=str(exc),
+                kind="new_file",
+                draft=draft,
+            )
+
+        suffix = Path(draft.path).suffix.lower()
+        if suffix not in (".ltx", ".xml"):
+            return PreviewItem(
+                title=title,
+                source_path=Path(draft.path),
+                plan=None,
+                generated=None,
+                error="Новый файл должен быть .ltx или .xml",
+                kind="new_file",
+                draft=draft,
+            )
+
+        if not str(draft.current_text or "").strip():
+            return PreviewItem(
+                title=title,
+                source_path=Path(draft.path),
+                plan=None,
+                generated=None,
+                error="Содержимое нового файла пустое",
+                kind="new_file",
+                draft=draft,
+            )
+
+        plan = PatchPlan(
+            source_path=Path(draft.path),
+            target=PatchTarget(
+                source_path=Path(draft.path),
+                root_path=None,
+                reason="Новый файл проекта",
+            ),
+            patch_mod="ACE Patch - %s" % project.name,
+            patch_file_rel=relative_path,
+            changes=(),
+            issues=(),
+            warnings=(),
+            preview=str(draft.current_text),
+            format="xml" if suffix == ".xml" else "ltx",
+        )
+        generated = GeneratedPatch(
+            plan=plan,
+            files=(
+                PatchFile(
+                    relative_path=(
+                        Path("gamedata") / "configs" / relative_path
+                    ),
+                    text=str(draft.current_text),
+                ),
+            ),
+            text=str(draft.current_text),
+            verification=VerificationResult(
+                ok=True,
+                checks=(
+                    VerificationCheck(
+                        name="new_file",
+                        ok=True,
+                        detail="Файл будет записан как новый",
+                    ),
+                ),
+            ),
+        )
+        return PreviewItem(
+            title=title,
+            source_path=Path(draft.path),
+            plan=plan,
+            generated=generated,
+            kind="new_file",
+            draft=draft,
+            notes=(
+                "Новый файл: %s"
+                % (Path("gamedata") / "configs" / relative_path),
+            ),
+            text=str(draft.current_text),
+        )
+
+    def _build_preview_per_file(
         self,
         services,
         forest,
@@ -764,6 +949,8 @@ class ProjectService:
                 original_text=draft.original_text,
                 current_text=draft.current_text,
                 saved_text=draft.saved_text,
+                is_new=draft.is_new,
+                revision=draft.revision,
                 updated_at=draft.updated_at,
                 saved_at=draft.saved_at,
             )
@@ -803,13 +990,27 @@ class ProjectService:
             kind,
             draft=None,
             resolved=None,
+            output=None,
         ):
+            output = items if output is None else output
+
             if log:
                 log("Проект: подготовка %s" % title)
 
+            if draft is not None and draft.is_new:
+                output.append(
+                    self._new_file_preview(
+                        project,
+                        forest,
+                        draft,
+                        title,
+                    )
+                )
+                return
+
             suffix_low = Path(source_path).suffix.lower()
             if suffix_low not in (".ltx", ".xml"):
-                items.append(
+                output.append(
                     PreviewItem(
                         title=title,
                         source_path=Path(source_path),
@@ -847,7 +1048,7 @@ class ProjectService:
                 notes = resolved_analysis.notes
 
                 if resolved_analysis.has_errors:
-                    items.append(
+                    output.append(
                         PreviewItem(
                             title=title,
                             source_path=Path(source_path),
@@ -870,7 +1071,7 @@ class ProjectService:
                     return
 
                 if not resolved_analysis.changes:
-                    items.append(
+                    output.append(
                         PreviewItem(
                             title=title,
                             source_path=Path(source_path),
@@ -901,7 +1102,7 @@ class ProjectService:
                 project_tag=project.name,
                 allow_delete_section=True,
                 allow_delete_xml_element=True,
-                xml_patch_mode=project.xml_patch_mode or "auto",
+                xml_patch_mode=project.xml_patch_mode,
             )
 
             try:
@@ -959,9 +1160,7 @@ class ProjectService:
                         issue.message for issue in plan.warnings
                     )
                 elif is_xml:
-                    xml_setting = (
-                        project.xml_patch_mode or "auto"
-                    ).lower()
+                    xml_setting = project.xml_patch_mode.lower()
                     if xml_setting == "xml_override":
                         # Override XML: полная перезапись файла тем, что
                         # получилось в редакторе.
@@ -971,7 +1170,7 @@ class ProjectService:
                         )
                         xml_setting = "full_copy"
 
-                    fork_mode = xml_setting in ("auto", "xml")
+                    fork_mode = xml_setting == "xml"
                     if fork_mode and hasattr(services, "plan_xml_fork"):
                         result = services.plan_xml_fork(
                             source_path,
@@ -1037,7 +1236,7 @@ class ProjectService:
                 else:
                     generated = None
 
-                items.append(
+                output.append(
                     PreviewItem(
                         title=title,
                         source_path=Path(source_path),
@@ -1062,7 +1261,7 @@ class ProjectService:
                         if key in script_seen:
                             continue
                         script_seen.add(key)
-                        items.append(
+                        output.append(
                             PreviewItem(
                                 title="Скрипт: %s:%d"
                                 % (Path(ref.path).name, ref.line),
@@ -1076,7 +1275,7 @@ class ProjectService:
                             )
                         )
             except Exception as exc:
-                items.append(
+                output.append(
                     PreviewItem(
                         title=title,
                         source_path=Path(source_path),
@@ -1093,33 +1292,62 @@ class ProjectService:
         index = 0
         for draft in raw_drafts:
             index += 1
-            add_item(
-                index,
-                draft.path.name,
-                draft.path,
-                draft.original_text,
-                draft.current_text,
-                "file",
-                draft=draft,
+            key = self._draft_preview_key(draft, forest)
+            items.extend(
+                self._cached_preview_items(
+                    key,
+                    lambda draft=draft, index=index: self._preview_draft_items(
+                        add_item,
+                        index,
+                        draft.path.name,
+                        draft.path,
+                        draft.original_text,
+                        draft.current_text,
+                        "file",
+                        draft=draft,
+                    ),
+                )
             )
 
         for draft in resolved_drafts:
             index += 1
-            add_item(
-                index,
-                draft.title or ("%s (resolved)" % draft.root_path.name),
-                draft.root_path,
-                draft.original_text,
-                draft.current_text,
-                "resolved",
-                resolved=draft,
+            key = self._resolved_preview_key(draft, forest)
+            title = draft.title or (
+                "%s (resolved)" % draft.root_path.name
+            )
+            items.extend(
+                self._cached_preview_items(
+                    key,
+                    lambda draft=draft, index=index, title=title: (
+                        self._preview_draft_items(
+                            add_item,
+                            index,
+                            title,
+                            draft.root_path,
+                            draft.original_text,
+                            draft.current_text,
+                            "resolved",
+                            resolved=draft,
+                        )
+                    ),
+                )
             )
 
-        return ProjectPatchPreview(project=project, items=tuple(items))
+        deduped = []
+        seen_scripts = set()
+        for item in items:
+            if item.kind == "script":
+                key = (self.path_key(item.source_path), item.text)
+                if key in seen_scripts:
+                    continue
+                seen_scripts.add(key)
+            deduped.append(item)
 
-    def _build_preview_all_in_one(self, services, forest, log=None):
+        return ProjectPatchPreview(project=project, items=tuple(deduped))
+
+    def _build_preview_root(self, services, forest, log=None):
         """Один патч на корень загрузки; XML — один пакет на проект."""
-        base = self._build_preview_one_by_one(
+        base = self._build_preview_per_file(
             services,
             forest,
             log=log,
@@ -1131,7 +1359,8 @@ class ProjectService:
 
         for item in base.items:
             if (
-                item.plan is None
+                item.kind == "new_file"
+                or item.plan is None
                 or not item.plan.can_generate
                 or (
                     item.plan.target.root_path is None
@@ -1319,6 +1548,8 @@ class ProjectService:
             "original_text": draft.original_text,
             "current_text": draft.current_text,
             "saved_text": draft.saved_text,
+            "is_new": bool(draft.is_new),
+            "revision": int(draft.revision),
             "updated_at": draft.updated_at,
             "saved_at": draft.saved_at,
         }
@@ -1426,9 +1657,11 @@ class ProjectService:
             path = Path(data["path"])
             return ProjectDraft(
                 path=path,
-                original_text=str(data.get("original_text") or ""),
-                current_text=str(data.get("current_text") or ""),
-                saved_text=str(data.get("saved_text") or ""),
+                original_text=str(data["original_text"]),
+                current_text=str(data["current_text"]),
+                saved_text=str(data["saved_text"]),
+                is_new=bool(data["is_new"]),
+                revision=int(data["revision"]),
                 updated_at=float(data.get("updated_at") or 0.0),
                 saved_at=float(data.get("saved_at") or 0.0),
             )

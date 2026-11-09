@@ -3,6 +3,7 @@
 
 from pathlib import Path
 
+from sdk.api import ProjectOverlay
 from sdk.events import Events
 
 from .settings import config_dir_candidates
@@ -15,6 +16,7 @@ class CleanRunFeature:
         self.ctx = ctx
         self.session = session
         self._running = False
+        self._overlay = {}
 
     # -------------------------------------------------- автоопределение
     def detect_config_dir(self):
@@ -50,14 +52,25 @@ class CleanRunFeature:
             str(self.session.config_dir),
         )
 
+        # Снимок черновиков берём в UI-потоке: фоновая задача не должна
+        # читать изменяемое состояние проекта.
+        overlay = self.ctx.ui.project_overlay()
+        self._overlay = overlay
+        draft_count = len(getattr(overlay, "source_files", None) or {})
+        if draft_count:
+            self.ctx.ui.log(
+                "Чистый запуск: черновиков проекта в VFS: %d"
+                % draft_count
+            )
+
         self.ctx.tasks.run(
-            self._scan,
+            lambda log: self._scan(log, overlay),
             on_done=self._on_scan_done,
             on_log=self.ctx.ui.log,
         )
 
     # -------------------------------------------------- фоновая работа
-    def _scan(self, log):
+    def _scan(self, log, overlay=None):
         selected = self.session.config_dir
 
         system = self.ctx.services.find_system_ltx(selected)
@@ -75,6 +88,7 @@ class CleanRunFeature:
             system,
             log=log,
             clean=True,
+            overlay=overlay,
         )
         self.ctx.services.run_resolver(forest, selected, log=log)
         return forest
@@ -93,9 +107,17 @@ class CleanRunFeature:
         self.ctx.events.publish(Events.CLEAN_RUN_FINISHED, forest)
 
         try:
+            source_overlay = ProjectOverlay(
+                source_files=getattr(
+                    self._overlay,
+                    "source_files",
+                    None,
+                ) or {},
+            )
             self.ctx.services.start_prebuild(
                 forest,
                 self.session.config_dir,
+                overlay=source_overlay,
             )
         except Exception as exc:
             self.ctx.ui.log("Не удалось запустить фоновую сборку: %s" % exc)

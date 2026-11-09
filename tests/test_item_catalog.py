@@ -201,6 +201,32 @@ class ItemCatalogTest(unittest.TestCase):
         self.assertEqual(alpha.description_text, "Описание Альфы")
         self.assertEqual(alpha.field("inv_name"), "Alpha")
 
+    def test_sections_keep_fields_and_parents(self):
+        text = (
+            "[base_item]\nkind = i_food\ncost = 10\n\n"
+            "[child_item]:base_item\ninv_name = Child\n"
+        )
+        root = write_text(self.items_dir / "items.ltx", text)
+        forest = _FakeForest(
+            self.configs,
+            [root],
+            rel_paths={root: "items/items.ltx"},
+        )
+
+        catalog = ItemCatalogService(_FakeResolver(text)).build(forest)
+        sections = {section.name: section for section in catalog.sections}
+
+        self.assertIn("base_item", sections)
+        self.assertEqual(
+            sections["base_item"].fields,
+            ("kind", "cost"),
+        )
+        self.assertEqual(
+            sections["child_item"].parents,
+            ("base_item",),
+        )
+        self.assertIn("base_item", catalog.parent_names)
+
     def test_service_sections_are_skipped(self):
         forest = self._forest()
         catalog = ItemCatalogService(_FakeResolver(ITEMS_TEXT)).build(forest)

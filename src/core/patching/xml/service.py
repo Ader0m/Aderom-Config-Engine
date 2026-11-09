@@ -66,7 +66,7 @@ class XmlPatchService:
                 after_text,
                 forest=forest,
                 options=options,
-                project_mode=project_mode or "one_by_one",
+                project_mode=project_mode or "root",
             )
             return PatchResult(
                 plan=result.plan,

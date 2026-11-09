@@ -64,6 +64,84 @@ def path_key(path) -> str:
     return os.path.normcase(os.path.normpath(os.path.abspath(str(path))))
 
 
+def project_overlay_signature(overlay) -> str:
+    """Подпись единого слоя правок проекта."""
+    if overlay is None:
+        return ""
+
+    revision = getattr(overlay, "revision", None)
+    if revision is not None:
+        return str(revision)
+
+    if not hasattr(overlay, "source_files") and not hasattr(
+        overlay,
+        "resolved_edits",
+    ):
+        return overlay_content_signature(overlay)
+
+    digest = hashlib.sha1()
+    source_files = getattr(overlay, "source_files", None) or {}
+    resolved_edits = getattr(overlay, "resolved_edits", None) or {}
+
+    for path, text in sorted(
+        source_files.items(),
+        key=lambda item: path_key(item[0]),
+    ):
+        digest.update(path_key(path).encode("utf-8", "replace"))
+        digest.update(b"\0")
+        digest.update(
+            hashlib.sha1(
+                str(text).encode("utf-8", "replace")
+            ).digest()
+        )
+        digest.update(b"\1")
+
+    for path, value in sorted(
+        resolved_edits.items(),
+        key=lambda item: path_key(item[0]),
+    ):
+        digest.update(path_key(path).encode("utf-8", "replace"))
+        digest.update(b"\2")
+        digest.update(
+            hashlib.sha1(
+                str(value[0]).encode("utf-8", "replace")
+            ).digest()
+        )
+        digest.update(b"\0")
+        digest.update(
+            hashlib.sha1(
+                str(value[1]).encode("utf-8", "replace")
+            ).digest()
+        )
+        digest.update(b"\1")
+
+    return digest.hexdigest()
+
+
+def overlay_content_signature(overlay) -> str:
+    """Подпись исходных файлов из слоя правок проекта."""
+    if not overlay:
+        return ""
+
+    source_files = getattr(overlay, "source_files", None)
+    if source_files is None:
+        source_files = overlay
+
+    digest = hashlib.sha1()
+    for path, text in sorted(
+        source_files.items(),
+        key=lambda item: path_key(item[0]),
+    ):
+        digest.update(path_key(path).encode("utf-8", "replace"))
+        digest.update(b"\0")
+        digest.update(
+            hashlib.sha1(
+                str(text).encode("utf-8", "replace")
+            ).digest()
+        )
+    return digest.hexdigest()
+
+
 def file_subtree_signature(forest, root_path) -> str:
     """SHA1 подписи файла и всех его include/DLTX-зависимостей.
 

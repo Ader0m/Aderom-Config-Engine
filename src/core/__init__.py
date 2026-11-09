@@ -48,6 +48,7 @@ from core.items.catalog import (
     ItemCatalogService,
     ItemField,
     ItemRecord,
+    ItemSection,
 )
 from core.items.icons import ICON_CACHE_VERSION, ItemIconService
 from core.items.localization import (
@@ -232,6 +233,7 @@ __all__ = [
     "ItemCatalogService",
     "ItemField",
     "ItemRecord",
+    "ItemSection",
     "ICON_CACHE_VERSION",
     "ItemIconService",
     "LOCALIZATION_VERSION",

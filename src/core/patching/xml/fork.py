@@ -852,7 +852,7 @@ class XmlForkService:
         edited_text: str,
         forest=None,
         options: Optional[PatchOptions] = None,
-        project_mode: str = "one_by_one",
+        project_mode: str = "root",
     ) -> XmlForkResult:
         source_path = Path(source_path)
         options = options or PatchOptions()
@@ -944,10 +944,7 @@ class XmlForkService:
             generated_parts.append(self.services.generate_patch(new_plan))
 
         # 2. Ссылки в LTX -> DLTX по настройке DLTX проекта.
-        dltx_mode = {
-            "all_in_one": "root",
-            "one_by_one": "in_place",
-        }.get(project_mode, project_mode or "in_place")
+        dltx_mode = project_mode or "root"
         ltx_refs = (
             _find_ltx_references(
                 forest,

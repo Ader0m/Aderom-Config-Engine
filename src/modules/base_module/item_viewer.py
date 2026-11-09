@@ -16,17 +16,31 @@
 
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import replace
+from pathlib import Path
 
 from sdk import ResolvedLineEdit
+from sdk.events import Events
 
-from PyQt5.QtCore import QSize, QSortFilterProxyModel, Qt, QTimer
+from PyQt5.QtCore import (
+    QEvent,
+    QPoint,
+    QRect,
+    QSize,
+    QSortFilterProxyModel,
+    Qt,
+    QTimer,
+    pyqtSignal,
+)
 from PyQt5.QtGui import (
     QColor,
     QIcon,
     QImage,
     QKeySequence,
     QPainter,
+    QPalette,
     QPen,
     QPixmap,
     QStandardItem,
@@ -34,7 +48,12 @@ from PyQt5.QtGui import (
 )
 from PyQt5.QtWidgets import (
     QAbstractItemView,
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QCompleter,
     QDialog,
+    QDialogButtonBox,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -161,6 +180,534 @@ def _placeholder_pixmap(color: str, size: int = PLACEHOLDER_SIZE) -> QPixmap:
     return pixmap
 
 
+def _project_tag(name) -> str:
+    """Безопасный тег проекта для имён файлов и ключей локализации."""
+    value = str(name or "").strip().lower()
+    value = re.sub(r"[^\w.-]+", "_", value, flags=re.UNICODE)
+    return value.strip("._-") or "project"
+
+
+def _next_localization_base(base_key: str, existing_ids) -> str:
+    """Свободный префикс ключей локализации для нового предмета.
+
+    Первый предмет проекта получает ``st_ace_<проект>``; следующим
+    добавляется числовой id: ``st_ace_<проект>_2`` и т.д.
+    """
+    existing = {str(value).lower() for value in existing_ids or ()}
+
+    if (
+        (base_key + "_name").lower() not in existing
+        and (base_key + "_descr").lower() not in existing
+    ):
+        return base_key
+
+    index = 2
+    while True:
+        candidate = "%s_%d" % (base_key, index)
+        if (
+            (candidate + "_name").lower() not in existing
+            and (candidate + "_descr").lower() not in existing
+        ):
+            return candidate
+        index += 1
+
+
+def _build_item_section(
+    section: str,
+    parent,
+    parent_fields,
+    name_key: str,
+    description_key: str,
+    newline: str = "\n",
+) -> str:
+    """Текст новой секции предмета с пустыми полями родителя."""
+    header = "[%s]" % section
+    parent = str(parent or "").strip()
+    if parent:
+        header += ":%s" % parent
+
+    lines = [header]
+    seen = set()
+
+    for key in parent_fields or ():
+        key = str(key or "").strip()
+        if not key:
+            continue
+        lower = key.lower()
+        if lower in ("inv_name", "inv_name_short", "description"):
+            continue
+        if lower in seen:
+            continue
+        seen.add(lower)
+        lines.append("%s =" % key)
+
+    # Локализация нового предмета. У inv_name_short всегда тот же ключ,
+    # что и у inv_name.
+    lines.append("inv_name = %s" % name_key)
+    lines.append("inv_name_short = %s" % name_key)
+    lines.append("description = %s" % description_key)
+
+    return newline.join(lines)
+
+
+def _append_item_section(text: str, block: str, newline: str = "\n") -> str:
+    text = str(text or "")
+    if not text.strip():
+        return block + newline
+    return text.rstrip() + newline + newline + block + newline
+
+
+def _xml_string_entries(
+    name_key: str,
+    description_key: str,
+    newline: str = "\n",
+) -> str:
+    lines = []
+    for key in (name_key, description_key):
+        lines.extend((
+            '\t<string id="%s">' % key,
+            "\t\t<text></text>",
+            "\t</string>",
+        ))
+    return newline.join(lines)
+
+
+def _append_xml_strings(
+    text: str,
+    name_key: str,
+    description_key: str,
+    newline: str = "\n",
+) -> str:
+    block = _xml_string_entries(name_key, description_key, newline)
+    text = str(text or "")
+
+    if not text.strip():
+        return newline.join((
+            '<?xml version="1.0" encoding="windows-1251"?>',
+            "",
+            "<string_table>",
+            block,
+            "</string_table>",
+            "",
+        ))
+
+    marker = "</string_table>"
+    index = text.lower().rfind(marker)
+    if index == -1:
+        return text.rstrip() + newline + newline + block + newline
+
+    return text[:index].rstrip() + newline + block + newline + text[index:]
+
+
+def _ltx_header_name(line):
+    value = str(line or "").strip()
+    for prefix in ("!!", "!", "@"):
+        if value.startswith(prefix + "["):
+            value = value[len(prefix):]
+            break
+    if not value.startswith("["):
+        return None
+    close = value.find("]")
+    if close == -1:
+        return None
+    return value[1:close].strip().lower()
+
+
+def _ltx_section_at_line(text, line_number):
+    lines = str(text or "").split("\n")
+    index = min(max(int(line_number) - 1, 0), len(lines) - 1)
+    for current in range(index, -1, -1):
+        name = _ltx_header_name(lines[current])
+        if name:
+            return name
+    return None
+
+
+def _ltx_key_from_line(line):
+    value = str(line or "").strip()
+    if value.startswith("!") or value.startswith(">") or value.startswith("<"):
+        value = value[1:].lstrip()
+    if "=" in value:
+        value = value.split("=", 1)[0]
+    return value.strip().lower()
+
+
+def _ltx_section_bounds(lines, section):
+    target = str(section or "").strip().lower()
+    start = None
+
+    for index, line in enumerate(lines):
+        name = _ltx_header_name(line)
+        if name is None:
+            continue
+        if start is not None:
+            return start, index
+        if name == target:
+            start = index
+
+    if start is not None:
+        return start, len(lines)
+    return None
+
+
+def _edit_section_text(text, section, key, action, new_line=None,
+                       after_key=None):
+    """Точечная правка секции в тексте файла-черновика."""
+    original = str(text or "")
+    newline = "\r\n" if "\r\n" in original else "\n"
+    lines = original.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    bounds = _ltx_section_bounds(lines, section)
+    if bounds is None:
+        return None
+
+    start, end = bounds
+    key_low = str(key or "").strip().lower()
+    found = None
+    for index in range(start + 1, end):
+        if _ltx_key_from_line(lines[index]) == key_low:
+            found = index
+            break
+
+    if action == "replace":
+        line = str(new_line or "").rstrip("\r\n")
+        if found is None:
+            lines.insert(end, line)
+        else:
+            lines[found] = line
+    elif action == "delete":
+        if found is None:
+            return None
+        del lines[found]
+    elif action == "insert":
+        line = str(new_line or "").rstrip("\r\n")
+        if found is None:
+            lines.insert(end, line)
+        else:
+            lines.insert(found + 1, line)
+    else:
+        return None
+
+    return newline.join(lines)
+
+
+def _declared_sections(text: str):
+    """Имена секций LTX без учёта типа заголовка."""
+    return {
+        match.group(1).strip().lower()
+        for match in re.finditer(
+            r"^[ \t]*(?:!!|!|@)?\[([^\]]+)\]",
+            str(text or ""),
+            flags=re.MULTILINE,
+        )
+    }
+
+
+class ParentComboBox(QComboBox):
+    """Поле родителя, открывающее собственный список предложений."""
+
+    popup_requested = pyqtSignal()
+
+    def showPopup(self):
+        # Не показываем стандартный popup: вместо него диалог открывает
+        # прокручиваемый контейнер с ближайшими родителями.
+        self.popup_requested.emit()
+
+
+class ParentSuggestionPopup(QFrame):
+    """Прокручиваемый список ближайших родителей под полем ввода."""
+
+    suggestion_chosen = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        flags = (
+            Qt.Tool
+            | Qt.FramelessWindowHint
+            | Qt.WindowDoesNotAcceptFocus
+            | Qt.NoDropShadowWindowHint
+        )
+        super().__init__(parent, flags)
+        self.setObjectName("parentSuggestionPopup")
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setFocusPolicy(Qt.NoFocus)
+
+        palette = self.palette()
+        background = palette.color(QPalette.Window).name()
+        border = palette.color(QPalette.Mid).name()
+        self.setStyleSheet(
+            "#parentSuggestionPopup {"
+            "  background-color: %s;"
+            "  border: 1px solid %s;"
+            "}" % (background, border)
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.list = QListWidget()
+        self.list.setFocusPolicy(Qt.NoFocus)
+        self.list.setUniformItemSizes(True)
+        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.list.itemClicked.connect(self._on_item_clicked)
+        self.list.itemActivated.connect(self._on_item_clicked)
+        layout.addWidget(self.list)
+
+    def set_suggestions(self, values):
+        self.list.clear()
+        for value in values or ():
+            self.list.addItem(str(value))
+        if self.list.count() > 0:
+            self.list.setCurrentRow(0)
+        return self.list.count()
+
+    def show_at(self, widget):
+        if self.list.count() <= 0:
+            self.hide()
+            return
+
+        row_height = self.list.sizeHintForRow(0)
+        if row_height <= 0:
+            row_height = 22
+
+        visible_rows = min(self.list.count(), 12)
+        height = min(320, row_height * visible_rows + 4)
+        width = max(widget.width(), 360)
+
+        position = widget.mapToGlobal(
+            QPoint(0, widget.height() + 2)
+        )
+        screen = QApplication.desktop().availableGeometry(widget)
+        if position.y() + height > screen.bottom():
+            position.setY(
+                widget.mapToGlobal(QPoint(0, 0)).y() - height
+            )
+
+        self.setGeometry(QRect(position, QSize(width, height)))
+        self.show()
+        self.raise_()
+
+    def _on_item_clicked(self, item):
+        if item is None:
+            return
+        value = item.text()
+        self.hide()
+        self.suggestion_chosen.emit(value)
+
+
+class CreateItemDialog(QDialog):
+    """Выбор имени нового предмета и его родителя."""
+
+    def __init__(self, parent_candidates=(), parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Создать предмет")
+        self.resize(560, 240)
+
+        self._all_parents = sorted(
+            {
+                str(value).strip()
+                for value in (parent_candidates or ())
+                if str(value).strip()
+            },
+            key=str.lower,
+        )
+        self._choosing_parent = False
+
+        layout = QVBoxLayout(self)
+
+        layout.addWidget(QLabel("Имя секции предмета:"))
+        self.section_edit = QLineEdit()
+        self.section_edit.setPlaceholderText(
+            "например, my_custom_medkit"
+        )
+        layout.addWidget(self.section_edit)
+
+        self.no_parent = QCheckBox("Нет родителя")
+        layout.addWidget(self.no_parent)
+
+        layout.addWidget(QLabel("Родитель:"))
+        self.parent_combo = ParentComboBox()
+        self.parent_combo.setEditable(True)
+        self.parent_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.parent_combo.addItems(self._all_parents)
+        self.parent_combo.setMinimumContentsLength(28)
+        self.parent_combo.setSizeAdjustPolicy(
+            QComboBox.AdjustToMinimumContentsLengthWithIcon
+        )
+
+        line_edit = self.parent_combo.lineEdit()
+        if line_edit is not None:
+            line_edit.setPlaceholderText(
+                "Выберите из списка или введите вручную"
+            )
+            line_edit.textEdited.connect(self._on_parent_text_edited)
+            line_edit.installEventFilter(self)
+
+        completer = self.parent_combo.completer()
+        if completer is not None:
+            completer.setCaseSensitivity(Qt.CaseInsensitive)
+            completer.setFilterMode(Qt.MatchContains)
+            # Видимый список рисует наш прокручиваемый контейнер;
+            # автодополнение остаётся строчным, без второго popup.
+            completer.setCompletionMode(QCompleter.InlineCompletion)
+
+        self._suggestion_popup = ParentSuggestionPopup(self)
+        self._suggestion_popup.suggestion_chosen.connect(
+            self._on_suggestion_chosen
+        )
+        self.parent_combo.popup_requested.connect(
+            self._on_parent_popup_requested
+        )
+        layout.addWidget(self.parent_combo)
+
+        hint = QLabel(
+            "Все поля родителя будут добавлены в новую секцию "
+            "с пустыми значениями. Родителя можно ввести вручную."
+        )
+        hint.setWordWrap(True)
+        hint.setProperty("role", "muted")
+        layout.addWidget(hint)
+
+        self.no_parent.toggled.connect(self._on_no_parent_toggled)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        buttons.button(QDialogButtonBox.Ok).setText("Создать")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _filter_parents(self, query):
+        query = str(query or "").strip().lower()
+        if not query:
+            return list(self._all_parents)
+
+        starts = []
+        contains = []
+        for value in self._all_parents:
+            lowered = value.lower()
+            if lowered.startswith(query):
+                starts.append(value)
+            elif query in lowered:
+                contains.append(value)
+        return starts + contains
+
+    def _show_suggestions(self, query):
+        if self.no_parent.isChecked():
+            self._suggestion_popup.hide()
+            return
+
+        count = self._suggestion_popup.set_suggestions(
+            self._filter_parents(query)
+        )
+        if count <= 0:
+            self._suggestion_popup.hide()
+            return
+        self._suggestion_popup.show_at(self.parent_combo)
+
+    def _on_parent_text_edited(self, text):
+        if self._choosing_parent:
+            return
+        self._show_suggestions(text)
+
+    def _on_parent_popup_requested(self):
+        self._show_suggestions(self.parent_combo.currentText())
+
+    def _on_suggestion_chosen(self, value):
+        self._choosing_parent = True
+        try:
+            self.parent_combo.setCurrentText(value)
+            line_edit = self.parent_combo.lineEdit()
+            if line_edit is not None:
+                line_edit.setText(value)
+                line_edit.setFocus()
+        finally:
+            self._choosing_parent = False
+        self._suggestion_popup.hide()
+
+    def _hide_suggestions(self):
+        self._suggestion_popup.hide()
+
+    def _hide_suggestions_later(self):
+        QTimer.singleShot(100, self._hide_suggestions_if_left)
+
+    def _hide_suggestions_if_left(self):
+        line_edit = self.parent_combo.lineEdit()
+        if line_edit is not None and line_edit.hasFocus():
+            return
+        if self._suggestion_popup.list.underMouse():
+            return
+        self._suggestion_popup.hide()
+
+    def eventFilter(self, obj, event):
+        line_edit = self.parent_combo.lineEdit()
+        if obj is line_edit:
+            if event.type() == QEvent.FocusIn:
+                self._show_suggestions(
+                    self.parent_combo.currentText()
+                )
+            elif event.type() == QEvent.FocusOut:
+                self._hide_suggestions_later()
+        return super().eventFilter(obj, event)
+
+    def hideEvent(self, event):
+        self._suggestion_popup.hide()
+        super().hideEvent(event)
+
+    def moveEvent(self, event):
+        self._suggestion_popup.hide()
+        super().moveEvent(event)
+
+    def _on_no_parent_toggled(self, checked):
+        self.parent_combo.setEnabled(not checked)
+        if checked:
+            self._suggestion_popup.hide()
+
+    def values(self):
+        section = self.section_edit.text().strip()
+        if self.no_parent.isChecked():
+            return section, None
+        parent = self.parent_combo.currentText().strip()
+        return section, (parent or None)
+
+    def accept(self):
+        section = self.section_edit.text().strip()
+        if not section:
+            QMessageBox.warning(
+                self,
+                "Создать предмет",
+                "Введите имя секции предмета.",
+            )
+            return
+
+        if re.search(r"[\[\]:\r\n]", section):
+            QMessageBox.warning(
+                self,
+                "Создать предмет",
+                "Имя секции не должно содержать [ ], : или перевод строки.",
+            )
+            return
+
+        if not self.no_parent.isChecked():
+            parent = self.parent_combo.currentText().strip()
+            if not parent:
+                QMessageBox.warning(
+                    self,
+                    "Создать предмет",
+                    "Выберите родителя, впишите его вручную "
+                    "или отметьте «Нет родителя».",
+                )
+                return
+
+        self._suggestion_popup.hide()
+        super().accept()
+
+    def reject(self):
+        self._suggestion_popup.hide()
+        super().reject()
+
+
 class ItemViewerFeature:
     """Запрашивает каталог у ядра и показывает окно модуля."""
 
@@ -172,6 +719,7 @@ class ItemViewerFeature:
         self._window = None
         self._request_seq = 0
         self._running = False
+        self._catalog = None
 
         # Контекст редактирования system.ltx (resolved-черновик проекта).
         self._root_path = None
@@ -181,6 +729,18 @@ class ItemViewerFeature:
         self._original_text = ""
         self._line_sources = ()
         self._saved_text = ""
+
+    def _project_overlay(self):
+        fn = getattr(self.ctx.ui, "project_overlay", None)
+        if not callable(fn):
+            return None
+        try:
+            return fn()
+        except Exception as exc:
+            self.ctx.ui.log(
+                "Слой правок проекта недоступен: %s" % exc
+            )
+            return None
 
     # -------------------------------------------------- жизненный цикл
     def show(self):
@@ -209,6 +769,11 @@ class ItemViewerFeature:
         title = "RESOLVED: %s" % rel if rel else ""
 
         draft = self.ctx.ui.resolved_draft(tab_id) if tab_id else None
+        overlay = self._project_overlay()
+        has_overlay = bool(
+            getattr(overlay, "source_files", None)
+            or getattr(overlay, "resolved_edits", None)
+        )
 
         self.ctx.ui.set_status("Предметы: сборка каталога…")
         self.ctx.ui.log("Просмотр игровых предметов: сборка каталога…")
@@ -225,6 +790,7 @@ class ItemViewerFeature:
                             forest,
                             self.session.config_dir,
                             log=log,
+                            overlay=overlay,
                         )
                     )
                 except Exception as exc:
@@ -252,7 +818,7 @@ class ItemViewerFeature:
                         forest,
                         log=log,
                         resolved_text=original_text,
-                        reuse_snapshot_cache=True,
+                        reuse_snapshot_cache=not has_overlay,
                     )
                 else:
                     catalog = self.ctx.services.build_item_catalog(
@@ -326,6 +892,7 @@ class ItemViewerFeature:
             return
 
         catalog, images, context = result
+        self._catalog = catalog
         self._apply_context(context)
 
         self.ctx.ui.set_status(
@@ -352,6 +919,7 @@ class ItemViewerFeature:
                 on_insert_line=self._insert_line,
                 on_go_to_line=self._go_to_line,
                 on_save=self._save_now,
+                on_create_item=self._create_item,
             )
 
         self._window.set_catalog(catalog, images)
@@ -366,6 +934,92 @@ class ItemViewerFeature:
         self._original_text = str(context.get("original_text") or "")
         self._saved_text = str(context.get("saved_text") or "")
         self._line_sources = tuple(context.get("line_sources") or ())
+
+    @staticmethod
+    def _same_path(left, right):
+        try:
+            return os.path.normcase(
+                os.path.abspath(str(left))
+            ) == os.path.normcase(os.path.abspath(str(right)))
+        except (TypeError, ValueError, OSError):
+            return False
+
+    def _new_file_for_line(self, line_number):
+        overlay = self._project_overlay()
+        if overlay is None:
+            return None
+
+        new_files = {
+            Path(path) for path in (overlay.new_files or ())
+        }
+        if not new_files:
+            return None
+
+        index = int(line_number) - 1
+        if 0 <= index < len(self._line_sources):
+            source = self._line_sources[index]
+            path = getattr(source, "path", None)
+            if path is not None:
+                for candidate in new_files:
+                    if self._same_path(candidate, path):
+                        return candidate
+
+        section = _ltx_section_at_line(self._resolved_text, line_number)
+        if not section:
+            return None
+
+        for path, text in (overlay.source_files or {}).items():
+            candidate = Path(path)
+            if candidate not in new_files:
+                continue
+            lines = str(text or "").replace("\r\n", "\n").split("\n")
+            if _ltx_section_bounds(lines, section) is not None:
+                return candidate
+
+        return None
+
+    def _edit_new_item_file(self, line_number, action, new_line=None):
+        path = self._new_file_for_line(line_number)
+        if path is None:
+            return False
+
+        section = _ltx_section_at_line(self._resolved_text, line_number)
+        if not section:
+            return False
+
+        lines = self._resolved_text.split("\n")
+        index = int(line_number) - 1
+        old_line = lines[index] if 0 <= index < len(lines) else ""
+        key = _ltx_key_from_line(old_line)
+
+        text = self.ctx.ui.read_project_text(path)
+        updated = _edit_section_text(
+            text,
+            section,
+            key,
+            action,
+            new_line=new_line,
+        )
+        if updated is None:
+            self.ctx.ui.show_error(
+                "Не удалось изменить секцию [%s] в %s"
+                % (section, Path(path).name)
+            )
+            return False
+
+        if not self.ctx.ui.write_project_text(path, updated):
+            return False
+
+        self.ctx.ui.log(
+            "Проект: изменён новый файл %s (секция [%s])"
+            % (Path(path).name, section)
+        )
+        self.ctx.ui.set_status(
+            "Изменения записаны в %s" % Path(path).name,
+            5000,
+        )
+        self.show()
+        return True
 
     def _can_edit(self):
         return bool(
@@ -426,6 +1080,13 @@ class ItemViewerFeature:
             self.ctx.ui.show_error("Строка %s не найдена." % line_number)
             return False
 
+        if self._new_file_for_line(line_number) is not None:
+            return self._edit_new_item_file(
+                line_number,
+                "replace",
+                new_line=new_line,
+            )
+
         new_line = str(new_line).rstrip("\r\n")
         lines[index] = new_line
         return self._commit_text(
@@ -444,6 +1105,9 @@ class ItemViewerFeature:
         if index < 0 or index >= len(lines):
             self.ctx.ui.show_error("Строка %s не найдена." % line_number)
             return False
+
+        if self._new_file_for_line(line_number) is not None:
+            return self._edit_new_item_file(line_number, "delete")
 
         sources = list(self._line_sources)
         while len(sources) < len(lines):
@@ -468,6 +1132,13 @@ class ItemViewerFeature:
         if line_number < 0 or line_number > len(lines):
             self.ctx.ui.show_error("Строка %s не найдена." % line_number)
             return False
+
+        if self._new_file_for_line(line_number) is not None:
+            return self._edit_new_item_file(
+                line_number,
+                "insert",
+                new_line=new_line,
+            )
 
         index = line_number
         line_count = len(lines)
@@ -517,6 +1188,173 @@ class ItemViewerFeature:
                 4000,
             )
 
+    # -------------------------------------------------- создание предмета
+    def _parent_fields(self, parent):
+        if not parent:
+            return ()
+
+        wanted = str(parent).strip().lower()
+        catalog = self._catalog
+        fields = []
+
+        # Поля самой секции в том порядке, как они записаны в документе.
+        for section in getattr(catalog, "sections", ()) or ():
+            if section.name.lower() == wanted:
+                fields.extend(section.fields or ())
+                break
+
+        # Эффективные поля предмета включают значения по умолчанию
+        # (иконка и сетка), даже если ключ не записан явно.
+        for entry in getattr(catalog, "items", ()) or ():
+            if entry.section.lower() == wanted:
+                fields.extend(field.key for field in entry.fields)
+                break
+
+        result = []
+        seen = set()
+        for key in fields:
+            key = str(key or "").strip()
+            if not key or key.lower() in seen:
+                continue
+            seen.add(key.lower())
+            result.append(key)
+        return tuple(result)
+
+    def _create_item(self, section, parent):
+        """Добавить новый предмет в файлы проекта."""
+        if not self._can_edit():
+            self.ctx.ui.show_error(
+                "Создайте проект, чтобы добавлять предметы."
+            )
+            return False
+
+        section = str(section or "").strip()
+        parent = str(parent or "").strip() or None
+        if not section:
+            self.ctx.ui.show_error("Не задано имя секции предмета.")
+            return False
+        if re.search(r"[\[\]:\r\n]", section):
+            self.ctx.ui.show_error(
+                "Имя секции не должно содержать [ ], : или перевод строки."
+            )
+            return False
+
+        forest = self.session.forest
+        if forest is None:
+            self.ctx.ui.show_error(
+                "Дерево не построено: сначала «Чистый запуск»."
+            )
+            return False
+
+        scan_dir = self.ctx.services.forest_scan_dir(forest)
+        if scan_dir is None:
+            self.ctx.ui.show_error(
+                "Не удалось определить каталог gamedata\\configs."
+            )
+            return False
+
+        project_name = self.ctx.ui.project_name() or "project"
+        tag = _project_tag(project_name)
+
+        items_dir = Path(scan_dir) / "items"
+        text_dir = Path(scan_dir) / "text" / "rus"
+        item_path = items_dir / ("mod_item_base_~ace_%s.ltx" % tag)
+        xml_path = text_dir / ("st_ace_%s.xml" % tag)
+
+        item_text = self.ctx.ui.read_project_text(item_path)
+        xml_text = self.ctx.ui.read_project_text(xml_path)
+
+        known_sections = _declared_sections(item_text)
+        known_sections.update(
+            section_info.name.lower()
+            for section_info in (
+                getattr(self._catalog, "sections", ()) or ()
+            )
+        )
+        if section.lower() in known_sections:
+            self.ctx.ui.show_error(
+                "Секция [%s] уже существует." % section
+            )
+            return False
+
+        parent_fields = self._parent_fields(parent)
+
+        item_newline = "\r\n" if "\r\n" in item_text else "\n"
+        xml_newline = "\r\n" if "\r\n" in xml_text else "\n"
+
+        base_key = "st_ace_%s" % tag
+        existing_ids = re.findall(
+            r'<string\s+id\s*=\s*"([^"]+)"',
+            xml_text,
+            flags=re.IGNORECASE,
+        )
+        key_base = _next_localization_base(base_key, existing_ids)
+        name_key = key_base + "_name"
+        description_key = key_base + "_descr"
+
+        section_block = _build_item_section(
+            section,
+            parent,
+            parent_fields,
+            name_key,
+            description_key,
+            newline=item_newline,
+        )
+        item_text = _append_item_section(
+            item_text,
+            section_block,
+            newline=item_newline,
+        )
+        xml_text = _append_xml_strings(
+            xml_text,
+            name_key,
+            description_key,
+            newline=xml_newline,
+        )
+
+        if not self.ctx.ui.write_project_text(item_path, item_text):
+            return False
+        if not self.ctx.ui.write_project_text(xml_path, xml_text):
+            return False
+
+        self.ctx.ui.log(
+            "Проект: создан предмет [%s] (%s, %s)"
+            % (section, item_path.name, xml_path.name)
+        )
+        self.ctx.ui.set_status(
+            "Предмет [%s] добавлен в проект" % section,
+            6000,
+        )
+        self._register_virtual_files(
+            (item_path, item_text),
+            (xml_path, xml_text),
+        )
+        return True
+
+    def _register_virtual_files(self, *files):
+        """Добавить созданные черновики в текущее дерево VFS."""
+        forest = self.session.forest
+        add_file = getattr(
+            self.ctx.services,
+            "add_virtual_file",
+            None,
+        )
+        if forest is None or not callable(add_file):
+            return
+
+        added = False
+        for path, text in files:
+            try:
+                added = add_file(forest, path, text) or added
+            except Exception as exc:
+                self.ctx.ui.log(
+                    "VFS: не удалось добавить %s: %s" % (path, exc)
+                )
+
+        if added:
+            self.ctx.events.publish(Events.TREE_READY, forest)
+        self.show()
+
 
 class ItemViewerWindow(QDialog):
     """Немодальное окно: список предметов слева, поля и иконка справа."""
@@ -531,6 +1369,7 @@ class ItemViewerWindow(QDialog):
         on_insert_line=None,
         on_go_to_line=None,
         on_save=None,
+        on_create_item=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -545,6 +1384,7 @@ class ItemViewerWindow(QDialog):
         self._on_insert_line = on_insert_line
         self._on_go_to_line = on_go_to_line
         self._on_save = on_save
+        self._on_create_item = on_create_item
 
         self._catalog = None
         self._images = {}
@@ -756,6 +1596,11 @@ class ItemViewerWindow(QDialog):
 
         # -------------------------------------------------- кнопки
         buttons = QHBoxLayout()
+
+        self.create_btn = QPushButton("Создать предмет")
+        self.create_btn.clicked.connect(self._open_create_item_dialog)
+        self.create_btn.setEnabled(self._on_create_item is not None)
+        buttons.addWidget(self.create_btn)
 
         refresh_btn = QPushButton("Обновить")
         refresh_btn.clicked.connect(self._refresh)
@@ -1408,6 +2253,44 @@ class ItemViewerWindow(QDialog):
     def _refresh(self):
         if self._on_refresh is not None:
             self._on_refresh()
+
+    def _parent_candidates(self):
+        """Родители, которые встречаются хотя бы в одной секции."""
+        catalog = self._catalog
+        candidates = {
+            str(parent).strip()
+            for parent in (getattr(catalog, "parent_names", ()) or ())
+            if str(parent).strip()
+        }
+
+        # Резерв: если исходные файлы недоступны, используем токены
+        # наследования из resolved-секций, а затем все имена секций.
+        for section in getattr(catalog, "sections", ()) or ():
+            candidates.update(
+                str(parent).strip()
+                for parent in (section.parents or ())
+                if str(parent).strip()
+            )
+
+        if not candidates:
+            candidates.update(
+                section.name
+                for section in (getattr(catalog, "sections", ()) or ())
+                if section.name
+            )
+
+        return candidates
+
+    def _open_create_item_dialog(self):
+        if self._on_create_item is None:
+            return
+
+        dialog = CreateItemDialog(self._parent_candidates(), self)
+        if not dialog.exec_():
+            return
+
+        section, parent = dialog.values()
+        self._on_create_item(section, parent)
 
     def _palette(self, name, fallback=None):
         try:

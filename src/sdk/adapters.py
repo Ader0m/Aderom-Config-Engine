@@ -17,6 +17,7 @@ from .api import (
     ItemEntry,
     ItemField,
     ItemIcon,
+    ItemSection,
     SectionGraph,
     TextureRegion,
     TreeSummary,
@@ -64,12 +65,14 @@ class CoreApiAdapter:
         system = self.find_system_ltx(config_dir)
         return Path(system).parent if system is not None else None
 
-    def build_tree(self, scan_dir, system_root, log=None, clean=False):
+    def build_tree(self, scan_dir, system_root, log=None, clean=False,
+                   overlay=None):
         return self._provider.build_tree(
             scan_dir,
             system_root,
             log=log,
             clean=clean,
+            overlay=overlay,
         )
 
     def tree_summary(self, forest):
@@ -94,6 +97,17 @@ class CoreApiAdapter:
             return rel(forest, path)
         return self._provider.rel_path(forest, path)
 
+    def forest_scan_dir(self, forest):
+        value = getattr(forest, "scan_dir", None)
+        return Path(value) if value else None
+
+    def forest_system_root(self, forest):
+        value = getattr(forest, "system_root", None)
+        return Path(value) if value else None
+
+    def add_virtual_file(self, forest, path, text):
+        return self._provider.add_virtual_file(forest, path, text)
+
     def patch_target(self, forest, path):
         parents = getattr(forest, "include_parents", {}).get(path) or ()
         if not parents:
@@ -108,8 +122,12 @@ class CoreApiAdapter:
 
     # --- фоновая предсборка ------------------------------------------------
 
-    def start_prebuild(self, forest, config_dir):
-        return self._provider.start_prebuild(forest, config_dir)
+    def start_prebuild(self, forest, config_dir, overlay=None):
+        return self._provider.start_prebuild(
+            forest,
+            config_dir,
+            overlay=overlay,
+        )
 
     def prebuild_status(self):
         return self._provider.prebuild_status()
@@ -133,16 +151,24 @@ class CoreApiAdapter:
 
         return self._provider.resolver_pass(forest, config_dir, log=log)
 
-    def assemble_text(self, root_path, forest, config_dir, log=None):
+    def assemble_text(self, root_path, forest, config_dir, log=None,
+                      overlay=None):
         fn = getattr(self._provider, "assemble_text", None)
         if callable(fn):
-            return fn(root_path, forest, config_dir, log=log)
+            return fn(
+                root_path,
+                forest,
+                config_dir,
+                log=log,
+                overlay=overlay,
+            )
 
         return self._provider.resolver.assemble_text(
             root_path,
             forest,
             config_dir,
             log=log,
+            overlay=overlay,
         )
 
     def assemble_to_file(self, root_path, forest):
@@ -152,12 +178,23 @@ class CoreApiAdapter:
 
         return self._provider.assembly.assemble_to_file(root_path, forest)
 
-    def assemble_resolved(self, root_path, forest, config_dir, log=None):
+    def assemble_resolved(self, root_path, forest, config_dir, log=None,
+                          overlay=None):
         fn = getattr(self._provider, "assemble_resolved", None)
         if callable(fn):
-            return fn(root_path, forest, config_dir, log=log)
+            return fn(
+                root_path,
+                forest,
+                config_dir,
+                log=log,
+                overlay=overlay,
+            )
         return self._provider.resolver.assemble_resolved(
-            root_path, forest, config_dir, log=log,
+            root_path,
+            forest,
+            config_dir,
+            log=log,
+            overlay=overlay,
         )
 
     # --- XML-резолв -------------------------------------------------------
@@ -240,11 +277,31 @@ class CoreApiAdapter:
                 ),
             ))
 
+        sections = tuple(
+            ItemSection(
+                name=str(getattr(section, "name", "")),
+                fields=tuple(
+                    str(field)
+                    for field in (getattr(section, "fields", ()) or ())
+                ),
+                parents=tuple(
+                    str(parent)
+                    for parent in (getattr(section, "parents", ()) or ())
+                ),
+            )
+            for section in (getattr(raw, "sections", ()) or ())
+        )
+
         return ItemCatalog(
             source_path=source_path,
             items=tuple(items),
             warnings=tuple(getattr(raw, "warnings", ()) or ()),
             cache_key=str(getattr(raw, "cache_key", "") or ""),
+            sections=sections,
+            parent_names=tuple(
+                str(name)
+                for name in (getattr(raw, "parent_names", ()) or ())
+            ),
         )
 
     def read_texture_region(self, path, x, y, width, height):
@@ -293,12 +350,13 @@ class CoreApiAdapter:
     # --- граф связей и внешние инструменты -------------------------------
 
     def build_section_graph(self, forest, section_name, vfs_mode=False,
-                            log=None):
+                            log=None, overlay=None):
         graph = self._provider.build_section_graph(
             forest,
             section_name,
             vfs_mode=vfs_mode,
             log=log,
+            overlay=overlay,
         )
         return _to_section_graph_view(graph)
 
@@ -472,6 +530,27 @@ class UiApiAdapter:
 
     def is_project_active(self):
         return self._platform.is_project_active()
+
+    def project_name(self):
+        fn = getattr(self._platform, "project_name", None)
+        if callable(fn):
+            return fn()
+        return ""
+
+    def project_overlay(self):
+        fn = getattr(self._platform, "project_overlay", None)
+        if callable(fn):
+            return fn()
+        return None
+
+    def read_project_text(self, path):
+        fn = getattr(self._platform, "document_text", None)
+        if callable(fn):
+            return fn(path)
+        return ""
+
+    def write_project_text(self, path, text):
+        return self._platform.write_project_text(path, text)
 
     def resolved_draft(self, tab_id):
         return self._platform.resolved_draft(tab_id)

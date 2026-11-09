@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -6,6 +7,7 @@ from tests.support import SRC  # noqa: F401
 
 from sdk.events import Events
 from ui.platform_api import PlatformApi
+from ui.project import ProjectService
 
 
 class FakeEvents:
@@ -155,6 +157,72 @@ class PlatformApiTest(unittest.TestCase):
 
         self.assertEqual(api._pending_file_actions, {})
         self.assertEqual(api.window.editor.widget.lines, [])
+
+
+class _RestoreResolver:
+    def __init__(self):
+        self.invalidations = 0
+
+    def invalidate_cache(self):
+        self.invalidations += 1
+
+
+class _RestoreServices:
+    def __init__(self):
+        self.resolver = _RestoreResolver()
+
+    def add_virtual_file(self, forest, path, text):
+        if path in forest.files:
+            return False
+        forest.files.append(Path(path))
+        return True
+
+    def remove_virtual_file(self, forest, path):
+        if path not in forest.files:
+            return False
+        forest.files = [item for item in forest.files if item != path]
+        return True
+
+
+class _RestoreForest:
+    def __init__(self):
+        self.files = []
+        self.xml_files = []
+
+
+class ProjectVfsRestoreTest(unittest.TestCase):
+    def test_loading_project_adds_and_removes_new_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            events = FakeEvents()
+            commands = FakeCommands()
+            api = PlatformApi(events, commands, None, None, None)
+            api.window = FakeWindow()
+            api.services = _RestoreServices()
+            api._forest = _RestoreForest()
+            api.project = ProjectService(Path(d) / "projects")
+            api.project.create("Proj")
+
+            path = (
+                Path(d)
+                / "gamedata"
+                / "configs"
+                / "items"
+                / "mod_item_base_~ace_p.ltx"
+            )
+            api.project.save_draft(path, "[item]\n")
+
+            added, removed = api._restore_project_virtual_files()
+
+            self.assertEqual((added, removed), (1, 0))
+            self.assertIn(path, api._forest.files)
+            self.assertEqual(api.services.resolver.invalidations, 1)
+
+            api.project.remove_draft(path)
+            added, removed = api._restore_project_virtual_files()
+
+            self.assertEqual((added, removed), (0, 1))
+            self.assertNotIn(path, api._forest.files)
+            self.assertEqual(api.services.resolver.invalidations, 2)
 
 
 if __name__ == "__main__":

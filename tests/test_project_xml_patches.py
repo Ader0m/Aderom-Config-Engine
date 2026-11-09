@@ -166,6 +166,8 @@ class ProjectXmlPatchTest(unittest.TestCase):
         self.assertEqual(item.plan.xml_mode, "mixed")
 
     def test_resolved_xml_preview(self):
+        self.project.set_patch_mode("in_place")
+        self.project.set_xml_patch_mode("dxml_lua")
         self.project.update_resolved_draft(
             "tab-xml",
             self.source,
@@ -183,7 +185,7 @@ class ProjectXmlPatchTest(unittest.TestCase):
         self.assertTrue(item.ok, item.error)
         self.assertEqual(item.plan.xml_mode, "dxml_lua")
 
-    def test_all_in_one_combines_xml_additions(self):
+    def test_root_combines_xml_additions(self):
         second = self.config_dir / "ui" / "second.xml"
         second.write_bytes(
             """<root><item id="x" width="1">x</item></root>""".encode(
@@ -193,7 +195,7 @@ class ProjectXmlPatchTest(unittest.TestCase):
         self.forest.xml_files.append(second)
         self.forest.rel_paths[second] = r"ui\second.xml"
 
-        self.project.set_patch_mode("all_in_one")
+        self.project.set_patch_mode("root")
         self.project.update_draft(
             self.source,
             """<root>

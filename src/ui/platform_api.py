@@ -14,7 +14,7 @@ from pathlib import Path
 from PyQt5.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from core.tools.fs import read_text_safe, read_xml_text
-from sdk.api import ResolvedDraftInfo
+from sdk.api import ProjectOverlay, ResolvedDraftInfo
 from sdk.events import Events
 
 from .file_open_router import FileOpenRouter
@@ -62,6 +62,7 @@ class PlatformApi:
         self.project = ProjectService(projects_dir)
         self._forest = None
         self._override_theme_enabled = None
+        self._virtual_paths = set()
 
         # Отложенная навигация: ключ — нормализованный путь файла.
         # Запрос живёт до события FILE_OPENED ровно для этого пути.
@@ -184,6 +185,120 @@ class PlatformApi:
 
     def is_project_active(self):
         return self.project.is_active
+
+    def project_name(self):
+        if not self.project.is_active:
+            return ""
+        return str(self.project.active.name or "")
+
+    def project_overlay(self):
+        """Единый слой правок активного проекта для VFS."""
+        if not self.project.is_active:
+            return ProjectOverlay()
+
+        source_files = {}
+        new_files = set()
+        for draft in self.project.active.drafts.values():
+            path = Path(draft.path)
+            source_files[path] = str(draft.current_text or "")
+            if draft.is_new:
+                new_files.add(path)
+
+        resolved_edits = {}
+        for draft in self.project.active.resolved_drafts.values():
+            resolved_edits[Path(draft.root_path)] = (
+                str(draft.original_text or ""),
+                str(draft.current_text or ""),
+                tuple(draft.line_sources or ()),
+            )
+
+        return ProjectOverlay(
+            source_files=source_files,
+            resolved_edits=resolved_edits,
+            new_files=frozenset(new_files),
+        )
+
+    def _restore_project_virtual_files(self):
+        """Восстановить новые файлы проекта в текущем дереве VFS."""
+        forest = self._forest
+        if forest is None:
+            return 0, 0
+
+        overlay = self.project_overlay()
+        wanted = {
+            Path(path)
+            for path in overlay.source_files
+            if Path(path).suffix.lower() in (".ltx", ".xml")
+        }
+
+        removed = 0
+        for path in list(self._virtual_paths - wanted):
+            try:
+                if self.services.remove_virtual_file(forest, path):
+                    removed += 1
+            except Exception as exc:
+                self.log("Проект: не удалось убрать %s из VFS: %s" % (path, exc))
+            self._virtual_paths.discard(path)
+
+        added = 0
+        for path, text in overlay.source_files.items():
+            path = Path(path)
+            if path.suffix.lower() not in (".ltx", ".xml"):
+                continue
+            if path in forest.files or path in forest.xml_files:
+                continue
+            try:
+                if self.services.add_virtual_file(forest, path, text):
+                    self._virtual_paths.add(path)
+                    added += 1
+            except Exception as exc:
+                self.log(
+                    "Проект: не удалось добавить %s в VFS: %s"
+                    % (path, exc)
+                )
+
+        if added or removed:
+            self.events.publish(Events.TREE_READY, forest)
+            try:
+                self.services.resolver.invalidate_cache()
+            except Exception:
+                pass
+            self.log(
+                "Проект: VFS обновлён — добавлено файлов: %d, удалено: %d"
+                % (added, removed)
+            )
+        return added, removed
+
+    def write_project_text(self, path, text):
+        """Сохранить новый текст файла в черновик активного проекта."""
+        if not self.project.is_active:
+            self.set_status(
+                "Создайте проект, чтобы создавать файлы",
+                7000,
+            )
+            return False
+
+        try:
+            self.project.save_draft(path, text)
+        except ProjectError as exc:
+            self.show_error(str(exc))
+            return False
+
+        try:
+            self.services.resolver.invalidate_cache()
+        except Exception as exc:
+            self.log("Проект: не удалось сбросить кэш резолва: %s" % exc)
+
+        if self.window is not None:
+            editor = getattr(self.window, "editor", None)
+            if editor is not None:
+                try:
+                    editor.mark_clean(path, text)
+                except Exception:
+                    pass
+
+        self._update_project_status()
+        return True
 
     def resolved_draft(self, tab_id):
         if not self.project.is_active:
@@ -358,6 +473,14 @@ class PlatformApi:
         except ProjectError as exc:
             self.log("Проект: не удалось обновить черновик: %s" % exc)
             return
+
+        # Черновик входит в VFS: ранее собранные корни больше нельзя
+        # считать актуальными, даже если файл на диске не менялся.
+        try:
+            self.services.resolver.invalidate_cache()
+        except Exception as exc:
+            self.log("Проект: не удалось сбросить кэш резолва: %s" % exc)
+
         self._update_project_status()
 
     def on_resolved_changed(self, tab_id, view, text):
@@ -379,6 +502,11 @@ class PlatformApi:
         except ProjectError as exc:
             self.log("Проект: не удалось обновить resolved-черновик: %s" % exc)
             return
+
+        try:
+            self.services.resolver.invalidate_cache()
+        except Exception as exc:
+            self.log("Проект: не удалось сбросить кэш резолва: %s" % exc)
 
         self._update_project_status()
 
@@ -458,6 +586,7 @@ class PlatformApi:
             self.show_error(str(exc))
             return
 
+        self._restore_project_virtual_files()
         self.window.editor.set_editable(True)
         self._reload_open_documents()
         self._update_project_status()
@@ -491,6 +620,7 @@ class PlatformApi:
             self.show_error(str(exc))
             return
 
+        self._restore_project_virtual_files()
         self.window.editor.set_editable(True)
         self._reload_open_documents()
         self._update_project_status()
@@ -503,6 +633,8 @@ class PlatformApi:
         except ProjectError as exc:
             self.show_error(str(exc))
             return False
+
+        self._restore_project_virtual_files()
 
         if self.window is not None:
             self.window.editor.set_editable(False)

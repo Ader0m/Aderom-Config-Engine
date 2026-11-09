@@ -108,16 +108,16 @@ class ProjectServiceTest(unittest.TestCase):
             service = ProjectService(Path(d) / "projects")
             project = service.create("Mode")
 
-            self.assertEqual(service.patch_mode(), "one_by_one")
+            self.assertEqual(service.patch_mode(), "root")
 
-            service.set_patch_mode("all_in_one")
-            self.assertEqual(service.patch_mode(), "all_in_one")
+            service.set_patch_mode("root")
+            self.assertEqual(service.patch_mode(), "root")
 
             project_id = project.id
             service.close()
             service.load(project_id)
 
-            self.assertEqual(service.patch_mode(), "all_in_one")
+            self.assertEqual(service.patch_mode(), "root")
 
     def test_autosave_and_flush(self):
         with tempfile.TemporaryDirectory() as d:
@@ -289,7 +289,7 @@ class ProjectServiceTest(unittest.TestCase):
             self.assertIn("cost = 150", item.generated.text)
             self.assertIn('name = "New"', item.generated.text)
 
-    def test_all_in_one_merges_files_of_one_root(self):
+    def test_root_merges_files_of_one_root(self):
         with tempfile.TemporaryDirectory() as d:
             cfg = Path(d) / "gamedata" / "configs"
             cfg.mkdir(parents=True)
@@ -327,7 +327,7 @@ class ProjectServiceTest(unittest.TestCase):
             )
 
             project = ProjectService(Path(d) / "projects")
-            project.create("All in one", save_mode="all_in_one")
+            project.create("Root", save_mode="root")
             project.update_draft(source_a, "[a]\nx = 2\n")
             project.update_draft(source_b, "[b]\ny = 2\n")
 
@@ -543,7 +543,7 @@ class ProjectServiceTest(unittest.TestCase):
             self.assertNotEqual(baseline, edited)
 
             project = ProjectService(Path(d) / "projects")
-            project.create("Resolved Preview")
+            project.create("Resolved Preview", save_mode="in_place")
             project.update_resolved_draft(
                 "resolved:system",
                 root,
@@ -559,11 +559,11 @@ class ProjectServiceTest(unittest.TestCase):
             item = preview.items[0]
             self.assertEqual(item.kind, "resolved")
             self.assertTrue(item.ok, item.error)
-            self.assertEqual(item.plan.target.root_path, root)
+            self.assertEqual(item.plan.target.root_path, source)
             self.assertIn("cost = 150", item.generated.text)
 
 
-    def test_all_in_one_same_key_conflict_uses_later_path(self):
+    def test_root_same_key_conflict_uses_later_path(self):
         with tempfile.TemporaryDirectory() as d:
             cfg = Path(d) / "gamedata" / "configs"
             cfg.mkdir(parents=True)
@@ -579,7 +579,7 @@ class ProjectServiceTest(unittest.TestCase):
 
             services, forest = self._services(d, cfg, root)
             project = ProjectService(Path(d) / "projects")
-            project.create("Conflict", save_mode="all_in_one")
+            project.create("Conflict", save_mode="root")
             project.update_draft(source_a, "[w]\ncost = 300\n")
             project.update_draft(source_b, "[w]\ncost = 400\n")
 
@@ -601,7 +601,7 @@ class ProjectServiceTest(unittest.TestCase):
                 item.notes,
             )
 
-    def test_all_in_one_structural_conflict_blocks(self):
+    def test_root_structural_conflict_blocks(self):
         with tempfile.TemporaryDirectory() as d:
             cfg = Path(d) / "gamedata" / "configs"
             cfg.mkdir(parents=True)
@@ -620,7 +620,7 @@ class ProjectServiceTest(unittest.TestCase):
 
             services, forest = self._services(d, cfg, root)
             project = ProjectService(Path(d) / "projects")
-            project.create("Structural", save_mode="all_in_one")
+            project.create("Structural", save_mode="root")
             project.update_draft(source_a, "[a]\nx = 1\n")
             project.update_draft(source_b, "[b]\ny = 3\n")
 
@@ -638,7 +638,7 @@ class ProjectServiceTest(unittest.TestCase):
                 [(issue.code, issue.message) for issue in item.plan.errors()],
             )
 
-    def test_all_in_one_different_roots_produces_separate_items(self):
+    def test_root_different_roots_produces_separate_items(self):
         with tempfile.TemporaryDirectory() as d:
             cfg = Path(d) / "gamedata" / "configs"
             cfg.mkdir(parents=True)
@@ -659,7 +659,7 @@ class ProjectServiceTest(unittest.TestCase):
 
             services, forest = self._services(d, cfg, root_a)
             project = ProjectService(Path(d) / "projects")
-            project.create("Roots", save_mode="all_in_one")
+            project.create("Roots", save_mode="root")
             project.update_draft(source_a, "[w]\ncost = 3\n")
             project.update_draft(source_b, "[w]\ncost = 4\n")
 
