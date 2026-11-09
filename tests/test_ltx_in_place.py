@@ -58,10 +58,28 @@ class LtxInPlaceTest(unittest.TestCase):
         self.assertEqual(
             file.relative_path,
             Path("gamedata") / "configs" / "items"
-            / "mod_items_~ace_items_proj.ltx",
+            / "mod_items_~ace_proj.ltx",
         )
         self.assertIn("![item]", file.text)
         self.assertIn("x = new", file.text)
+
+    def test_resolved_without_line_sources_uses_opened_file(self):
+        forest = Forest(self.config, [self.source])
+        result = LtxInPlaceService().plan(
+            self.source,
+            "[item]\nx = old\n",
+            "[item]\nx = new\n",
+            line_sources=(),
+            forest=forest,
+            options=PatchOptions(project_tag="proj"),
+            resolved=True,
+        )
+        self.assertTrue(result.generated.verification.ok)
+        self.assertEqual(
+            result.generated.files[0].relative_path.name,
+            "mod_items_~ace_proj.ltx",
+        )
+        self.assertIn("x = new", result.generated.files[0].text)
 
     def test_resolved_line_with_owner_patches_owner_file(self):
         root = self.config / "system.ltx"
@@ -84,12 +102,12 @@ class LtxInPlaceTest(unittest.TestCase):
         file = result.generated.files[0]
         self.assertEqual(
             file.relative_path,
-            Path("gamedata") / "configs"
-            / "mod_system_~ace_items_proj.ltx",
+            Path("gamedata") / "configs" / "items"
+            / "mod_items_~ace_proj.ltx",
         )
         self.assertIn("x = new", file.text)
 
-    def test_original_line_is_bound_to_load_root(self):
+    def test_original_line_patches_opened_file_not_root(self):
         root = self.config / "system.ltx"
         root.write_bytes(b"[item]\nx = old\n")
         child = self.source
@@ -108,10 +126,10 @@ class LtxInPlaceTest(unittest.TestCase):
             resolved=True,
         )
         file = result.generated.files[0]
-        self.assertEqual(file.relative_path.name, "mod_system_~ace_items_proj.ltx")
+        self.assertEqual(file.relative_path.name, "mod_items_~ace_proj.ltx")
         self.assertEqual(
             file.relative_path.parent,
-            Path("gamedata") / "configs",
+            Path("gamedata") / "configs" / "items",
         )
 
     def test_patch_owner_creates_patch_for_root(self):
@@ -133,7 +151,7 @@ class LtxInPlaceTest(unittest.TestCase):
             resolved=True,
         )
         file = result.generated.files[0]
-        self.assertEqual(file.relative_path.name, "mod_system_~ace_system_old_proj.ltx")
+        self.assertEqual(file.relative_path.name, "mod_system_~ace_proj.ltx")
         self.assertIn("x = new", file.text)
 
     def test_project_explicit_in_place_mode(self):
@@ -148,7 +166,7 @@ class LtxInPlaceTest(unittest.TestCase):
         self.assertEqual(item.plan.format, "ltx_in_place")
         self.assertEqual(
             item.generated.files[0].relative_path.name,
-            "mod_items_~ace_items_inplace.ltx",
+            "mod_items_~ace_inplace.ltx",
         )
 
     def test_resolved_line_sources_persist(self):

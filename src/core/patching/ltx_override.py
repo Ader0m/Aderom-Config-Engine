@@ -14,7 +14,13 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..documents.document_diff import DocumentChange
-from ..documents.resolved_edit import ResolvedLineChange, analyze_resolved_changes
+from ..documents.document_model import parse_key_line, parse_section_header
+from ..documents.resolved_edit import (
+    ResolvedLineChange,
+    analyze_resolved_changes,
+    line_context,
+)
+from ..fs import strip_comments
 from .patch_models import (
     GeneratedPatch,
     PatchFile,
@@ -201,6 +207,53 @@ def _find_winner_line(
     return 0
 
 
+def _find_section_key_line(
+    path: Path,
+    section: Optional[str],
+    key: Optional[str],
+    used: Optional[set] = None,
+) -> int:
+    """Найти строку ключа по секции и имени.
+
+    Нужен, когда resolved-строка не совпадает с физической строкой
+    победителя (например, из-за уже применённого DLTX-патча).
+    """
+    if not section or not key:
+        return 0
+
+    text, _encoding = _read_ltx(path)
+    used = used or set()
+    current = None
+    wanted_section = str(section).lower()
+    wanted_key = str(key).lower()
+
+    for number, line in enumerate(text.splitlines(), 1):
+        clean = strip_comments(line).strip()
+        if not clean:
+            continue
+
+        header = parse_section_header(clean)
+        if header is not None:
+            current = header[1]
+            continue
+
+        parsed = parse_key_line(clean)
+        if parsed is None:
+            continue
+
+        operation, found_key, _raw, has_value = parsed
+        if (
+            operation == "set"
+            and has_value
+            and current == wanted_section
+            and found_key.lower() == wanted_key
+            and number not in used
+        ):
+            return number
+
+    return 0
+
+
 def _apply_replacements(
     path: Path,
     replacements: Dict[int, str],
@@ -278,6 +331,9 @@ class LtxOverrideService:
                 # построчная замена.
                 resolved_changes = []
                 sources = list(line_sources or ())
+                sections, keys, _section_lines, _key_lines = line_context(
+                    old_lines
+                )
                 for index, (old_line, new_line) in enumerate(
                     zip(old_lines, new_lines)
                 ):
@@ -288,6 +344,14 @@ class LtxOverrideService:
                             line_number=index + 1,
                             old_line=old_line,
                             new_line=new_line,
+                            section=(
+                                sections[index]
+                                if index < len(sections)
+                                else None
+                            ),
+                            key=(
+                                keys[index] if index < len(keys) else None
+                            ),
                             source=(
                                 sources[index]
                                 if index < len(sources)
@@ -325,37 +389,16 @@ class LtxOverrideService:
                         PatchIssue(
                             code="ltx_override_no_source",
                             message=(
-                                "Строка %d: неизвестен файл-победитель"
+                                "Строка %d: неизвестен файл-победитель; "
+                                "используется открытый файл"
                                 % change.line_number
                             ),
                             severity="warning",
                         )
                     )
-                    continue
 
-                if getattr(source, "kind", None) not in (
-                    "original",
-                    "file",
-                    "patch",
-                ):
-                    warnings.append(
-                        PatchIssue(
-                            code="ltx_override_not_physical",
-                            message=(
-                                "Строка %d: победитель '%s' не является "
-                                "LTX-файлом; изменение пропущено"
-                                % (
-                                    change.line_number,
-                                    getattr(source, "display", "")
-                                    or getattr(source, "path", "?"),
-                                )
-                            ),
-                            severity="warning",
-                        )
-                    )
-                    continue
-
-                if getattr(source, "kind", None) == "patch":
+                source_kind = getattr(source, "kind", None)
+                if source_kind == "patch":
                     warnings.append(
                         PatchIssue(
                             code="ltx_override_dltx_patch_winner",
@@ -373,9 +416,9 @@ class LtxOverrideService:
                         )
                     )
 
-                if getattr(source, "kind", None) == "original":
-                    # Строка помечена как «оригинал»: меняется сам
-                    # открытый файл, а не корень его include-дерева.
+                if source is None or source_kind == "original":
+                    # Строка помечена как «оригинал» или владелец
+                    # неизвестен: меняется сам открытый файл.
                     winner = source_path
                 else:
                     winner = _resolve_source_path(
@@ -386,8 +429,24 @@ class LtxOverrideService:
                     )
                 if winner is None:
                     fallback = getattr(source, "path", None)
-                    if fallback is not None:
+                    if fallback is not None and Path(fallback).is_file():
                         winner = Path(fallback)
+                if winner is None and Path(source_path).is_file():
+                    winner = source_path
+                    warnings.append(
+                        PatchIssue(
+                            code="ltx_override_opened_fallback",
+                            message=(
+                                "Строка %d: владелец недоступен; "
+                                "используется открытый файл %s"
+                                % (
+                                    change.line_number,
+                                    Path(source_path).name,
+                                )
+                            ),
+                            severity="warning",
+                        )
+                    )
                 if winner is None:
                     warnings.append(
                         PatchIssue(
@@ -413,20 +472,36 @@ class LtxOverrideService:
                         change.old_line,
                         used=used_lines.get(winner),
                     )
+                if line_number <= 0:
+                    # Resolved-строка могла быть изменена DLTX-патчем,
+                    # поэтому ищем ключ по секции, а не по тексту строки.
+                    line_number = _find_section_key_line(
+                        winner,
+                        change.section,
+                        change.key,
+                        used=used_lines.get(winner),
+                    )
                 if line_number > 0:
                     used_lines.setdefault(winner, set()).add(line_number)
                 if line_number <= 0:
-                    # Корень загрузки не содержит эту строку (она пришла
-                    # из include). Используем фактический файл-победитель.
+                    # Победитель не содержит эту строку: используем
+                    # фактический файл, если он отличается от корня.
                     fallback = getattr(source, "path", None)
                     if fallback is not None:
                         fallback = Path(fallback)
-                        if fallback != winner:
+                        if fallback != winner and fallback.is_file():
                             alt_line = _find_winner_line(
                                 fallback,
                                 change.old_line,
                                 used=used_lines.get(fallback),
                             )
+                            if alt_line <= 0:
+                                alt_line = _find_section_key_line(
+                                    fallback,
+                                    change.section,
+                                    change.key,
+                                    used=used_lines.get(fallback),
+                                )
                             if alt_line > 0:
                                 warnings.append(
                                     PatchIssue(

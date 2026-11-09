@@ -3,10 +3,9 @@
 
 Режим отличается от Root тем, что не собирает изменения всех файлов
 одного корня в один патч. Для каждой заменённой строки определяется
-файл-победитель, и создаётся отдельный DLTX-патч с суффиксом этого файла
-(``mod_<корень>_~<проект>_<победитель>.ltx``). Патч привязан к корню
-загрузки, потому что игра загружает ``mod_*`` только для корня, но
-заменяет именно строку победителя.
+файл-победитель, и создаётся отдельный DLTX-патч рядом с этим файлом
+(``mod_<победитель>_~<проект>.ltx``). Так патч остаётся в той же папке
+виртуальной файловой системы, где находится изменённый файл.
 
 Правила выбора победителя:
 
@@ -39,6 +38,7 @@ from ..documents.document_model import (
 from ..fs import strip_comments
 from .dltx_generator import DltxGenerator
 from .ltx_override import (
+    _find_section_key_line,
     _find_winner_line,
     _resolve_source_path,
 )
@@ -55,7 +55,6 @@ from .patch_targets import (
     choose_load_last_suffix,
     patch_file_name,
     resolve_patch_target,
-    sanitize_name,
 )
 
 
@@ -84,15 +83,8 @@ def _existing_names(folder: Path) -> List[str]:
         return []
 
 
-def _preferred_suffix(options: PatchOptions, winner: Path) -> str:
+def _preferred_suffix(options: PatchOptions) -> str:
     suffix = options.suffix or "ace"
-    name = Path(winner).stem
-    if name.lower().startswith("mod_"):
-        name = name[4:]
-    suffix = "%s_%s" % (
-        suffix,
-        sanitize_name(name, "ltx"),
-    )
     if options.project_tag:
         suffix = "%s_%s" % (suffix, options.project_tag)
     return suffix
@@ -109,10 +101,13 @@ def _relative_parent(forest, path: Path) -> Path:
 
 
 def _target_root(winner: Path, forest) -> Tuple[Path, bool]:
-    """Корень загрузки, к которому привязывается патч-победитель.
+    """Файл, рядом с которым создаётся DLTX-патч.
 
-    DLTX-патч загружается только для корневого файла, поэтому патч для
-    include-файла всё равно создаётся с именем ``mod_<root>_*.ltx``.
+    Обычный победитель (оригинал, include-файл, файл без резолва) —
+    патч создаётся рядом с ним и называется по нему. Если победитель —
+    чужой DLTX-патч, используется его корень загрузки: иначе имя
+    ``mod_mod_*`` не имело бы смысла.
+
     Возвращает ``(root, is_existing_patch)``.
     """
     if winner.name.lower().startswith("mod_"):
@@ -124,13 +119,7 @@ def _target_root(winner: Path, forest) -> Tuple[Path, bool]:
         if root is None or Path(root) == winner:
             root = _root_from_patch_name(winner, forest) or root
         return Path(root or winner), True
-
-    try:
-        target = resolve_patch_target(forest, winner)
-    except Exception:
-        target = None
-    root = getattr(target, "root_path", None) if target is not None else None
-    return Path(root or winner), False
+    return winner, False
 
 
 def _root_from_patch_name(winner: Path, forest) -> Optional[Path]:
@@ -364,6 +353,22 @@ class LtxInPlaceService:
                         severity="warning",
                     )
                 )
+            if winner is None and Path(source_path).is_file():
+                winner = source_path
+                warnings.append(
+                    PatchIssue(
+                        code="ltx_in_place_opened_fallback",
+                        message=(
+                            "Строка %d: владелец недоступен; используется "
+                            "открытый файл %s"
+                            % (
+                                change.line_number,
+                                Path(source_path).name,
+                            )
+                        ),
+                        severity="warning",
+                    )
+                )
             if winner is None:
                 warnings.append(
                     PatchIssue(
@@ -400,6 +405,13 @@ class LtxInPlaceService:
                 line_number = _find_winner_line(
                     winner,
                     change.old_line,
+                    used=used_lines.get(winner),
+                )
+            if line_number <= 0:
+                line_number = _find_section_key_line(
+                    winner,
+                    change.section,
+                    change.key,
                     used=used_lines.get(winner),
                 )
             if line_number > 0:
@@ -577,23 +589,11 @@ class LtxInPlaceService:
                         severity="warning",
                     )
                 )
-            elif root != winner:
-                warnings.append(
-                    PatchIssue(
-                        code="ltx_in_place_root_binding",
-                        message=(
-                            "Победитель %s входит в корень %s; DLTX-патч "
-                            "создаётся для корня и заменяет строку "
-                            "победителя" % (winner.name, root.name)
-                        ),
-                        severity="warning",
-                    )
-                )
 
             suffix = choose_load_last_suffix(
                 root,
                 _existing_names(Path(root).parent),
-                _preferred_suffix(options, winner),
+                _preferred_suffix(options),
             )
             patch_rel = (
                 _relative_parent(forest, root)
@@ -668,7 +668,7 @@ class LtxInPlaceService:
             suffix = choose_load_last_suffix(
                 root,
                 _existing_names(Path(root).parent),
-                _preferred_suffix(options, source_path),
+                _preferred_suffix(options),
             )
             plan = replace(
                 plan,

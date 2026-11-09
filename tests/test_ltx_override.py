@@ -104,6 +104,41 @@ class LtxOverrideTest(unittest.TestCase):
         self.assertEqual(item.plan.format, "ltx_override")
         self.assertIn("x = new", item.generated.files[0].text)
 
+    def test_project_override_resolved_without_sources(self):
+        projects = ProjectService(Path(self.temp.name) / "projects")
+        projects.create("override", save_mode="override")
+        projects.update_resolved_draft(
+            "resolved:items",
+            self.source,
+            "items.ltx (resolved)",
+            "[item]\nx = old\n",
+            "[item]\nx = new\n",
+            line_sources=(),
+        )
+        preview = projects.build_preview(OverrideServices(), self.forest)
+        self.assertEqual(len(preview.items), 1)
+        item = preview.items[0]
+        self.assertTrue(item.ok, item.error)
+        self.assertEqual(item.plan.format, "ltx_override")
+        self.assertIn("x = new", item.generated.files[0].text)
+
+    def test_resolved_without_line_sources_uses_opened_file(self):
+        result = self.service.plan(
+            self.source,
+            "[item]\nx = old\n",
+            "[item]\nx = new\n",
+            line_sources=(),
+            forest=self.forest,
+            options=PatchOptions(),
+            resolved=True,
+        )
+        self.assertTrue(result.generated.verification.ok)
+        self.assertEqual(
+            result.generated.files[0].relative_path,
+            Path("gamedata") / "configs" / "items" / "items.ltx",
+        )
+        self.assertIn("x = new", result.generated.files[0].text)
+
     def test_resolved_file_winner_is_copied(self):
         child = self.config / "items" / "child.ltx"
         child.write_bytes(b"[item]\nx = old\n")
