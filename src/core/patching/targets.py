@@ -351,13 +351,27 @@ def validate_patch_files(
     generated,
     allowed_configs=(".ltx", ".xml"),
     allow_scripts: bool = False,
+    asset_rules=None,
 ) -> Tuple[bool, str]:
     """Проверить относительные пути файлов сгенерированного патча.
 
     ``allowed_configs`` — разрешённые расширения в ``gamedata/configs``;
     ``None`` означает «любое расширение». ``allow_scripts`` разрешает
     DXML-скрипт строго в ``gamedata/scripts/modxml_*.script``.
+    ``asset_rules`` — ``{каталог: (расширения, ...)}`` для двоичных
+    ресурсов, зарегистрированных модулями (например,
+    ``{"sounds": (".ogg",)}``).
     """
+    rules = {}
+    for root, suffixes in (asset_rules or {}).items():
+        normalized = {
+            str(suffix).lower()
+            for suffix in (suffixes or ())
+            if str(suffix)
+        }
+        if normalized:
+            rules[str(root).lower()] = normalized
+
     for file in getattr(generated, "files", ()) or ():
         rel = Path(file.relative_path)
 
@@ -377,6 +391,19 @@ def validate_patch_files(
                     "В gamedata/configs недопустимое расширение: %s" % rel
                 )
             continue
+
+        if len(parts) >= 2 and parts[0] == "gamedata":
+            root = parts[1]
+            if root in rules:
+                if (
+                    rel.suffix.lower() in rules[root]
+                    and len(parts) >= 3
+                ):
+                    continue
+                return False, (
+                    "В gamedata/%s недопустимый ресурс: %s"
+                    % (root, rel)
+                )
 
         if allow_scripts and tuple(parts[:2]) == ("gamedata", "scripts"):
             if rel.suffix.lower() != ".script":

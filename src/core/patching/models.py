@@ -140,11 +140,16 @@ class PatchPlan:
 
 @dataclass(frozen=True)
 class PatchFile:
-    """Файл, который нужно записать в патч-мод."""
+    """Файл, который нужно записать в патч-мод.
+
+    Для текстовых форматов используется ``text``; для двоичных ресурсов
+    (например, ``.ogg``) — ``data``. ``data`` имеет приоритет.
+    """
 
     relative_path: Path
-    text: str
+    text: str = ""
     encoding: str = "windows-1251"
+    data: Optional[bytes] = None
 
 
 @dataclass(frozen=True)

@@ -21,11 +21,17 @@ import re
 from dataclasses import replace
 from pathlib import Path
 
-from sdk import ResolvedLineEdit
+from sdk import (
+    DEFAULT_SEARCH_DELAY_MS,
+    ITEM_SECTION_MIME,
+    ResolvedLineEdit,
+    encode_item_section,
+)
 from sdk.events import Events
 
 from PyQt5.QtCore import (
     QEvent,
+    QMimeData,
     QPoint,
     QRect,
     QSize,
@@ -36,6 +42,7 @@ from PyQt5.QtCore import (
 )
 from PyQt5.QtGui import (
     QColor,
+    QDrag,
     QIcon,
     QImage,
     QKeySequence,
@@ -96,6 +103,73 @@ class KindListWidget(QListWidget):
             event.accept()
             return
         super().mousePressEvent(event)
+
+
+class ItemGalleryView(QListView):
+    """Галерея, из которой предмет можно перетащить другим модулям."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._drag_start = None
+        self._drag_index = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_start = event.pos()
+            self._drag_index = self.indexAt(event.pos())
+        else:
+            self._drag_start = None
+            self._drag_index = None
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (
+            self._drag_start is not None
+            and self._drag_index is not None
+            and self._drag_index.isValid()
+            and event.buttons() & Qt.LeftButton
+            and (event.pos() - self._drag_start).manhattanLength()
+            >= QApplication.startDragDistance()
+        ):
+            index = self._drag_index
+            self._drag_start = None
+            self._drag_index = None
+            self._start_drag(index)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def startDrag(self, supportedActions):
+        self._start_drag(self.currentIndex())
+
+    def _start_drag(self, index):
+        if index is None or not index.isValid():
+            return
+
+        entry = index.data(ENTRY_ROLE)
+        if entry is None:
+            return
+
+        mime = QMimeData()
+        mime.setData(
+            ITEM_SECTION_MIME,
+            encode_item_section(entry.section, entry.fields),
+        )
+        mime.setText(entry.section)
+
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+
+        icon = index.data(Qt.DecorationRole)
+        if isinstance(icon, QIcon):
+            pixmap = icon.pixmap(96, 96)
+            if not pixmap.isNull():
+                drag.setPixmap(pixmap)
+                drag.setHotSpot(
+                    QPoint(pixmap.width() // 2, pixmap.height() // 2)
+                )
+
+        drag.exec_(Qt.CopyAction)
 
 
 class ItemFilterProxy(QSortFilterProxyModel):
@@ -746,7 +820,7 @@ class ItemViewerFeature:
     def show(self):
         if not self.session.has_tree:
             self.ctx.ui.show_error(
-                "Дерево не построено: сначала «Чистый запуск»."
+                "Дерево не построено: сначала «Пересобрать VFS»."
             )
             return
 
@@ -1242,7 +1316,7 @@ class ItemViewerFeature:
         forest = self.session.forest
         if forest is None:
             self.ctx.ui.show_error(
-                "Дерево не построено: сначала «Чистый запуск»."
+                "Дерево не построено: сначала «Пересобрать VFS»."
             )
             return False
 
@@ -1396,7 +1470,7 @@ class ItemViewerWindow(QDialog):
 
         self._filter_timer = QTimer(self)
         self._filter_timer.setSingleShot(True)
-        self._filter_timer.setInterval(180)
+        self._filter_timer.setInterval(DEFAULT_SEARCH_DELAY_MS)
         self._filter_timer.timeout.connect(self._apply_filter_now)
 
         self._placeholder = _placeholder_pixmap(
@@ -1469,8 +1543,10 @@ class ItemViewerWindow(QDialog):
 
         splitter.addWidget(self.kind_panel)
 
-        self.list_view = QListView()
+        self.list_view = ItemGalleryView()
         self.list_view.setModel(self.proxy)
+        self.list_view.setDragEnabled(True)
+        self.list_view.setDragDropMode(QAbstractItemView.DragOnly)
         self.list_view.setViewMode(QListView.IconMode)
         self.list_view.setResizeMode(QListView.Adjust)
         self.list_view.setMovement(QListView.Static)

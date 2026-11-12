@@ -21,6 +21,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from sdk import ITEM_SECTION_MIME
 from sdk.events import Events
 
 from .diagnostics import DiagnosticsLog
@@ -36,6 +37,7 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.api = api
+        self.setAcceptDrops(True)
 
         self.setWindowTitle("LTX Explorer")
         self.resize(1400, 900)
@@ -205,8 +207,10 @@ class MainWindow(QMainWindow):
         has_changes = False
 
         if active:
-            has_changes = bool(project.changed_drafts()) or bool(
-                project.changed_resolved_drafts()
+            has_changes = (
+                bool(project.changed_drafts())
+                or bool(project.changed_resolved_drafts())
+                or bool(project.changed_asset_drafts())
             )
 
         self.project_settings_action.setVisible(active)
@@ -274,6 +278,27 @@ class MainWindow(QMainWindow):
 
         if not menu.isEmpty():
             menu.exec_(self.file_tree.viewport().mapToGlobal(pos))
+
+    # -------------------------------------------------- drag-and-drop
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat(ITEM_SECTION_MIME):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasFormat(ITEM_SECTION_MIME):
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        if event.mimeData().hasFormat(ITEM_SECTION_MIME):
+            # Перенос принят на уровне главного окна, но без побочных
+            # действий: обработкой занимаются модули-получатели.
+            event.acceptProposedAction()
+            return
+        super().dropEvent(event)
 
     # -------------------------------------------------- журнал
     def log(self, msg):

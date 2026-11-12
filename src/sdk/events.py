@@ -12,6 +12,10 @@ class Events:
     CLEAN_RUN_STARTED = "clean_run_started"
     CLEAN_RUN_FINISHED = "clean_run_finished"
     ERROR = "error"
+    # Черновики проекта записаны в каталог проекта (payload — SavedDraft).
+    PROJECT_SAVED = "project_saved"
+    # Активный проект создан, загружен или удалён.
+    PROJECT_CHANGED = "project_changed"
 
     # -------------------------------------------------- UI-факты
     # Публикуются платформой после того, как действие уже выполнено.

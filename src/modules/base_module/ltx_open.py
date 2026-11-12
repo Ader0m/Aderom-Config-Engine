@@ -36,7 +36,7 @@ class LtxFileOpener:
         if not self.session.has_tree:
             self._open_failed(path)
             self.ctx.ui.show_error(
-                "Дерево не построено: сначала «Чистый запуск»."
+                "Дерево не построено: сначала «Пересобрать VFS»."
             )
             return False
 

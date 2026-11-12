@@ -2,6 +2,7 @@
 """Граф связей секции: построение через ядро и собственное окно модуля."""
 
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 from PyQt5.QtCore import Qt
@@ -20,6 +21,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from sdk import SectionGraphRequest
+
 # Маркеры и цвета типов связей. Цвета запрашиваются через ctx.ui,
 # чтобы модуль не импортировал внутренности UI.
 EDGE_STYLES = {
@@ -30,6 +33,7 @@ EDGE_STYLES = {
     "xml_reference": ("XML", "graph_xml"),
     "texture_reference": ("Текстура", "graph_texture"),
     "visual_reference": ("Модель", "graph_visual"),
+    "sound_reference": ("Звук", "graph_sound"),
 }
 
 
@@ -91,7 +95,7 @@ class SectionGraphFeature:
     def show(self):
         if not self.session.has_tree:
             self.ctx.ui.show_error(
-                "Дерево не построено: сначала «Чистый запуск»."
+                "Дерево не построено: сначала «Пересобрать VFS»."
             )
             return
 
@@ -130,10 +134,10 @@ class SectionGraphFeature:
 
         suffix = " (VFS)" if vfs_mode else ""
         self.ctx.ui.set_status(
-            "Построение графа%s: %s…" % (suffix, section_name)
+            "Построение связей%s: %s…" % (suffix, section_name)
         )
         self.ctx.ui.log(
-            "Граф связей%s: поиск '%s'…" % (suffix, section_name)
+            "Связи секции%s: поиск '%s'…" % (suffix, section_name)
         )
 
         def work(log):
@@ -141,13 +145,41 @@ class SectionGraphFeature:
             # сборку. VFS-режим читает сырые файлы и в резолве не нуждается.
             if not vfs_mode:
                 self.ctx.services.wait_prebuild(log)
-            return self.ctx.services.build_section_graph(
+            graph = self.ctx.services.build_section_graph(
                 forest,
                 section_name,
                 vfs_mode=vfs_mode,
                 log=log,
                 overlay=overlay,
             )
+
+            # Дополнительные связи от модулей (например, .ogg из snd_*).
+            collect = getattr(
+                self.ctx.services,
+                "collect_section_graph_nodes",
+                None,
+            )
+            if callable(collect):
+                try:
+                    extra = collect(
+                        SectionGraphRequest(
+                            forest=forest,
+                            section_name=section_name,
+                            graph=graph,
+                            vfs_mode=vfs_mode,
+                            overlay=overlay,
+                        ),
+                        log=log,
+                    )
+                except Exception as exc:
+                    log("связи секции: дополнительный поставщик: %s" % exc)
+                    extra = ()
+                if extra:
+                    graph = replace(
+                        graph,
+                        children=tuple(graph.children) + tuple(extra),
+                    )
+            return graph
 
         def on_log(message, key=progress_key):
             self._on_graph_log(message, key)
@@ -213,12 +245,12 @@ class SectionGraphFeature:
             return
 
         main, lost = _split_children(graph)
-        status = "Граф построен: %d узлов" % len(main)
+        status = "Связи секции: %d узлов" % len(main)
         if vfs_mode:
             status += "; потерянных: %d" % len(lost)
         self.ctx.ui.set_status(status, 5000)
         self.ctx.ui.log(
-            "Граф связей '%s'%s: узлов %d%s"
+            "Связи секции '%s'%s: узлов %d%s"
             % (
                 section_name,
                 " (VFS)" if vfs_mode else "",
@@ -231,6 +263,7 @@ class SectionGraphFeature:
             self._window = SectionGraphWindow(
                 self.ctx.ui.open_at_line,
                 open_raw_at_line=self.ctx.ui.open_raw_at_line,
+                open_file=self.ctx.ui.open_file,
                 on_vfs_toggled=self._on_vfs_toggled,
                 open_with_shell=self.ctx.services.open_with_shell,
                 on_message=self._on_window_message,
@@ -245,12 +278,13 @@ class SectionGraphWindow(QDialog):
     """Немодальное окно графа. Создаётся и наполняется модулем."""
 
     def __init__(self, open_at_line, open_raw_at_line=None,
-                 on_vfs_toggled=None, parent=None,
+                 open_file=None, on_vfs_toggled=None, parent=None,
                  open_with_shell=None, on_message=None,
                  theme_color=None):
         super().__init__(parent)
         self._open_at_line = open_at_line
         self._open_raw_at_line = open_raw_at_line
+        self._open_file = open_file
         self._on_vfs_toggled = on_vfs_toggled
         self._open_with_shell = open_with_shell
         self._on_message = on_message
@@ -259,7 +293,7 @@ class SectionGraphWindow(QDialog):
         self._vfs_mode = False
         self._lost_panel_expanded = False
 
-        self.setWindowTitle("Граф связей")
+        self.setWindowTitle("Связи секции")
         self.resize(800, 600)
 
         layout = QVBoxLayout(self)
@@ -357,7 +391,7 @@ class SectionGraphWindow(QDialog):
         self._graph = graph
         self._vfs_mode = bool(vfs_mode)
 
-        title = "Граф связей"
+        title = "Связи секции"
         if self._vfs_mode:
             title += " (VFS)"
         self.setWindowTitle("%s: %s" % (title, graph.section_name))
@@ -476,6 +510,24 @@ class SectionGraphWindow(QDialog):
                 )
             return "\n".join(parts)
 
+        if getattr(node, "is_sound", False):
+            lines = []
+            if target is not None:
+                lines.append("Звук: %s" % target)
+            else:
+                lines.append("Звук не найден: %s" % (raw_ref or "—"))
+            fields = sorted({
+                match.related
+                for match in getattr(node, "matches", ())
+                if getattr(match, "related", None)
+            })
+            if fields:
+                lines.append("Поле: %s" % ", ".join(fields))
+            if raw_ref:
+                lines.append("Ссылка: %s" % raw_ref)
+            lines.append("Объявлено: %s" % source)
+            return "\n".join(lines)
+
         if getattr(node, "is_asset", False):
             lines = []
             if target is not None:
@@ -512,6 +564,27 @@ class SectionGraphWindow(QDialog):
     def _on_item_double_clicked(self, item):
         node = item.data(0, Qt.UserRole) if item is not None else None
         if node is None:
+            return
+
+        # Звуковые файлы (.ogg) открываются в редакторе звуков через
+        # общий маршрутизатор, а не приложением Windows.
+        if getattr(node, "is_sound", False):
+            target = (
+                getattr(node, "target_path", None)
+                or getattr(node, "physical_path", None)
+            )
+            if target is not None and self._open_file is not None:
+                self._open_file(target)
+                return
+            self._notify(
+                "Звуковой файл не найден: %s\nОбъявлено в %s, строка %s"
+                % (
+                    getattr(node, "raw_ref", None) or node.display_name,
+                    _path_text(node.file_path),
+                    node.first_match_line,
+                )
+            )
+            self._open_node_source(node)
             return
 
         # Визуальные модели (.ogf) обычно лежат в игровых архивах и

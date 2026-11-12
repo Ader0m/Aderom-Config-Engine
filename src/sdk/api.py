@@ -92,6 +92,56 @@ class ProjectOverlay:
 
 
 @dataclass(frozen=True)
+class AssetDraftInfo:
+    """Двоичный черновик проекта (ресурс вне configs)."""
+
+    path: Path
+    is_new: bool = False
+    changed: bool = False
+    dirty: bool = False
+    size: int = 0
+
+
+@dataclass(frozen=True)
+class FileView:
+    """Представление файла для проекта (например, для предпросмотра).
+
+    ``text`` — итоговый человекочитаемый вид. Для ``.ogg`` это
+    комментарий движка; для текстовых форматов — обычный текст.
+    ``label`` и ``details`` показываются в панели предпросмотра и не
+    влияют на сам патч.
+    """
+
+    text: str
+    label: str = ""
+    details: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class ProjectAssetType:
+    """Тип двоичного ресурса, который модуль добавляет в проект.
+
+    Пример для звуков::
+
+        ProjectAssetType(
+            key="sound.ogg",
+            label="Звук Ogg Vorbis",
+            extensions=(".ogg",),
+            vfs_root="sounds",
+        )
+
+    Реестр типов принадлежит платформе. Проект использует его для
+    проверки пути, предпросмотра и разрешения записи в патч-мод, поэтому
+    ``core`` не знает про конкретные расширения.
+    """
+
+    key: str
+    label: str
+    extensions: tuple[str, ...]
+    vfs_root: str
+
+
+@dataclass(frozen=True)
 class TreeSummary:
     """Краткая сводка по построенному дереву."""
 
@@ -174,6 +224,11 @@ class GraphNode:
         """Узел ссылается на бинарный ресурс (текстура/модель)."""
         return self.is_texture or self.is_visual
 
+    @property
+    def is_sound(self) -> bool:
+        """Узел ссылается на звуковой файл (.ogg)."""
+        return "sound_reference" in self.edge_types
+
 
 @dataclass(frozen=True)
 class SectionGraph:
@@ -184,6 +239,17 @@ class SectionGraph:
     children: tuple[GraphNode, ...] = field(default_factory=tuple)
     # Заполняется только в режиме VFS: связи, отсутствующие в итоговом дереве.
     lost_children: tuple[GraphNode, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class SectionGraphRequest:
+    """Контекст для модулей, дополняющих граф связей секции."""
+
+    forest: object
+    section_name: str
+    graph: SectionGraph
+    vfs_mode: bool = False
+    overlay: object = None
 
 
 @dataclass(frozen=True)
@@ -360,6 +426,9 @@ class CoreApi(Protocol):
     def forest_system_root(self, forest) -> Optional[Path]:
         """Корневой ``system.ltx`` построенного дерева."""
 
+    def game_root(self, forest) -> Optional[Path]:
+        """Корень ``gamedata`` VFS, где лежат ``sounds``/``textures``/``meshes``."""
+
     def add_virtual_file(self, forest, path: Path, text: str) -> bool:
         """Добавить новый черновик в уже построенное дерево VFS."""
 
@@ -499,6 +568,27 @@ class CoreApi(Protocol):
         итоговом дереве.
         """
 
+    def register_section_graph_contributor(
+        self,
+        contributor: Callable[[SectionGraphRequest], Sequence[GraphNode]],
+    ) -> None:
+        """Добавить поставщика дополнительных узлов графа.
+
+        Модуль может зарегистрировать функцию, которая получает
+        :class:`SectionGraphRequest` и возвращает узлы своего типа
+        (например, .ogg-файлы для ``snd_*``-полей).
+        """
+
+    def unregister_section_graph_contributor(self, contributor) -> bool:
+        """Удалить ранее зарегистрированного поставщика узлов."""
+
+    def collect_section_graph_nodes(
+        self,
+        request: SectionGraphRequest,
+        log: Optional[Callable[[str], None]] = None,
+    ) -> tuple[GraphNode, ...]:
+        """Собрать дополнительные узлы у всех зарегистрированных модулей."""
+
     def open_external_editor(self, path: Path) -> tuple[bool, str]:
         """Открыть файл во внешнем редакторе. Возвращает ``(ok, message)``."""
 
@@ -607,6 +697,53 @@ class UiApi(Protocol):
 
     def write_project_text(self, path: Path, text: str) -> bool:
         """Записать текст в черновик проекта, не меняя оригинальный файл."""
+
+    def register_project_asset_type(self, asset_type: ProjectAssetType) -> bool:
+        """Зарегистрировать тип двоичного ресурса проекта.
+
+        Регистрация действует до выгрузки модуля. Конфликт ключа или пары
+        ``(vfs_root, extension)`` не перезаписывает существующий тип.
+        """
+
+    def unregister_project_asset_type(self, key: str) -> bool:
+        """Убрать тип ресурса, зарегистрированный модулем."""
+
+    def project_asset_types(self) -> tuple[ProjectAssetType, ...]:
+        """Все зарегистрированные типы двоичных ресурсов."""
+
+    def register_file_reader(self, reader):
+        """Зарегистрировать читатель файлов.
+
+        Возвращает объект с методом ``unsubscribe()``. Читатель
+        вызывается в фоновом потоке предпросмотра проекта, поэтому его
+        ``read`` должен быть чистым и потокобезопасным.
+        """
+
+    def read_file_view(
+        self,
+        path: Path,
+        data: Optional[bytes] = None,
+    ) -> Optional[FileView]:
+        """Получить представление файла от первого подходящего читателя."""
+
+    def read_project_asset(self, path: Path) -> Optional[bytes]:
+        """Текущие байты двоичного черновика или ``None``."""
+
+    def update_project_asset(self, path: Path, data: bytes) -> bool:
+        """Обновить двоичный черновик в памяти (без записи в проект)."""
+
+    def save_project_asset(
+        self,
+        path: Path,
+        data: Optional[bytes] = None,
+    ) -> bool:
+        """Записать двоичный черновик в каталог проекта сейчас."""
+
+    def project_asset_drafts(self) -> tuple[AssetDraftInfo, ...]:
+        """Двоичные черновики активного проекта."""
+
+    def set_editor_tab_dirty(self, tab_id: str, dirty: bool) -> None:
+        """Пометить вкладку модуля как изменённую/сохранённую."""
 
     def resolved_draft(self, tab_id: str) -> Optional[ResolvedDraftInfo]:
         """Текущий resolved-черновик проекта по id вкладки."""
@@ -723,6 +860,9 @@ class UiApi(Protocol):
         """
 
     # --- команды платформы ------------------------------------------------
+
+    def open_file(self, path: Path) -> None:
+        """Открыть файл через общий маршрутизатор обработчиков."""
 
     def open_raw(self, path: Path) -> None:
         """Открыть файл в редакторе без обработчиков модуля."""

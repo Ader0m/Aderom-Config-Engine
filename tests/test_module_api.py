@@ -12,8 +12,11 @@ from sdk.adapters import (
     TaskApiAdapter,
     UiApiAdapter,
 )
+from sdk import DEFAULT_SEARCH_DELAY_MS
+from sdk import GraphNode, SectionGraph, SectionGraphRequest
 from sdk.contracts import ModuleBase, ModuleContext, ModuleManifest
 from ui.bus import CommandBus, EventBus
+from ui.debounce import DEFAULT_SEARCH_DELAY_MS as UI_SEARCH_DELAY_MS
 
 
 class _Ui:
@@ -34,6 +37,10 @@ class _Services:
 
 
 class ModuleApiTest(unittest.TestCase):
+    def test_search_debounce_standard_is_shared(self):
+        self.assertEqual(DEFAULT_SEARCH_DELAY_MS, 180)
+        self.assertEqual(UI_SEARCH_DELAY_MS, DEFAULT_SEARCH_DELAY_MS)
+
     def test_manifest_defaults(self):
         manifest = ModuleManifest(name="test_module")
 
@@ -42,6 +49,7 @@ class ModuleApiTest(unittest.TestCase):
         self.assertEqual(manifest.sdk_min, "0.1.0")
         self.assertEqual(manifest.description, "")
         self.assertEqual(manifest.author, "")
+        self.assertEqual(manifest.requires, ())
 
     def test_module_base_lifecycle_methods_are_callable(self):
         module = ModuleBase()
@@ -89,6 +97,49 @@ class ModuleApiTest(unittest.TestCase):
         self.assertIsNot(first.events, second.events)
         self.assertIsNot(first.commands, second.commands)
         self.assertIsNot(first.ui, second.ui)
+
+    def test_section_graph_contributors_are_collected(self):
+        adapter = CoreApiAdapter(object())
+        node = GraphNode(
+            display_name="shot.ogg",
+            file_path=None,
+            first_match_line=1,
+            matches=(),
+        )
+        root = GraphNode(
+            display_name="wpn",
+            file_path=None,
+            first_match_line=1,
+        )
+        request = SectionGraphRequest(
+            forest=None,
+            section_name="wpn",
+            graph=SectionGraph(section_name="wpn", root=root),
+        )
+
+        adapter.register_section_graph_contributor(
+            lambda _request: (node,)
+        )
+        self.assertEqual(
+            adapter.collect_section_graph_nodes(request),
+            (node,),
+        )
+
+        logs = []
+        adapter.register_section_graph_contributor(
+            lambda _request: 1 / 0
+        )
+        self.assertEqual(
+            adapter.collect_section_graph_nodes(request, log=logs.append),
+            (node,),
+        )
+        self.assertEqual(len(logs), 1)
+
+        self.assertTrue(
+            adapter.unregister_section_graph_contributor(
+                adapter._section_graph_contributors[0]
+            )
+        )
 
     def test_context_log_delegates_to_ui(self):
         ui = _Ui()

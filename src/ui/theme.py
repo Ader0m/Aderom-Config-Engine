@@ -107,6 +107,7 @@ class Palette:
     graph_xml: str = "#B5CEA8"          # [XML]
     graph_texture: str = "#FFC66D"      # [Текстура]
     graph_visual: str = "#4EC9B0"       # [Модель]
+    graph_sound: str = "#9ACD8B"        # [Звук]
 
     # ============ Редактор (Scintilla, программные цвета) ============
     ed_margin_bg: str = "#313335"

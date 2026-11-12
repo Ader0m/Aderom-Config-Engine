@@ -34,7 +34,7 @@ class BaseModule(ModuleBase):
         name="base",
         version="0.4.0",
         sdk_min="0.1.0",
-        description="Базовый сценарий: чистый запуск, VFS-вид, резолв .ltx, XML/DXML, предметы.",
+        description="Базовый сценарий: пересборка VFS, VFS-вид, резолв .ltx, XML/DXML, предметы.",
     )
 
     # -------------------------------------------------- жизненный цикл
@@ -88,11 +88,11 @@ class BaseModule(ModuleBase):
             self._clean_run.choose_directory, "Ctrl+O",
         )
         ui.register_menu(
-            "Файл", "Чистый запуск",
+            "Файл", "Пересобрать VFS",
             self._clean_run.run, "Ctrl+Shift+R",
         )
         ui.register_menu(
-            "Инструменты", "Граф связей секции",
+            "Инструменты", "Связи секции",
             self._section_graph.show, "Ctrl+G",
         )
         ui.register_menu(

@@ -115,7 +115,7 @@ class XmlFileOpener:
         if self.session is None or not getattr(self.session, "has_tree", False):
             self.ctx.events.publish(Events.FILE_OPEN_FAILED, path)
             self.ctx.ui.show_error(
-                "Дерево не построено: сначала «Чистый запуск»."
+                "Дерево не построено: сначала «Пересобрать VFS»."
             )
             return False
 

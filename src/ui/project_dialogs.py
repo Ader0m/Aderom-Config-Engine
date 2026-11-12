@@ -471,6 +471,7 @@ class ProjectPreviewDialog(QDialog):
                     "script": "скрипт",
                     "info": "информация",
                     "new_file": "новый файл",
+                    "asset": "двоичный ресурс",
                 }.get(item.kind, "исходный файл")
             ),
             "Изменений: %d" % (

@@ -35,7 +35,7 @@ class TreeActions:
     def assemble_and_open(self, path):
         if not self.session.has_tree:
             self.ctx.ui.show_error(
-                "Нет дерева: сначала выполните «Чистый запуск»."
+                "Нет дерева: сначала выполните «Пересобрать VFS»."
             )
             return
 

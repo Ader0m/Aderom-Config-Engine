@@ -184,6 +184,22 @@ class CoreServices:
         """Получить относительный путь файла."""
         return forest.rel_paths.get(path, str(path))
 
+    def forest_game_root(self, forest):
+        """Корень gamedata VFS: родитель каталога ``configs``."""
+        value = getattr(forest, "scan_dir", None)
+        if not value:
+            return None
+        from pathlib import Path
+
+        scan_dir = Path(value)
+        if scan_dir.name.lower() == "configs":
+            return scan_dir.parent
+        if (scan_dir / "gamedata" / "configs").is_dir():
+            return scan_dir / "gamedata"
+        if (scan_dir / "configs").is_dir():
+            return scan_dir
+        return scan_dir.parent
+
     def add_virtual_file(self, forest, path, text):
         """Добавить новый черновик в существующее дерево VFS."""
         return add_virtual_file(forest, path, text)
@@ -628,6 +644,7 @@ class CoreServices:
         patch_mod_root,
         forbidden_roots=(),
         overwrite=False,
+        asset_rules=None,
     ):
         """Записать проверенный патч в отдельный мод."""
         return self.patch_writer.write(
@@ -635,4 +652,5 @@ class CoreServices:
             patch_mod_root,
             forbidden_roots=forbidden_roots,
             overwrite=overwrite,
+            asset_rules=asset_rules,
         )

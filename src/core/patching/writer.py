@@ -28,16 +28,54 @@ class PatchWriter:
         self,
         require_verification: bool = True,
         require_resolver: bool = False,
+        asset_rules=None,
     ):
         self.require_verification = bool(require_verification)
         self.require_resolver = bool(require_resolver)
+        self.asset_rules = self._normalize_rules(asset_rules)
+
+    @staticmethod
+    def _normalize_rules(asset_rules):
+        return {
+            str(root).lower(): tuple(
+                str(suffix).lower() for suffix in (suffixes or ())
+            )
+            for root, suffixes in (asset_rules or {}).items()
+        }
+
+    @staticmethod
+    def _is_asset_patch(generated: GeneratedPatch, rules) -> bool:
+        """Патч состоит только из зарегистрированных двоичных ресурсов."""
+        if getattr(generated.plan, "format", "") != "asset":
+            return False
+        files = getattr(generated, "files", ()) or ()
+        if not files:
+            return False
+        for file in files:
+            rel = Path(file.relative_path)
+            parts = [part.lower() for part in rel.parts]
+            if (
+                len(parts) < 3
+                or parts[0] != "gamedata"
+                or parts[1] not in rules
+                or rel.suffix.lower() not in rules[parts[1]]
+            ):
+                return False
+        return True
 
     def _validate(
         self,
         generated: GeneratedPatch,
         patch_mod_root,
         forbidden_roots: Sequence[Path],
+        asset_rules=None,
     ) -> Path:
+        rules = (
+            self.asset_rules
+            if asset_rules is None
+            else self._normalize_rules(asset_rules)
+        )
+
         if not generated.files:
             raise PatchWriteError("Нет файлов для записи")
 
@@ -56,7 +94,10 @@ class PatchWriter:
                     "Проверка патча не пройдена: запись запрещена"
                 )
 
-            if self.require_resolver:
+            # Бинарные ресурсы не проходят через Resolver4: для них
+            # проверяется целостность файла, а не LTX/XML-модель.
+            is_asset = self._is_asset_patch(generated, rules)
+            if self.require_resolver and not is_asset:
                 resolver_checks = [
                     check
                     for check in generated.verification.checks
@@ -78,6 +119,7 @@ class PatchWriter:
             generated,
             allowed_configs=(".ltx", ".xml"),
             allow_scripts=True,
+            asset_rules=rules,
         )
         if not ok:
             raise PatchWriteError(message)
@@ -89,12 +131,14 @@ class PatchWriter:
         generated: GeneratedPatch,
         patch_mod_root,
         forbidden_roots: Sequence[Path] = (),
+        asset_rules=None,
     ) -> Tuple[Path, ...]:
         """Вернуть итоговые пути, ничего не записывая."""
         root = self._validate(
             generated,
             patch_mod_root,
             forbidden_roots,
+            asset_rules=asset_rules,
         )
         return tuple(root / Path(file.relative_path) for file in generated.files)
 
@@ -104,12 +148,14 @@ class PatchWriter:
         patch_mod_root,
         forbidden_roots: Sequence[Path] = (),
         overwrite: bool = False,
+        asset_rules=None,
     ) -> Tuple[Path, ...]:
         """Записать патч в отдельный мод. Возвращает записанные пути."""
         root = self._validate(
             generated,
             patch_mod_root,
             forbidden_roots,
+            asset_rules=asset_rules,
         )
 
         prepared = []
@@ -128,7 +174,10 @@ class PatchWriter:
 
                 destination.parent.mkdir(parents=True, exist_ok=True)
 
-                data = file.text.encode(file.encoding, errors="strict")
+                if file.data is not None:
+                    data = bytes(file.data)
+                else:
+                    data = file.text.encode(file.encoding, errors="strict")
                 fd, temp_name = tempfile.mkstemp(
                     prefix=".ace_patch_",
                     suffix=".tmp",

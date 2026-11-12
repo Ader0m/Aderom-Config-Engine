@@ -129,12 +129,12 @@ class ResolverService:
         # include/DLTX-файлов). Для system.ltx это тысячи файлов, поэтому
         # повторно считать подпись при каждом открытии нельзя: кэшируем
         # готовый ключ на время жизни дерева. Сбрасывается вместе с
-        # ResolvedCache при «Чистом запуске».
+        # ResolvedCache при «Пересборке VFS».
         self._key_cache = {}
         self._key_lock = threading.RLock()
 
     def invalidate_cache(self):
-        """Сбросить кэш резолва (вызывается при «Чистом запуске»)."""
+        """Сбросить кэш резолва (вызывается при «Пересборке VFS»)."""
         self._resolved_cache.clear()
         with self._key_lock:
             self._key_cache.clear()

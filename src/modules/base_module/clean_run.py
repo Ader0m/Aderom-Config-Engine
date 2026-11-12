@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Сценарий «Чистый запуск»: определение VFS и построение дерева."""
+"""Сценарий «Пересобрать VFS»: определение VFS и построение дерева."""
 
 from pathlib import Path
 
@@ -34,19 +34,19 @@ class CleanRunFeature:
 
     def run(self):
         if self._running:
-            self.ctx.ui.log("Чистый запуск уже выполняется.")
+            self.ctx.ui.log("Пересборка VFS уже выполняется.")
             return
 
         if self.session.config_dir is None:
             directory = self.ctx.ui.ask_directory("")
             if not directory:
-                self.ctx.ui.log("Папка не выбрана — запуск отменён.")
+                self.ctx.ui.log("Папка не выбрана — пересборка отменена.")
                 return
             self.session.config_dir = Path(directory)
 
         self._running = True
         self.ctx.ui.set_status("Сканирование…")
-        self.ctx.ui.log("Чистый запуск: %s" % self.session.config_dir)
+        self.ctx.ui.log("Пересборка VFS: %s" % self.session.config_dir)
         self.ctx.events.publish(
             Events.CLEAN_RUN_STARTED,
             str(self.session.config_dir),
@@ -59,7 +59,7 @@ class CleanRunFeature:
         draft_count = len(getattr(overlay, "source_files", None) or {})
         if draft_count:
             self.ctx.ui.log(
-                "Чистый запуск: черновиков проекта в VFS: %d"
+                "Пересборка VFS: черновиков проекта в VFS: %d"
                 % draft_count
             )
 

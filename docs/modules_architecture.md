@@ -35,8 +35,11 @@ core/patching/   общие модели/цели/писатель
 
 `base_module` — обязательный модуль платформы. Он загружается всегда и задаёт
 базовый пользовательский сценарий: открытие каталога, построение дерева,
-просмотр `.ltx`, базовые действия дерева и редактора. При этом он использует
-тот же SDK, что и остальные модули, и не имеет доступа к внутренностям UI.
+просмотр `.ltx`, просмотр игровых предметов, базовые действия дерева и
+редактора. При этом он использует тот же SDK, что и остальные модули, и не
+имеет доступа к внутренностям UI. Окно предметов — часть базового модуля,
+поэтому его нельзя выключить отдельно; модуль, которому нужен перенос
+предметов, объявляет зависимость `requires=("base",)`.
 
 В дерево попадают и `.xml`-файлы VFS. По умолчанию XML открывается
 через `XmlResolver` (include-сборка + DXML). Исходный текст доступен
@@ -112,9 +115,12 @@ Override (`core/patching/ltx/override.py`) пишет полную копию п
 
 ## 3. Lifecycle
 
-Загрузчик находит пакеты `modules.<name>`, проверяет `manifest.sdk_min` и
-вызывает фазы жизненного цикла. Ошибка `init`/`register`/`activate` одного
-модуля логируется и не останавливает остальные.
+Загрузчик находит пакеты `modules.<name>`, проверяет `manifest.sdk_min`,
+зависимости `manifest.requires` и вызывает фазы жизненного цикла. Модуль с
+незагруженной зависимостью пропускается с сообщением в журнале; ошибка
+`init`/`register`/`activate` одного модуля логируется и не останавливает
+остальные. Например, `ogg_editor` объявляет `requires=("base",)` и может
+рассчитывать на обязательное окно предметов базового модуля.
 
 ```text
 discover
@@ -197,6 +203,15 @@ deactivate  — закрыть окна, остановить свою акти�
 | Команда | `ctx.commands.register("mod.action", fn)` |
 | Действие в дереве | `ctx.ui.register_tree_context_action(label, fn, predicate=None)` |
 | Перехват открытия файла | `FileOpenHandler` + `ctx.ui.register_open_handler(...)` |
+| Корень `gamedata` VFS | `ctx.services.game_root(forest)` |
+| Двоичный черновик проекта | `ctx.ui.read_project_asset/update_project_asset/save_project_asset` |
+| Список двоичных черновиков | `ctx.ui.project_asset_drafts()` |
+| Тип двоичного ресурса | `ctx.ui.register_project_asset_type(ProjectAssetType(...))` |
+| Снятие типа ресурса | `ctx.ui.unregister_project_asset_type(key)` |
+| Зарегистрированные типы | `ctx.ui.project_asset_types()` |
+| Читатель файла | `ctx.ui.register_file_reader(FileReader)` |
+| Итоговый вид файла | `ctx.ui.read_file_view(path, data=None)` |
+| Признак изменённой вкладки | `ctx.ui.set_editor_tab_dirty(tab_id, dirty)` |
 | Собственное окно | `ctx.ui.show_module_window(key, window)` |
 | Закрытие окна | `ctx.ui.close_module_window(key)` |
 | Вкладка редактора | `ctx.ui.open_editor_tab(tab_id, title, widget)` |
@@ -208,6 +223,125 @@ deactivate  — закрыть окна, остановить свою акти�
 | Диалоги | `ctx.ui.ask_text`, `ask_directory` |
 | Фоновая работа | `ctx.tasks.run(...)` |
 | События | `ctx.events.subscribe/publish` |
+| Задержка поиска/фильтра | `sdk.DEFAULT_SEARCH_DELAY_MS` (180 мс) |
+| Перенос предмета между окнами | `ITEM_SECTION_MIME`, `encode_item_section`, `decode_item_section` |
+
+Стандарт задержки поиска/фильтра в приложении — **180 мс**. Он
+экспортируется как `sdk.DEFAULT_SEARCH_DELAY_MS`; модули используют это
+значение, а не собственные интервалы, чтобы поведение поиска было
+одинаковым во всех окнах.
+
+### Двоичные ресурсы проекта
+
+Проект изначально хранил только текстовые черновики `.ltx`/`.xml`.
+Ресурсы вне `configs` (звуки, текстуры, модели) не имеют текстового
+представления, поэтому для них добавлен отдельный — двоичный — черновик
+`ProjectAssetDraft`:
+
+- `ctx.ui.read_project_asset(path)` — текущие байты черновика или `None`;
+- `ctx.ui.update_project_asset(path, data)` — изменить черновик в памяти;
+- `ctx.ui.save_project_asset(path, data=None)` — записать в каталог проекта;
+- `ctx.ui.project_asset_drafts()` — список `AssetDraftInfo`;
+- `Events.PROJECT_SAVED` (`project_saved`) — черновик записан (payload —
+  `SavedDraft` с `kind == "asset"`).
+
+Двоичные черновики участвуют в обычном автосохранении, `Ctrl+S`, закрытии
+приложения и попадают в патч-мод как файл `gamedata/<root>/<...>` целиком.
+Каталог `Overwrite` по-прежнему запрещён. Проект не меняет оригинальные
+файлы.
+
+Конкретные расширения не зашиты в `core`/`ui`. Модуль регистрирует тип
+ресурса в `register(ctx)`:
+
+```python
+from sdk import ProjectAssetType
+
+ctx.ui.register_project_asset_type(
+    ProjectAssetType(
+        key="sound.ogg",
+        label="Звук Ogg Vorbis",
+        extensions=(".ogg",),
+        vfs_root="sounds",
+    )
+)
+```
+
+Реестр проверяет ключ, расширения, один каталог `vfs_root` и конфликты
+`(vfs_root, extension)`. На его основе проект проверяет путь, строит
+элемент предпросмотра и передаёт `PatchWriter` правила
+`{root: расширения}`. Модуль снимает тип в `deactivate`; при выгрузке
+модуля поддержка исчезает, и проект показывает ошибку для таких
+черновиков, а не пишет их вслепую.
+
+### Читатели файлов
+
+Тип ресурса отвечает на вопрос «можно ли это записать в патч». Отдельный
+вопрос — «как показать файл пользователю». Для него модуль регистрирует
+`FileReader`:
+
+```python
+from sdk import FileReader, FileView
+
+class OggCommentReader(FileReader):
+    priority = 100
+
+    def can_read(self, path, data=None):
+        return path.suffix.lower() == ".ogg"
+
+    def read(self, path, data=None):
+        return FileView(
+            text="...итоговый вид комментария...",
+            label="Комментарии Ogg Vorbis",
+            details=("X-Ray v3",),
+        )
+
+ctx.ui.register_file_reader(OggCommentReader())
+```
+
+Проект выбирает первый подходящий читатель по `priority` и `can_read`.
+`read` возвращает `FileView` — ровно один итоговый вид файла. Сейчас он
+используется в предпросмотре патча; тот же реестр можно использовать для
+поиска по содержимому, экспорта и других сценариев.
+
+Почему делегат, а не событие:
+
+- чтение — чистая трансформация «путь + байты → представление», а не
+  факт, на который может быть много независимых реакций;
+- нужен детерминированный выбор одного читателя с приоритетом;
+- предпросмотр выполняется в фоновом потоке, поэтому читатель не должен
+  работать с Qt и обязан быть потокобезопасным;
+- `register_file_reader` возвращает подписку с `unsubscribe()`, и модуль
+  снимает читатель в `deactivate`.
+
+Если читатель не зарегистрирован, проект показывает безопасный fallback
+(«Двоичный файл: N байт»). Ошибка читателя не блокирует запись патча, но
+попадает в заметки предпросмотра.
+
+### Перенос предмета между модулями
+
+Окно предметов базового модуля формирует `QDrag` с MIME-типом
+`ITEM_SECTION_MIME`; внутри — имя секции и все её поля в формате
+`encode_item_section(...)`. Принимающий модуль декодирует данные через
+`decode_item_section(...)` и сам решает, что с ними делать. Это не создаёт
+импорт между модулями: общий контракт живёт в `sdk.dragdrop`, а не в окне
+предметов. Базовый модуль обязателен, поэтому OGG-модуль объявляет
+`requires=("base",)` и может рассчитывать на наличие источника drag-and-drop.
+Главное окно приложения принимает такой drop без собственной логики — только
+чтобы перенос не считался неудачным; обработка остаётся модулям-получателям.
+
+Модуль `ogg_editor` использует эту инфраструктуру для правки
+Vorbis-комментариев. Важно: движок X-Ray (`SoundRender_Source_loader.cpp`)
+читает **первый** Vorbis-комментарий как бинарную структуру little-endian
+(`version`, `min_dist`, `max_dist`, `base_volume`, `game_type`,
+`max_ai_dist`), а не как текст. Поэтому вкладка модуля показывает
+человекочитаемые поля, а при сохранении пересобирает только служебные
+страницы Ogg; аудиопакеты не перекодируются.
+
+Для прослушивания `.ogg` используется `soundfile` (libsndfile): он
+декодирует текущий контейнер в временный WAV, который воспроизводит
+`QMediaPlayer`. Это обходит отсутствие системного Ogg/Vorbis-кодека в
+Windows. Если `soundfile` недоступен, модуль пытается отдать `.ogg`
+напрямую QtMultimedia.
 
 Граф связей секции запрашивается через
 `ctx.services.build_section_graph(forest, section_name, vfs_mode=False)`.
@@ -346,6 +480,8 @@ sub.unsubscribe()
 ```text
 file_opened              (path)            publish
 file_open_failed         (path)            publish
+project_saved            (SavedDraft)      publish
+project_changed          (Project|None)    publish
 ui.window.shown          (key)             publish
 ui.window.closed         (key)             publish
 ui.tab.opened            (tab_id)          publish

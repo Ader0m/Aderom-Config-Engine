@@ -8,8 +8,7 @@
 
 from PyQt5.QtCore import QObject, QTimer
 
-
-DEFAULT_SEARCH_DELAY_MS = 180
+from sdk.constants import DEFAULT_SEARCH_DELAY_MS
 
 
 class Debounce(QObject):

@@ -23,9 +23,20 @@ class ModuleLoader:
     def discover_and_load(self, log=None):
         log = log or (lambda m: None)
 
-        for info in pkgutil.iter_modules(modules_package.__path__):
-            if not info.ispkg:
-                continue
+        infos = [
+            info
+            for info in pkgutil.iter_modules(modules_package.__path__)
+            if info.ispkg
+        ]
+        # base_module — обязательная платформа; остальные модули могут
+        # объявлять его в manifest.requires.
+        infos.sort(
+            key=lambda info: (
+                info.name != "base_module",
+                info.name,
+            )
+        )
+        for info in infos:
             self._load_one(info.name, log)
 
     def _load_one(self, name, log):
@@ -52,6 +63,22 @@ class ModuleLoader:
             log(
                 "Модуль %s: несовместим (нужен SDK >= %s, текущий %s)."
                 % (name, manifest.sdk_min, SDK_VERSION)
+            )
+            return
+
+        loaded_names = {
+            loaded_manifest.name
+            for loaded_manifest, _instance, _ctx in self.loaded
+        }
+        missing = [
+            dependency
+            for dependency in (getattr(manifest, "requires", ()) or ())
+            if dependency not in loaded_names
+        ]
+        if missing:
+            log(
+                "Модуль %s: не загружены зависимости: %s"
+                % (name, ", ".join(missing))
             )
             return
 

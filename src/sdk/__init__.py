@@ -2,7 +2,20 @@
 """SDK — единственный публичный контракт между модулями и приложением."""
 
 from .version import SDK_VERSION, parse_version, is_compatible
-from .contracts import ModuleManifest, ModuleBase, ModuleContext, FileOpenHandler
+from .constants import DEFAULT_SEARCH_DELAY_MS
+from .dragdrop import (
+    ITEM_SECTION_MIME,
+    ItemSectionData,
+    decode_item_section,
+    encode_item_section,
+)
+from .contracts import (
+    ModuleManifest,
+    ModuleBase,
+    ModuleContext,
+    FileOpenHandler,
+    FileReader,
+)
 from .events import Events
 from .api import (
     CoreApi,
@@ -11,9 +24,13 @@ from .api import (
     EventApi,
     CommandApi,
     TreeSummary,
+    AssetDraftInfo,
+    FileView,
+    ProjectAssetType,
     GraphMatch,
     GraphNode,
     SectionGraph,
+    SectionGraphRequest,
     XmlResolveResult,
     LineSource,
     ProjectOverlay,
@@ -38,20 +55,30 @@ __all__ = [
     "SDK_VERSION",
     "parse_version",
     "is_compatible",
+    "DEFAULT_SEARCH_DELAY_MS",
+    "ITEM_SECTION_MIME",
+    "ItemSectionData",
+    "decode_item_section",
+    "encode_item_section",
     "ModuleManifest",
     "ModuleBase",
     "ModuleContext",
     "Events",
     "FileOpenHandler",
+    "FileReader",
     "CoreApi",
     "UiApi",
     "TaskApi",
     "EventApi",
     "CommandApi",
     "TreeSummary",
+    "AssetDraftInfo",
+    "FileView",
+    "ProjectAssetType",
     "GraphMatch",
     "GraphNode",
     "SectionGraph",
+    "SectionGraphRequest",
     "XmlResolveResult",
     "LineSource",
     "ProjectOverlay",

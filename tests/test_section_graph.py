@@ -68,6 +68,55 @@ class SectionGraphWindowTest(unittest.TestCase):
         )
         window.close()
 
+    def test_sound_rows_open_in_ogg_editor(self):
+        opened = []
+        window = SectionGraphWindow(
+            lambda path, line: None,
+            open_file=opened.append,
+        )
+
+        ltx_path = Path("C:/game/gamedata/configs/weapons.ltx")
+        sound_path = Path("C:/game/gamedata/sounds/weapon/shot.ogg")
+        root = GraphNode(
+            display_name="wpn",
+            file_path=ltx_path,
+            first_match_line=10,
+            matches=(GraphMatch("declaration", 10, "[wpn]"),),
+        )
+        sound = GraphNode(
+            display_name="shot.ogg",
+            file_path=ltx_path,
+            first_match_line=12,
+            matches=(
+                GraphMatch(
+                    "sound_reference",
+                    12,
+                    "snd_shoot = weapon\\shot",
+                    related="snd_shoot",
+                ),
+            ),
+            raw_ref="weapon\\shot",
+            target_path=sound_path,
+            resolved=True,
+        )
+
+        window.update_graph(
+            SectionGraph(
+                section_name="wpn",
+                root=root,
+                children=(sound,),
+            )
+        )
+
+        sound_item = window.list_widget.topLevelItem(1)
+        self.assertEqual(sound_item.text(0), "[Звук] shot.ogg")
+        self.assertIn(str(sound_path), sound_item.toolTip(0))
+        self.assertIn("snd_shoot", sound_item.toolTip(0))
+
+        window._on_item_double_clicked(sound_item)
+        self.assertEqual(opened, [sound_path])
+        window.close()
+
     def test_asset_rows_show_file_name_and_open_with_shell(self):
         opened = []
         messages = []

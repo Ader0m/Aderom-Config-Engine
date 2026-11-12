@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -37,6 +38,12 @@ from core.patching.models import (
     VerificationResult,
 )
 from core.patching.ltx.multiline import analyze_multiline_edit
+
+from .project_assets import (
+    ProjectAssetRegistry,
+    ProjectAssetTypeError,
+)
+from .project_readers import FileReaderError, ProjectFileReaderRegistry
 
 
 class ProjectError(Exception):
@@ -68,6 +75,53 @@ class ProjectDraft:
     def has_changes(self) -> bool:
         """Есть изменения относительно исходного файла."""
         return self.current_text != self.original_text
+
+
+@dataclass
+class ProjectAssetDraft:
+    """Черновик двоичного ресурса (звук, текстура и т.п.).
+
+    Проект хранит не текст, а готовые байты файла. Это нужно для
+    форматов, у которых нет текстового представления (.ogg): правка
+    комментария пересобирает контейнер, а патч-мод получает целый файл.
+    """
+
+    path: Path
+    original_sha1: str
+    current_bytes: bytes
+    saved_bytes: bytes
+    is_new: bool = False
+    revision: int = 0
+    updated_at: float = 0.0
+    saved_at: float = 0.0
+
+    @property
+    def current_sha1(self) -> str:
+        return hashlib.sha1(self.current_bytes).hexdigest()
+
+    @property
+    def is_dirty(self) -> bool:
+        """Есть изменения, ещё не записанные в каталог проекта."""
+        return self.current_bytes != self.saved_bytes
+
+    @property
+    def has_changes(self) -> bool:
+        """Есть изменения относительно исходного файла."""
+        return self.current_sha1 != self.original_sha1
+
+    @property
+    def size(self) -> int:
+        return len(self.current_bytes)
+
+
+@dataclass(frozen=True)
+class AssetChange:
+    """Изменение двоичного ресурса (для PatchPlan.changes)."""
+
+    kind: str
+    path: Path
+    description: str
+    risk: str = "safe"
 
 
 @dataclass
@@ -108,12 +162,16 @@ class Project:
     resolved_drafts: Dict[str, ProjectResolvedDraft] = field(
         default_factory=dict
     )
+    assets: Dict[str, ProjectAssetDraft] = field(default_factory=dict)
 
     def draft(self, path) -> Optional[ProjectDraft]:
         return self.drafts.get(ProjectService.path_key(path))
 
     def resolved_draft(self, tab_id) -> Optional[ProjectResolvedDraft]:
         return self.resolved_drafts.get(str(tab_id))
+
+    def asset_draft(self, path) -> Optional[ProjectAssetDraft]:
+        return self.assets.get(ProjectService.path_key(path))
 
 
 @dataclass(frozen=True)
@@ -207,13 +265,32 @@ class ProjectService:
     META_NAME = "project.json"
     DRAFTS_DIR = "drafts"
     RESOLVED_DIR = "resolved"
+    ASSETS_DIR = "assets"
 
     PREVIEW_CACHE_SIZE = 128
 
-    def __init__(self, base_dir):
+    def __init__(
+        self,
+        base_dir,
+        asset_registry=None,
+        file_readers=None,
+    ):
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.active: Optional[Project] = None
+        # Нельзя использовать ``or``: пустой реестр — валидный объект,
+        # а ``ProjectAssetRegistry`` определяет ``__len__`` и поэтому
+        # ложен, пока в нём нет типов.
+        self.asset_registry = (
+            asset_registry
+            if asset_registry is not None
+            else ProjectAssetRegistry()
+        )
+        self.file_readers = (
+            file_readers
+            if file_readers is not None
+            else ProjectFileReaderRegistry()
+        )
         self._preview_cache = OrderedDict()
 
     # -------------------------------------------------- свойства
@@ -274,6 +351,7 @@ class ProjectService:
         root_dir.mkdir(parents=True, exist_ok=False)
         (root_dir / self.DRAFTS_DIR).mkdir(parents=True, exist_ok=True)
         (root_dir / self.RESOLVED_DIR).mkdir(parents=True, exist_ok=True)
+        (root_dir / self.ASSETS_DIR).mkdir(parents=True, exist_ok=True)
 
         project = Project(
             id=project_id,
@@ -322,6 +400,7 @@ class ProjectService:
             created_at=str(meta.get("created_at") or ""),
             drafts={},
             resolved_drafts={},
+            assets={},
         )
 
         drafts_dir = root_dir / self.DRAFTS_DIR
@@ -339,6 +418,13 @@ class ProjectService:
                     project.resolved_drafts[
                         self.resolved_key(draft.tab_id, draft.root_path)
                     ] = draft
+
+        assets_dir = root_dir / self.ASSETS_DIR
+        if assets_dir.is_dir():
+            for draft_path in sorted(assets_dir.glob("*.json")):
+                draft = self._read_asset_draft(draft_path)
+                if draft is not None:
+                    project.assets[self.path_key(draft.path)] = draft
 
         self.active = project
         return project
@@ -359,11 +445,14 @@ class ProjectService:
 
             drafts_dir = entry / self.DRAFTS_DIR
             resolved_dir = entry / self.RESOLVED_DIR
+            assets_dir = entry / self.ASSETS_DIR
             draft_count = 0
             if drafts_dir.is_dir():
                 draft_count += len(list(drafts_dir.glob("*.json")))
             if resolved_dir.is_dir():
                 draft_count += len(list(resolved_dir.glob("*.json")))
+            if assets_dir.is_dir():
+                draft_count += len(list(assets_dir.glob("*.json")))
 
             try:
                 save_mode = str(meta["save_mode"]).lower().replace("-", "_")
@@ -526,6 +615,21 @@ class ProjectService:
                 )
             )
 
+        for draft in project.assets.values():
+            if not draft.is_dirty:
+                continue
+            draft.saved_bytes = draft.current_bytes
+            draft.saved_at = time.time()
+            self._write_asset_draft(project, draft)
+            saved.append(
+                SavedDraft(
+                    kind="asset",
+                    key=self.path_key(draft.path),
+                    path=draft.path,
+                    text="",
+                )
+            )
+
         for draft in project.resolved_drafts.values():
             if not draft.is_dirty:
                 continue
@@ -590,6 +694,131 @@ class ProjectService:
         return [
             draft
             for draft in self.active.drafts.values()
+            if draft.is_dirty
+        ]
+
+    # -------------------------------------------------- двоичные черновики
+    @staticmethod
+    def _asset_draft_filename(path) -> str:
+        digest = hashlib.sha1(
+            ProjectService.path_key(path).encode("utf-8", "replace")
+        ).hexdigest()
+        return digest + ".json"
+
+    def update_asset_draft(
+        self,
+        path,
+        data: bytes,
+        is_new: Optional[bool] = None,
+    ) -> ProjectAssetDraft:
+        """Обновить двоичный черновик в памяти (без записи в проект)."""
+        project = self._require_active()
+        path = Path(path)
+        key = self.path_key(path)
+        draft = project.assets.get(key)
+        payload = bytes(data or b"")
+
+        if draft is None:
+            if path.is_file():
+                try:
+                    original = path.read_bytes()
+                except OSError:
+                    original = b""
+                original_sha1 = hashlib.sha1(original).hexdigest()
+                saved = original
+                new_flag = False
+            else:
+                original_sha1 = ""
+                saved = b""
+                new_flag = True
+
+            if is_new is not None:
+                new_flag = bool(is_new)
+
+            draft = ProjectAssetDraft(
+                path=path,
+                original_sha1=original_sha1,
+                current_bytes=payload,
+                saved_bytes=saved,
+                is_new=new_flag,
+                revision=0,
+                updated_at=time.time(),
+                saved_at=0.0,
+            )
+            project.assets[key] = draft
+        elif draft.current_bytes != payload:
+            draft.current_bytes = payload
+            draft.revision += 1
+            draft.updated_at = time.time()
+            if is_new is not None:
+                draft.is_new = bool(is_new)
+            self._invalidate_preview_cache(path)
+
+        return draft
+
+    def save_asset_draft(
+        self,
+        path,
+        data: Optional[bytes] = None,
+    ) -> ProjectAssetDraft:
+        project = self._require_active()
+        draft = project.assets.get(self.path_key(path))
+        if draft is None:
+            if data is None:
+                raise ProjectError("Двоичный черновик не найден: %s" % path)
+            draft = self.update_asset_draft(path, data)
+        elif data is not None:
+            draft = self.update_asset_draft(path, data)
+
+        draft.saved_bytes = draft.current_bytes
+        draft.saved_at = time.time()
+        self._write_asset_draft(project, draft)
+        return draft
+
+    def get_asset_draft(self, path) -> Optional[ProjectAssetDraft]:
+        if self.active is None:
+            return None
+        return self.active.assets.get(self.path_key(path))
+
+    def get_asset_bytes(self, path) -> Optional[bytes]:
+        draft = self.get_asset_draft(path)
+        return draft.current_bytes if draft is not None else None
+
+    def remove_asset_draft(self, path) -> bool:
+        project = self._require_active()
+        key = self.path_key(path)
+        draft = project.assets.pop(key, None)
+        if draft is None:
+            return False
+
+        self._invalidate_preview_cache(path)
+        target = (
+            project.root_dir
+            / self.ASSETS_DIR
+            / self._asset_draft_filename(path)
+        )
+        try:
+            if target.is_file():
+                target.unlink()
+        except OSError:
+            pass
+        return True
+
+    def changed_asset_drafts(self) -> List[ProjectAssetDraft]:
+        if self.active is None:
+            return []
+        return [
+            draft
+            for draft in self.active.assets.values()
+            if draft.has_changes
+        ]
+
+    def dirty_asset_drafts(self) -> List[ProjectAssetDraft]:
+        if self.active is None:
+            return []
+        return [
+            draft
+            for draft in self.active.assets.values()
             if draft.is_dirty
         ]
 
@@ -705,11 +934,15 @@ class ProjectService:
     def status_text(self) -> str:
         if self.active is None:
             return "Проект: не создан"
-        changed = len(self.changed_drafts()) + len(
-            self.changed_resolved_drafts()
+        changed = (
+            len(self.changed_drafts())
+            + len(self.changed_resolved_drafts())
+            + len(self.changed_asset_drafts())
         )
-        dirty = len(self.dirty_drafts()) + len(
-            self.dirty_resolved_drafts()
+        dirty = (
+            len(self.dirty_drafts())
+            + len(self.dirty_resolved_drafts())
+            + len(self.dirty_asset_drafts())
         )
         mode = (
             "root"
@@ -771,6 +1004,17 @@ class ProjectService:
             self._digest(draft.current_text),
         )
 
+    def _asset_preview_key(self, draft, forest):
+        return (
+            "asset",
+            self._preview_project_key(forest),
+            self.path_key(draft.path),
+            bool(draft.is_new),
+            int(draft.revision),
+            draft.original_sha1,
+            draft.current_sha1,
+        )
+
     def _resolved_preview_key(self, draft, forest):
         return (
             "resolved",
@@ -781,6 +1025,10 @@ class ProjectService:
             self._digest(draft.current_text),
             self._line_sources_signature(draft.line_sources),
         )
+
+    def invalidate_preview_cache(self):
+        """Сбросить кэш предпросмотра (например, после смены типов)."""
+        self._preview_cache.clear()
 
     def _invalidate_preview_cache(self, path=None):
         if path is None:
@@ -840,6 +1088,119 @@ class ProjectService:
                 "Новый файл находится вне gamedata/configs: %s" % path
             )
         return relative
+
+    def _asset_relative_path(self, forest, path):
+        """Путь ресурса от gamedata и его зарегистрированный тип."""
+        scan_dir = Path(getattr(forest, "scan_dir", "") or "")
+        if not str(scan_dir):
+            raise ProjectError("Не определён каталог gamedata/configs")
+
+        game_root = (
+            scan_dir.parent
+            if scan_dir.name.lower() == "configs"
+            else scan_dir
+        )
+
+        try:
+            return self.asset_registry.relative_for_path(game_root, path)
+        except ProjectAssetTypeError as exc:
+            raise ProjectError(str(exc))
+
+    def _asset_preview_item(self, project, forest, draft, title):
+        try:
+            relative, asset_type = self._asset_relative_path(
+                forest,
+                draft.path,
+            )
+        except ProjectError as exc:
+            return PreviewItem(
+                title=title,
+                source_path=Path(draft.path),
+                plan=None,
+                generated=None,
+                error=str(exc),
+                kind="asset",
+                draft=None,
+            )
+
+        patch_rel = Path("gamedata") / relative
+        plan = PatchPlan(
+            source_path=Path(draft.path),
+            target=PatchTarget(
+                source_path=Path(draft.path),
+                root_path=Path(getattr(forest, "scan_dir", "")).parent,
+                reason="Двоичный ресурс проекта",
+            ),
+            patch_mod="ACE Patch - %s" % project.name,
+            patch_file_rel=relative,
+            changes=(
+                AssetChange(
+                    kind="asset",
+                    path=Path(draft.path),
+                    description="%s: заменить файл целиком" % asset_type.label,
+                ),
+            ),
+            issues=(),
+            warnings=(),
+            preview="",
+            format="asset",
+            patch_target_dir=asset_type.vfs_root,
+        )
+        view_text = ""
+        reader_notes = []
+        try:
+            view = self.file_readers.read(
+                draft.path,
+                draft.current_bytes,
+            )
+        except FileReaderError as exc:
+            reader_notes.append("Чтение: %s" % exc)
+        else:
+            if view is not None:
+                view_text = str(view.text or "")
+                if view.label:
+                    reader_notes.append("Представление: %s" % view.label)
+                reader_notes.extend(view.details)
+
+        generated = GeneratedPatch(
+            plan=plan,
+            files=(
+                PatchFile(
+                    relative_path=patch_rel,
+                    text="",
+                    data=bytes(draft.current_bytes),
+                ),
+            ),
+            text="",
+            verification=VerificationResult(
+                ok=True,
+                checks=(
+                    VerificationCheck(
+                        name="asset",
+                        ok=True,
+                        detail="Файл будет записан целиком: %s" % patch_rel,
+                    ),
+                ),
+            ),
+        )
+        return PreviewItem(
+            title=title,
+            source_path=Path(draft.path),
+            plan=plan,
+            generated=generated,
+            error="",
+            kind="asset",
+            draft=None,
+            notes=(
+                "Тип: %s" % asset_type.label,
+                "Ресурс: %s" % patch_rel,
+                "Размер: %d байт" % len(draft.current_bytes),
+                "Новый файл" if draft.is_new else "Замена существующего файла",
+            ) + tuple(reader_notes),
+            text=view_text or (
+                "Двоичный файл: %d байт" % len(draft.current_bytes)
+            ),
+        )
 
     def _new_file_preview(self, project, forest, draft, title):
         try:
@@ -956,6 +1317,23 @@ class ProjectService:
             )
             for draft in sorted(
                 self.changed_drafts(),
+                key=lambda item: str(item.path).lower(),
+            )
+        ]
+
+        asset_drafts = [
+            ProjectAssetDraft(
+                path=draft.path,
+                original_sha1=draft.original_sha1,
+                current_bytes=draft.current_bytes,
+                saved_bytes=draft.saved_bytes,
+                is_new=draft.is_new,
+                revision=draft.revision,
+                updated_at=draft.updated_at,
+                saved_at=draft.saved_at,
+            )
+            for draft in sorted(
+                self.changed_asset_drafts(),
                 key=lambda item: str(item.path).lower(),
             )
         ]
@@ -1309,6 +1687,23 @@ class ProjectService:
                 )
             )
 
+        for draft in asset_drafts:
+            index += 1
+            key = self._asset_preview_key(draft, forest)
+            items.extend(
+                self._cached_preview_items(
+                    key,
+                    lambda draft=draft: (
+                        self._asset_preview_item(
+                            project,
+                            forest,
+                            draft,
+                            draft.path.name,
+                        ),
+                    ),
+                )
+            )
+
         for draft in resolved_drafts:
             index += 1
             key = self._resolved_preview_key(draft, forest)
@@ -1359,7 +1754,8 @@ class ProjectService:
 
         for item in base.items:
             if (
-                item.kind == "new_file"
+                item.kind == "asset"
+                or item.kind == "new_file"
                 or item.plan is None
                 or not item.plan.can_generate
                 or (
@@ -1558,6 +1954,55 @@ class ProjectService:
             json.dumps(data, ensure_ascii=False),
             encoding="utf-8",
         )
+
+    def _write_asset_draft(
+        self,
+        project: Project,
+        draft: ProjectAssetDraft,
+    ) -> None:
+        assets_dir = project.root_dir / self.ASSETS_DIR
+        assets_dir.mkdir(parents=True, exist_ok=True)
+
+        data = {
+            "path": str(draft.path),
+            "original_sha1": draft.original_sha1,
+            "current_b64": base64.b64encode(draft.current_bytes).decode(
+                "ascii"
+            ),
+            "saved_b64": base64.b64encode(draft.saved_bytes).decode("ascii"),
+            "is_new": bool(draft.is_new),
+            "revision": int(draft.revision),
+            "updated_at": draft.updated_at,
+            "saved_at": draft.saved_at,
+        }
+        target = assets_dir / self._asset_draft_filename(draft.path)
+        target.write_text(
+            json.dumps(data, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def _read_asset_draft(
+        self,
+        draft_path: Path,
+    ) -> Optional[ProjectAssetDraft]:
+        try:
+            data = json.loads(draft_path.read_text(encoding="utf-8"))
+            return ProjectAssetDraft(
+                path=Path(data["path"]),
+                original_sha1=str(data.get("original_sha1") or ""),
+                current_bytes=base64.b64decode(
+                    data.get("current_b64") or ""
+                ),
+                saved_bytes=base64.b64decode(
+                    data.get("saved_b64") or ""
+                ),
+                is_new=bool(data.get("is_new")),
+                revision=int(data.get("revision") or 0),
+                updated_at=float(data.get("updated_at") or 0.0),
+                saved_at=float(data.get("saved_at") or 0.0),
+            )
+        except Exception:
+            return None
 
     def _resolved_draft_filename(self, draft: ProjectResolvedDraft) -> str:
         digest = hashlib.sha1(

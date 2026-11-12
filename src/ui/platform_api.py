@@ -14,13 +14,15 @@ from pathlib import Path
 from PyQt5.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from core.tools.fs import read_text_safe, read_xml_text
-from sdk.api import ProjectOverlay, ResolvedDraftInfo
+from sdk.api import AssetDraftInfo, ProjectOverlay, ResolvedDraftInfo
 from sdk.events import Events
 
 from .file_open_router import FileOpenRouter
 from .input_bindings import MouseBindingManager, ShortcutManager
 from .module_windows import ModuleWindowManager
-from .project import ProjectError, ProjectService
+from .project import ProjectError, ProjectService, SavedDraft
+from .project_assets import ProjectAssetRegistry, ProjectAssetTypeError
+from .project_readers import ProjectFileReaderRegistry
 from .project_dialogs import (
     ProjectCreateDialog,
     ProjectLoadDialog,
@@ -59,7 +61,13 @@ class PlatformApi:
                 Path(getattr(paths, "app_dir", ".")).resolve().parent
                 / "projects"
             )
-        self.project = ProjectService(projects_dir)
+        self.asset_types = ProjectAssetRegistry()
+        self.file_readers = ProjectFileReaderRegistry()
+        self.project = ProjectService(
+            projects_dir,
+            asset_registry=self.asset_types,
+            file_readers=self.file_readers,
+        )
         self._forest = None
         self._override_theme_enabled = None
         self._virtual_paths = set()
@@ -300,6 +308,128 @@ class PlatformApi:
         self._update_project_status()
         return True
 
+    def register_project_asset_type(self, asset_type):
+        """Зарегистрировать тип двоичного ресурса от имени модуля."""
+        try:
+            registered = self.asset_types.register(asset_type)
+        except ProjectAssetTypeError as exc:
+            self.log("Проект: тип ресурса не зарегистрирован: %s" % exc)
+            return False
+
+        self.project.invalidate_preview_cache()
+        self.log(
+            "Проект: зарегистрирован тип ресурса %s (%s/%s)"
+            % (
+                registered.key,
+                registered.vfs_root,
+                ", ".join(registered.extensions),
+            )
+        )
+        return True
+
+    def unregister_project_asset_type(self, key):
+        if not self.asset_types.unregister(key):
+            return False
+        self.project.invalidate_preview_cache()
+        self.log("Проект: тип ресурса снят: %s" % key)
+        return True
+
+    def project_asset_types(self):
+        return self.asset_types.types()
+
+    def register_file_reader(self, reader):
+        try:
+            subscription = self.file_readers.register(reader)
+        except TypeError as exc:
+            self.log("Проект: читатель не зарегистрирован: %s" % exc)
+            return None
+        self.log(
+            "Проект: зарегистрирован читатель %s"
+            % type(reader).__name__
+        )
+        return subscription
+
+    def read_file_view(self, path, data=None):
+        return self.file_readers.read(path, data)
+
+    def read_project_asset(self, path):
+        """Текущие байты двоичного черновика активного проекта."""
+        if not self.project.is_active:
+            return None
+        draft = self.project.get_asset_draft(path)
+        return draft.current_bytes if draft is not None else None
+
+    def update_project_asset(self, path, data):
+        """Обновить двоичный черновик в памяти."""
+        if not self.project.is_active:
+            self.set_status(
+                "Создайте проект, чтобы изменять ресурсы",
+                7000,
+            )
+            return False
+
+        try:
+            self.project.update_asset_draft(path, data)
+        except ProjectError as exc:
+            self.show_error(str(exc))
+            return False
+
+        self._update_project_status()
+        return True
+
+    def save_project_asset(self, path, data=None):
+        """Записать двоичный черновик в каталог проекта сейчас."""
+        if not self.project.is_active:
+            self.set_status(
+                "Создайте проект, чтобы сохранять ресурсы",
+                7000,
+            )
+            return False
+
+        try:
+            draft = self.project.save_asset_draft(path, data)
+        except ProjectError as exc:
+            self.show_error(str(exc))
+            return False
+
+        saved = SavedDraft(
+            kind="asset",
+            key=self.project.path_key(draft.path),
+            path=draft.path,
+            text="",
+        )
+        self.events.publish(Events.PROJECT_SAVED, saved)
+        self.set_status(
+            "Сохранено в проекте: %s" % Path(path).name,
+            5000,
+        )
+        self.log("Проект: сохранён ресурс %s" % Path(path).name)
+        self._update_project_status()
+        return True
+
+    def project_asset_drafts(self):
+        """Двоичные черновики активного проекта."""
+        if not self.project.is_active:
+            return ()
+        return tuple(
+            AssetDraftInfo(
+                path=draft.path,
+                is_new=bool(draft.is_new),
+                changed=bool(draft.has_changes),
+                dirty=bool(draft.is_dirty),
+                size=int(draft.size),
+            )
+            for draft in self.project.active.assets.values()
+        )
+
+    def set_editor_tab_dirty(self, tab_id, dirty):
+        if self.window is None:
+            return
+        editor = getattr(self.window, "editor", None)
+        setter = getattr(editor, "set_tab_dirty", None)
+        if callable(setter):
+            setter(tab_id, bool(dirty))
+
     def resolved_draft(self, tab_id):
         if not self.project.is_active:
             return None
@@ -441,8 +571,11 @@ class PlatformApi:
             for event in saved:
                 if event.kind == "file":
                     self.window.editor.mark_clean(event.path, event.text)
-                else:
+                elif event.kind == "resolved":
                     self.window.editor.mark_tab_clean(event.key)
+
+        for event in saved:
+            self.events.publish(Events.PROJECT_SAVED, event)
 
         self.set_status(
             "Проект сохранён: %d файл(ов)" % len(saved),
@@ -590,6 +723,7 @@ class PlatformApi:
         self.window.editor.set_editable(True)
         self._reload_open_documents()
         self._update_project_status()
+        self.events.publish(Events.PROJECT_CHANGED, project)
         self.log("Проект создан: %s" % project.name)
         self.set_status("Проект создан: %s" % project.name, 5000)
 
@@ -624,6 +758,7 @@ class PlatformApi:
         self.window.editor.set_editable(True)
         self._reload_open_documents()
         self._update_project_status()
+        self.events.publish(Events.PROJECT_CHANGED, project)
         self.log("Проект загружен: %s" % project.name)
         self.set_status("Проект загружен: %s" % project.name, 5000)
 
@@ -640,6 +775,7 @@ class PlatformApi:
             self.window.editor.set_editable(False)
 
         self._update_project_status()
+        self.events.publish(Events.PROJECT_CHANGED, None)
         self.log("Проект удалён")
         self.set_status("Проект удалён", 5000)
         return True
@@ -728,8 +864,11 @@ class PlatformApi:
             for event in saved:
                 if event.kind == "file":
                     self.window.editor.mark_clean(event.path, event.text)
-                else:
+                elif event.kind == "resolved":
                     self.window.editor.mark_tab_clean(event.key)
+
+        for event in saved:
+            self.events.publish(Events.PROJECT_SAVED, event)
 
         self.set_status(
             "Автосохранение проекта: %d файл(ов)" % len(saved),
@@ -756,12 +895,14 @@ class PlatformApi:
 
         if self._forest is None:
             self.show_error(
-                "Дерево не построено: сначала выполните «Чистый запуск»."
+                "Дерево не построено: сначала выполните «Пересобрать VFS»."
             )
             return
 
-        if not self.project.changed_drafts() and not (
-            self.project.changed_resolved_drafts()
+        if (
+            not self.project.changed_drafts()
+            and not self.project.changed_resolved_drafts()
+            and not self.project.changed_asset_drafts()
         ):
             QMessageBox.information(
                 self.window,
@@ -853,6 +994,7 @@ class PlatformApi:
                     mod_dir,
                     forbidden_roots=[Path(self._forest.scan_dir)],
                     overwrite=False,
+                    asset_rules=self.asset_types.patch_rules(),
                 )
                 written.extend(paths)
             except Exception as exc:

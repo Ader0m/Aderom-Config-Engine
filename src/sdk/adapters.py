@@ -11,7 +11,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from .api import (
+    AssetDraftInfo,
+    FileView,
     GraphMatch,
+    ProjectAssetType,
     GraphNode,
     ItemCatalog,
     ItemEntry,
@@ -19,6 +22,7 @@ from .api import (
     ItemIcon,
     ItemSection,
     SectionGraph,
+    SectionGraphRequest,
     TextureRegion,
     TreeSummary,
     XmlResolveResult,
@@ -38,6 +42,7 @@ class CoreApiAdapter:
 
     def __init__(self, provider):
         self._provider = provider
+        self._section_graph_contributors = []
 
     @classmethod
     def wrap(cls, provider):
@@ -104,6 +109,23 @@ class CoreApiAdapter:
     def forest_system_root(self, forest):
         value = getattr(forest, "system_root", None)
         return Path(value) if value else None
+
+    def game_root(self, forest):
+        fn = getattr(self._provider, "forest_game_root", None)
+        if callable(fn):
+            return fn(forest)
+
+        value = getattr(forest, "scan_dir", None)
+        if not value:
+            return None
+        scan_dir = Path(value)
+        if scan_dir.name.lower() == "configs":
+            return scan_dir.parent
+        if (scan_dir / "gamedata" / "configs").is_dir():
+            return scan_dir / "gamedata"
+        if (scan_dir / "configs").is_dir():
+            return scan_dir
+        return scan_dir.parent
 
     def add_virtual_file(self, forest, path, text):
         return self._provider.add_virtual_file(forest, path, text)
@@ -360,6 +382,35 @@ class CoreApiAdapter:
         )
         return _to_section_graph_view(graph)
 
+    def register_section_graph_contributor(self, contributor):
+        if not callable(contributor):
+            raise TypeError("contributor должен быть вызываемым")
+        if contributor not in self._section_graph_contributors:
+            self._section_graph_contributors.append(contributor)
+
+    def unregister_section_graph_contributor(self, contributor):
+        try:
+            self._section_graph_contributors.remove(contributor)
+        except ValueError:
+            return False
+        return True
+
+    def collect_section_graph_nodes(self, request, log=None):
+        nodes = []
+        for contributor in tuple(self._section_graph_contributors):
+            try:
+                result = contributor(request)
+            except Exception as exc:
+                if log is not None:
+                    log("section graph contributor: %s" % exc)
+                continue
+            if not result:
+                continue
+            for node in result:
+                if isinstance(node, GraphNode):
+                    nodes.append(node)
+        return tuple(nodes)
+
     def open_external_editor(self, path):
         for name in ("open_external_editor", "open_notepad", "open_in_notepad"):
             fn = getattr(self._provider, name, None)
@@ -552,6 +603,72 @@ class UiApiAdapter:
     def write_project_text(self, path, text):
         return self._platform.write_project_text(path, text)
 
+    def register_project_asset_type(self, asset_type):
+        return self._platform.register_project_asset_type(asset_type)
+
+    def unregister_project_asset_type(self, key):
+        return self._platform.unregister_project_asset_type(key)
+
+    def project_asset_types(self):
+        result = []
+        for item in self._platform.project_asset_types():
+            result.append(
+                ProjectAssetType(
+                    key=str(getattr(item, "key", "") or ""),
+                    label=str(getattr(item, "label", "") or ""),
+                    extensions=tuple(
+                        str(value) for value in getattr(
+                            item,
+                            "extensions",
+                            (),
+                        )
+                    ),
+                    vfs_root=str(getattr(item, "vfs_root", "") or ""),
+                )
+            )
+        return tuple(result)
+
+    def register_file_reader(self, reader):
+        return self._platform.register_file_reader(reader)
+
+    def read_file_view(self, path, data=None):
+        view = self._platform.read_file_view(path, data)
+        if view is None:
+            return None
+        return FileView(
+            text=str(getattr(view, "text", "") or ""),
+            label=str(getattr(view, "label", "") or ""),
+            details=tuple(
+                str(value) for value in getattr(view, "details", ())
+            ),
+        )
+
+    def read_project_asset(self, path):
+        return self._platform.read_project_asset(path)
+
+    def update_project_asset(self, path, data):
+        return self._platform.update_project_asset(path, data)
+
+    def save_project_asset(self, path, data=None):
+        return self._platform.save_project_asset(path, data)
+
+    def project_asset_drafts(self):
+        result = []
+        for draft in self._platform.project_asset_drafts():
+            result.append(
+                AssetDraftInfo(
+                    path=Path(draft.path),
+                    is_new=bool(getattr(draft, "is_new", False)),
+                    changed=bool(getattr(draft, "changed", False)),
+                    dirty=bool(getattr(draft, "dirty", False)),
+                    size=int(getattr(draft, "size", 0) or 0),
+                )
+            )
+        return tuple(result)
+
+    def set_editor_tab_dirty(self, tab_id, dirty):
+        return self._platform.set_editor_tab_dirty(tab_id, dirty)
+
     def resolved_draft(self, tab_id):
         return self._platform.resolved_draft(tab_id)
 
@@ -661,6 +778,9 @@ class UiApiAdapter:
         return fallback
 
     # --- команды платформы ------------------------------------------------
+
+    def open_file(self, path):
+        self._platform.commands.execute("ui.open_file", path)
 
     def open_raw(self, path):
         self._platform.commands.execute("ui.open_file_raw", path)
