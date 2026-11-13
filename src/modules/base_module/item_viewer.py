@@ -18,13 +18,11 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import replace
 from pathlib import Path
 
 from sdk import (
     DEFAULT_SEARCH_DELAY_MS,
     ITEM_SECTION_MIME,
-    ResolvedLineEdit,
     encode_item_section,
 )
 from sdk.events import Events
@@ -78,6 +76,7 @@ from PyQt5.QtWidgets import (
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -794,6 +793,7 @@ class ItemViewerFeature:
         self._request_seq = 0
         self._running = False
         self._catalog = None
+        self._images = {}
 
         # Контекст редактирования system.ltx (resolved-черновик проекта).
         self._root_path = None
@@ -803,6 +803,41 @@ class ItemViewerFeature:
         self._original_text = ""
         self._line_sources = ()
         self._saved_text = ""
+
+        # Открытые карточки и удержанные документы.
+        self._cards = {}
+        self._card_retains = set()
+        self._retained = set()
+
+        self._pending_sections = set()
+        self._pending_cards = set()
+        self._pending_full = False
+        self._pending_focus_line = 0
+        self._refresh_timer = (
+            QTimer() if QApplication.instance() is not None else None
+        )
+        if self._refresh_timer is not None:
+            self._refresh_timer.setSingleShot(True)
+            self._refresh_timer.setInterval(250)
+            self._refresh_timer.timeout.connect(self._flush_refresh)
+
+        events = getattr(ctx, "events", None)
+        self._doc_sub = None
+        self._tab_sub = None
+        self._card_req_sub = None
+        if events is not None:
+            self._doc_sub = events.subscribe(
+                Events.RESOLVED_DOCUMENT_CHANGED,
+                self._on_document_changed,
+            )
+            self._tab_sub = events.subscribe(
+                Events.UI_TAB_CLOSED,
+                self._on_tab_closed,
+            )
+            self._card_req_sub = events.subscribe(
+                Events.ITEM_CARD_REQUESTED,
+                self._on_card_requested,
+            )
 
     def _project_overlay(self):
         fn = getattr(self.ctx.ui, "project_overlay", None)
@@ -840,7 +875,7 @@ class ItemViewerFeature:
             else ""
         )
         tab_id = resolved_tab_id(rel) if rel else ""
-        title = "RESOLVED: %s" % rel if rel else ""
+        title = "[Res]%s" % rel if rel else ""
 
         draft = self.ctx.ui.resolved_draft(tab_id) if tab_id else None
         overlay = self._project_overlay()
@@ -938,6 +973,40 @@ class ItemViewerFeature:
             self.ctx.ui.close_module_window(self.WINDOW_KEY)
             self._window = None
 
+        for tab_id in list(self._card_retains):
+            card_tab_id = tab_id
+            record = self._cards.get(card_tab_id)
+            if record is not None:
+                fn = getattr(
+                    self.ctx.ui,
+                    "release_resolved_document",
+                    None,
+                )
+                if callable(fn):
+                    fn(record[0])
+        self._cards.clear()
+        self._card_retains.clear()
+
+        for tab_id in list(self._retained):
+            fn = getattr(self.ctx.ui, "release_resolved_document", None)
+            if callable(fn):
+                fn(tab_id)
+        self._retained.clear()
+
+        for sub in (
+            getattr(self, "_doc_sub", None),
+            getattr(self, "_tab_sub", None),
+            getattr(self, "_card_req_sub", None),
+        ):
+            if sub is not None and hasattr(sub, "unsubscribe"):
+                try:
+                    sub.unsubscribe()
+                except Exception:
+                    pass
+        self._doc_sub = None
+        self._tab_sub = None
+        self._card_req_sub = None
+
     # -------------------------------------------------- фоновая задача
     def _on_log(self, message):
         text = str(message)
@@ -967,7 +1036,10 @@ class ItemViewerFeature:
 
         catalog, images, context = result
         self._catalog = catalog
+        self._images = images or {}
+        previous_tab = self._tab_id
         self._apply_context(context)
+        self._ensure_root_document(context, previous_tab)
 
         self.ctx.ui.set_status(
             "Предметы: %d" % len(catalog.items),
@@ -988,12 +1060,56 @@ class ItemViewerFeature:
                 theme_color=self.ctx.ui.theme_color,
                 on_refresh=self.show,
                 can_edit=self._can_edit,
-                on_replace_line=self._replace_line,
-                on_delete_line=self._delete_line,
-                on_insert_line=self._insert_line,
-                on_go_to_line=self._go_to_line,
+                on_replace_line=lambda line, text: self._replace_line(
+                    self._tab_id,
+                    line,
+                    text,
+                ),
+                on_delete_line=lambda line: self._delete_line(
+                    self._tab_id,
+                    line,
+                ),
+                on_insert_line=lambda line, text: self._insert_line(
+                    self._tab_id,
+                    line,
+                    text,
+                ),
+                on_field_edit=lambda section, key, value: self._apply_field(
+                    self._tab_id,
+                    section,
+                    key,
+                    value,
+                ),
+                on_field_rename=lambda section, old_key, new_key, value: (
+                    self._rename_field(
+                        self._tab_id,
+                        section,
+                        old_key,
+                        new_key,
+                        value,
+                    )
+                ),
+                on_go_to_line=lambda line: self._go_to_line(
+                    self._tab_id,
+                    line,
+                ),
                 on_save=self._save_now,
                 on_create_item=self._create_item,
+                on_item_entry=lambda section: self._item_entry(
+                    self._tab_id,
+                    section,
+                ),
+                on_open_card=lambda section: self.open_card(
+                    self._tab_id,
+                    section,
+                ),
+                on_undo=lambda: self.ctx.ui.undo_resolved_document(
+                    self._tab_id
+                ),
+                on_redo=lambda: self.ctx.ui.redo_resolved_document(
+                    self._tab_id
+                ),
+                document_title=self._title,
             )
 
         self._window.set_catalog(catalog, images)
@@ -1009,6 +1125,289 @@ class ItemViewerFeature:
         self._saved_text = str(context.get("saved_text") or "")
         self._line_sources = tuple(context.get("line_sources") or ())
 
+    # -------------------------------------------------- документ и карточки
+    def _ensure_root_document(self, context, previous_tab):
+        tab_id = str(context.get("tab_id") or "")
+        root_path = context.get("root_path")
+        if not tab_id or root_path is None:
+            return
+        ensure = getattr(self.ctx.ui, "ensure_resolved_document", None)
+        if callable(ensure):
+            ensure(
+                tab_id,
+                root_path,
+                self._title,
+                self._resolved_text,
+                self._line_sources,
+            )
+        if previous_tab and previous_tab != tab_id:
+            self._release(previous_tab)
+        self._retain(tab_id)
+
+    def _retain(self, tab_id):
+        tab_id = str(tab_id or "")
+        if not tab_id or tab_id in self._retained:
+            return
+        fn = getattr(self.ctx.ui, "retain_resolved_document", None)
+        if callable(fn) and fn(tab_id):
+            self._retained.add(tab_id)
+
+    def _release(self, tab_id):
+        tab_id = str(tab_id or "")
+        if tab_id not in self._retained:
+            return
+        fn = getattr(self.ctx.ui, "release_resolved_document", None)
+        if callable(fn):
+            fn(tab_id)
+        self._retained.discard(tab_id)
+
+    def _item_entry(self, tab_id, section):
+        fn = getattr(self.ctx.ui, "item_entry", None)
+        if not callable(fn):
+            return None
+        try:
+            return fn(tab_id, section)
+        except Exception as exc:
+            self.ctx.ui.log(
+                "Предметы: не удалось получить карточку [%s]: %s"
+                % (section, exc)
+            )
+            return None
+
+    def _image(self, section):
+        return self._images.get(section)
+
+    def _document_title(self, tab_id):
+        fn = getattr(self.ctx.ui, "resolved_document_title", None)
+        if callable(fn):
+            title = fn(tab_id)
+            if title:
+                return title
+        if str(tab_id) == self._tab_id:
+            return self._title
+        return ""
+
+    def _go_to_section(self, tab_id, section):
+        entry = self._item_entry(tab_id, section)
+        line = entry.line_number if entry is not None else None
+        fn = getattr(self.ctx.ui, "open_resolved_document", None)
+        if callable(fn):
+            fn(tab_id, line)
+
+    def _on_document_changed(self, change):
+        tab_id = str(getattr(change, "tab_id", "") or "")
+        if not tab_id:
+            return
+
+        sections = tuple(
+            str(section).lower()
+            for section in (getattr(change, "sections", ()) or ())
+        )
+        full = bool(getattr(change, "full", False))
+
+        if tab_id == self._tab_id:
+            info = self.ctx.ui.resolved_draft(tab_id)
+            if info is not None:
+                self._resolved_text = info.text
+                self._line_sources = tuple(info.line_sources or ())
+                self._saved_text = info.saved_text
+            focus_line = int(getattr(change, "focus_line", 0) or 0)
+            if focus_line:
+                self._pending_focus_line = focus_line
+            if full:
+                self._pending_full = True
+            elif sections:
+                self._pending_sections.update(sections)
+            elif not focus_line:
+                self._pending_full = True
+
+        for card_tab_id, record in list(self._cards.items()):
+            root_tab, section, _card = record
+            if root_tab != tab_id:
+                continue
+            if full or not sections or section.lower() in sections:
+                self._pending_cards.add(card_tab_id)
+
+        if self._pending_sections or self._pending_full or self._pending_cards:
+            if self._refresh_timer is not None:
+                self._refresh_timer.start()
+            else:
+                self._flush_refresh()
+
+    def _flush_refresh(self):
+        full = self._pending_full
+        sections = set(self._pending_sections)
+        cards = set(self._pending_cards)
+        focus_line = self._pending_focus_line
+
+        self._pending_full = False
+        self._pending_sections.clear()
+        self._pending_cards.clear()
+        self._pending_focus_line = 0
+
+        if (
+            not full
+            and not sections
+            and focus_line
+            and self._tab_id
+        ):
+            section = self.ctx.ui.resolved_section_at_line(
+                self._tab_id,
+                focus_line,
+            )
+            if section:
+                sections.add(section.lower())
+
+        if self._window is not None and self._tab_id:
+            if full:
+                if self._window.isVisible():
+                    self.show()
+                else:
+                    section = self._window.card.section()
+                    if section:
+                        self._window.update_section(
+                            section,
+                            self._item_entry(self._tab_id, section),
+                        )
+            else:
+                for section in sections:
+                    self._window.update_section(
+                        section,
+                        self._item_entry(self._tab_id, section),
+                    )
+
+        for card_tab_id in cards:
+            record = self._cards.get(card_tab_id)
+            if record is None:
+                continue
+            _root_tab, section, card = record
+            if (
+                not full
+                and sections
+                and section.lower() not in sections
+            ):
+                continue
+            if not full and not sections:
+                continue
+            card.refresh()
+
+    def _on_tab_closed(self, tab_id):
+        record = self._cards.pop(str(tab_id), None)
+        if record is None:
+            return
+        root_tab, _section, _card = record
+        fn = getattr(self.ctx.ui, "release_resolved_document", None)
+        if callable(fn):
+            fn(root_tab)
+        self._card_retains.discard(str(tab_id))
+
+    def _on_card_requested(self, request):
+        tab_id = str(getattr(request, "tab_id", "") or "")
+        section = str(getattr(request, "section", "") or "")
+        if not tab_id or not section:
+            return
+        if self._item_entry(tab_id, section) is None:
+            self.ctx.ui.set_status(
+                "Секция [%s] не является предметом" % section,
+                5000,
+            )
+            return
+        self.open_card(tab_id, section)
+
+    @staticmethod
+    def _card_tab_id(tab_id, section):
+        return "%s#item:%s" % (
+            str(tab_id),
+            str(section).strip().lower(),
+        )
+
+    @staticmethod
+    def _card_title(section):
+        return "[item]%s" % str(section)
+
+    def open_card(self, tab_id, section):
+        """Открыть карточку предмета как вкладку основного окна."""
+        section = str(section or "").strip()
+        if not section:
+            return
+
+        card_tab_id = self._card_tab_id(tab_id, section)
+        title = self._card_title(section)
+        existing = self._cards.get(card_tab_id)
+        if existing is not None:
+            self.ctx.ui.open_editor_tab(
+                card_tab_id,
+                title,
+                existing[2],
+            )
+            existing[2].refresh()
+            return
+
+        retain = getattr(self.ctx.ui, "retain_resolved_document", None)
+        if callable(retain):
+            retain(tab_id)
+        self._card_retains.add(card_tab_id)
+
+        card = ItemCardView(
+            get_entry=lambda: self._item_entry(tab_id, section),
+            get_image=self._image,
+            can_edit=lambda: self._can_edit_tab(tab_id),
+            on_replace_line=lambda line, text: self._replace_line(
+                tab_id,
+                line,
+                text,
+            ),
+            on_delete_line=lambda line: self._delete_line(
+                tab_id,
+                line,
+            ),
+            on_insert_line=lambda line, text: self._insert_line(
+                tab_id,
+                line,
+                text,
+            ),
+            on_field_edit=lambda section, key, value: self._apply_field(
+                tab_id,
+                section,
+                key,
+                value,
+            ),
+            on_field_rename=lambda section, old_key, new_key, value: (
+                self._rename_field(
+                    tab_id,
+                    section,
+                    old_key,
+                    new_key,
+                    value,
+                )
+            ),
+            on_go_to_line=lambda line: self._go_to_line(tab_id, line),
+            on_save=self._save_now,
+            on_undo=lambda: self.ctx.ui.undo_resolved_document(tab_id),
+            on_redo=lambda: self.ctx.ui.redo_resolved_document(tab_id),
+            on_open_document=lambda: self._go_to_section(
+                tab_id,
+                section,
+            ),
+            theme_color=self.ctx.ui.theme_color,
+            section=section,
+            document_title=self._document_title(tab_id),
+            preview=False,
+        )
+        self._cards[card_tab_id] = (tab_id, section, card)
+        self.ctx.ui.open_editor_tab(card_tab_id, title, card)
+        card.refresh()
+
+    def _can_edit_tab(self, tab_id):
+        has = getattr(self.ctx.ui, "has_resolved_document", None)
+        if callable(has) and has(tab_id):
+            return bool(self.ctx.ui.is_project_active())
+        return bool(
+            self.ctx.ui.is_project_active()
+            and self.ctx.ui.resolved_draft(tab_id) is not None
+        )
+
+    # -------------------------------------------------- правка
     @staticmethod
     def _same_path(left, right):
         try:
@@ -1018,9 +1417,28 @@ class ItemViewerFeature:
         except (TypeError, ValueError, OSError):
             return False
 
-    def _new_file_for_line(self, line_number):
+    def _snapshot(self, tab_id):
+        reader = getattr(self.ctx.ui, "resolved_draft", None)
+        if not callable(reader):
+            return None
+        try:
+            return reader(tab_id)
+        except Exception:
+            return None
+
+    def _new_file_for_line(self, tab_id, line_number):
         overlay = self._project_overlay()
         if overlay is None:
+            return None
+
+        snapshot = self._snapshot(tab_id)
+        if snapshot is not None:
+            text = snapshot.text
+            sources = tuple(snapshot.line_sources or ())
+        elif str(tab_id) == self._tab_id and self._resolved_text:
+            text = self._resolved_text
+            sources = tuple(self._line_sources or ())
+        else:
             return None
 
         new_files = {
@@ -1030,15 +1448,15 @@ class ItemViewerFeature:
             return None
 
         index = int(line_number) - 1
-        if 0 <= index < len(self._line_sources):
-            source = self._line_sources[index]
+        if 0 <= index < len(sources):
+            source = sources[index]
             path = getattr(source, "path", None)
             if path is not None:
                 for candidate in new_files:
                     if self._same_path(candidate, path):
                         return candidate
 
-        section = _ltx_section_at_line(self._resolved_text, line_number)
+        section = _ltx_section_at_line(text, line_number)
         if not section:
             return None
 
@@ -1052,16 +1470,24 @@ class ItemViewerFeature:
 
         return None
 
-    def _edit_new_item_file(self, line_number, action, new_line=None):
-        path = self._new_file_for_line(line_number)
+    def _edit_new_item_file(self, tab_id, line_number, action, new_line=None):
+        path = self._new_file_for_line(tab_id, line_number)
         if path is None:
             return False
 
-        section = _ltx_section_at_line(self._resolved_text, line_number)
+        snapshot = self._snapshot(tab_id)
+        if snapshot is not None:
+            text = snapshot.text
+        elif str(tab_id) == self._tab_id and self._resolved_text:
+            text = self._resolved_text
+        else:
+            return False
+
+        section = _ltx_section_at_line(text, line_number)
         if not section:
             return False
 
-        lines = self._resolved_text.split("\n")
+        lines = text.split("\n")
         index = int(line_number) - 1
         old_line = lines[index] if 0 <= index < len(lines) else ""
         key = _ltx_key_from_line(old_line)
@@ -1092,7 +1518,8 @@ class ItemViewerFeature:
             "Изменения записаны в %s" % Path(path).name,
             5000,
         )
-        self.show()
+        if str(tab_id) == self._tab_id:
+            self.show()
         return True
 
     def _can_edit(self):
@@ -1103,153 +1530,111 @@ class ItemViewerFeature:
             and self._resolved_text
         )
 
-    def _commit_text(self, new_text, line_sources, line_edit=None):
-        if not self._can_edit():
-            self.ctx.ui.show_error(
-                "Создайте проект, чтобы изменять свойства предметов."
-            )
+    def _apply_field(self, tab_id, section, key, value):
+        fn = getattr(self.ctx.ui, "apply_resolved_field_edit", None)
+        if not callable(fn):
             return False
-
-        latest = self.ctx.ui.resolved_draft(self._tab_id)
-        if latest is not None and latest.text != self._resolved_text:
-            self.ctx.ui.show_error(
-                "system.ltx уже изменён в другой вкладке. "
-                "Нажмите «Обновить» в просмотре предметов и повторите правку."
-            )
-            return False
-
-        try:
-            ok = self.ctx.ui.update_resolved_draft(
-                self._tab_id,
-                self._root_path,
-                self._title,
-                self._original_text,
-                new_text,
-                line_sources,
-                line_edit=line_edit,
-            )
-        except Exception as exc:
-            self.ctx.ui.show_error(
-                "Не удалось обновить черновик system.ltx:\n%s" % exc
-            )
-            return False
-
+        ok = bool(fn(tab_id, section, key, value))
         if not ok:
+            self.ctx.ui.show_error(
+                "Не удалось изменить поле %s в секции [%s]."
+                % (key, section)
+            )
+        return ok
+
+    def _rename_field(self, tab_id, section, old_key, new_key, value):
+        fn = getattr(self.ctx.ui, "rename_resolved_field", None)
+        if not callable(fn):
             return False
+        ok = bool(fn(tab_id, section, old_key, new_key, value))
+        if not ok:
+            self.ctx.ui.show_error(
+                "Не удалось переименовать поле %s в секции [%s]."
+                % (old_key, section)
+            )
+        return ok
 
-        self._resolved_text = str(new_text)
-        self._line_sources = tuple(line_sources or ())
-
-        info = self.ctx.ui.resolved_draft(self._tab_id)
-        if info is not None:
-            self._saved_text = info.saved_text
-
-        self.ctx.ui.set_status("Свойство изменено в system.ltx", 4000)
-        return True
-
-    def _replace_line(self, line_number, new_line):
-        lines = self._resolved_text.split("\n")
-        index = int(line_number) - 1
-        if index < 0 or index >= len(lines):
-            self.ctx.ui.show_error("Строка %s не найдена." % line_number)
-            return False
-
-        if self._new_file_for_line(line_number) is not None:
+    def _replace_line(self, tab_id, line_number, new_line):
+        if self._new_file_for_line(tab_id, line_number) is not None:
             return self._edit_new_item_file(
+                tab_id,
                 line_number,
                 "replace",
                 new_line=new_line,
             )
 
-        new_line = str(new_line).rstrip("\r\n")
-        lines[index] = new_line
-        return self._commit_text(
-            "\n".join(lines),
-            self._line_sources,
-            line_edit=ResolvedLineEdit(
-                action="replace",
-                line_number=int(line_number),
-                text=new_line,
-            ),
+        ok = self.ctx.ui.apply_resolved_line_edit(
+            tab_id,
+            "replace",
+            line_number,
+            str(new_line).rstrip("\r\n"),
         )
+        if not ok:
+            self.ctx.ui.show_error(
+                "Не удалось изменить строку %s в resolved-документе."
+                % line_number
+            )
+        return ok
 
-    def _delete_line(self, line_number):
-        lines = self._resolved_text.split("\n")
-        index = int(line_number) - 1
-        if index < 0 or index >= len(lines):
-            self.ctx.ui.show_error("Строка %s не найдена." % line_number)
-            return False
-
-        if self._new_file_for_line(line_number) is not None:
-            return self._edit_new_item_file(line_number, "delete")
-
-        sources = list(self._line_sources)
-        while len(sources) < len(lines):
-            sources.append(None)
-
-        del lines[index]
-        if index < len(sources):
-            del sources[index]
-
-        return self._commit_text(
-            "\n".join(lines),
-            tuple(sources),
-            line_edit=ResolvedLineEdit(
-                action="delete",
-                line_number=int(line_number),
-            ),
-        )
-
-    def _insert_line(self, line_number, new_line):
-        lines = self._resolved_text.split("\n")
-        line_number = int(line_number)
-        if line_number < 0 or line_number > len(lines):
-            self.ctx.ui.show_error("Строка %s не найдена." % line_number)
-            return False
-
-        if self._new_file_for_line(line_number) is not None:
+    def _delete_line(self, tab_id, line_number):
+        if self._new_file_for_line(tab_id, line_number) is not None:
             return self._edit_new_item_file(
+                tab_id,
+                line_number,
+                "delete",
+            )
+
+        ok = self.ctx.ui.apply_resolved_line_edit(
+            tab_id,
+            "delete",
+            line_number,
+        )
+        if not ok:
+            self.ctx.ui.show_error(
+                "Не удалось удалить строку %s в resolved-документе."
+                % line_number
+            )
+        return ok
+
+    def _insert_line(self, tab_id, line_number, new_line):
+        if self._new_file_for_line(tab_id, line_number) is not None:
+            return self._edit_new_item_file(
+                tab_id,
                 line_number,
                 "insert",
                 new_line=new_line,
             )
 
-        index = line_number
-        line_count = len(lines)
-        lines.insert(index, str(new_line).rstrip("\r\n"))
-
-        sources = list(self._line_sources)
-        while len(sources) < line_count:
-            sources.append(None)
-        sources.insert(index, None)
-
-        return self._commit_text(
-            "\n".join(lines),
-            tuple(sources),
-            line_edit=ResolvedLineEdit(
-                action="insert",
-                line_number=int(line_number),
-                text=str(new_line).rstrip("\r\n"),
-            ),
+        ok = self.ctx.ui.apply_resolved_line_edit(
+            tab_id,
+            "insert",
+            line_number,
+            str(new_line).rstrip("\r\n"),
         )
-
-    def _go_to_line(self, line_number):
-        if self._root_path is None or not self._tab_id:
+        if not ok:
             self.ctx.ui.show_error(
-                "Не удалось определить файл system.ltx."
+                "Не удалось вставить строку после %s в resolved-документе."
+                % line_number
+            )
+        return ok
+
+    def _go_to_line(self, tab_id, line_number):
+        opener = getattr(self.ctx.ui, "open_resolved_document", None)
+        if callable(opener):
+            opener(tab_id, int(line_number))
+            return
+
+        snapshot = self._snapshot(tab_id)
+        if snapshot is None:
+            self.ctx.ui.show_error(
+                "Не удалось определить документ для перехода."
             )
             return
-
-        line_number = int(line_number)
-        line_count = self._resolved_text.count("\n") + 1
-        if line_number < 1 or line_number > line_count:
-            return
-
         self.ctx.ui.open_resolved_tab(
-            self._tab_id,
-            self._title,
-            self._resolved_text,
-            self._line_sources,
+            tab_id,
+            self._title if tab_id == self._tab_id else tab_id,
+            snapshot.text,
+            snapshot.line_sources,
             self._root_path,
             line_number=int(line_number),
         )
@@ -1386,9 +1771,12 @@ class ItemViewerFeature:
             newline=xml_newline,
         )
 
-        if not self.ctx.ui.write_project_text(item_path, item_text):
-            return False
-        if not self.ctx.ui.write_project_text(xml_path, xml_text):
+        if not self.ctx.ui.write_project_texts(
+            (
+                (item_path, item_text),
+                (xml_path, xml_text),
+            )
+        ):
             return False
 
         self.ctx.ui.log(
@@ -1430,6 +1818,552 @@ class ItemViewerFeature:
         self.show()
 
 
+class ItemCardView(QWidget):
+    """Карточка предмета.
+
+    Один и тот же виджет используется как preview в окне-пикере и как
+    самостоятельная вкладка. Значения полей не хранятся здесь: виджет
+    каждый раз перечитывает проекцию из живого документа.
+    """
+
+    def __init__(
+        self,
+        get_entry,
+        get_image,
+        can_edit,
+        on_replace_line=None,
+        on_delete_line=None,
+        on_insert_line=None,
+        on_field_edit=None,
+        on_field_rename=None,
+        on_go_to_line=None,
+        on_save=None,
+        on_undo=None,
+        on_redo=None,
+        on_open_as_tab=None,
+        on_open_document=None,
+        theme_color=None,
+        section=None,
+        document_title="",
+        preview=False,
+        parent=None,
+    ):
+        super().__init__(parent)
+
+        self._get_entry = get_entry
+        self._get_image = get_image
+        self._can_edit = can_edit or (lambda: False)
+        self._on_replace_line = on_replace_line
+        self._on_delete_line = on_delete_line
+        self._on_insert_line = on_insert_line
+        self._on_field_edit = on_field_edit
+        self._on_field_rename = on_field_rename
+        self._on_go_to_line = on_go_to_line
+        self._on_save = on_save
+        self._on_undo = on_undo
+        self._on_redo = on_redo
+        self._on_open_as_tab = on_open_as_tab
+        self._on_open_document = on_open_document
+        self._theme_color = theme_color or (
+            lambda name, fallback=None: fallback
+        )
+        self._section = str(section or "")
+        self._document_title = str(document_title or "")
+        self._preview = bool(preview)
+        self._entry = None
+        self._populating_fields = False
+
+        self._placeholder = _placeholder_pixmap(
+            self._palette("text_muted", "#787878")
+        )
+        self._build_ui()
+        self._init_shortcuts()
+
+    # -------------------------------------------------- UI
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
+
+        top = QHBoxLayout()
+        title_box = QVBoxLayout()
+        title_box.setContentsMargins(0, 0, 0, 0)
+        title_box.setSpacing(0)
+
+        self.section_label = QLabel("—")
+        self.section_label.setStyleSheet("font-weight: 600;")
+        self.section_label.setWordWrap(True)
+        title_box.addWidget(self.section_label)
+
+        self.source_label = QLabel()
+        self.source_label.setProperty("role", "muted")
+        self.source_label.setWordWrap(True)
+        self.source_label.setVisible(bool(self._document_title))
+        if self._document_title:
+            self.source_label.setText(
+                "Документ: %s" % self._document_title
+            )
+        title_box.addWidget(self.source_label)
+        top.addLayout(title_box, 1)
+
+        self.open_tab_btn = QToolButton()
+        self.open_tab_btn.setText("⧉")
+        self.open_tab_btn.setToolTip("Открыть карточку как вкладку")
+        self.open_tab_btn.setAutoRaise(True)
+        self.open_tab_btn.clicked.connect(self._open_as_tab)
+        self.open_tab_btn.setVisible(
+            self._preview and self._on_open_as_tab is not None
+        )
+        top.addWidget(self.open_tab_btn)
+
+        self.open_doc_btn = QToolButton()
+        self.open_doc_btn.setText("Документ")
+        self.open_doc_btn.setToolTip("Открыть документ в редакторе")
+        self.open_doc_btn.setAutoRaise(True)
+        self.open_doc_btn.clicked.connect(self._open_document)
+        self.open_doc_btn.setVisible(
+            not self._preview and self._on_open_document is not None
+        )
+        top.addWidget(self.open_doc_btn)
+
+        self.save_btn = QToolButton()
+        self.save_btn.setText("Сохранить")
+        self.save_btn.setToolTip("Сохранить черновик (Ctrl+S)")
+        self.save_btn.setAutoRaise(True)
+        self.save_btn.clicked.connect(self._save)
+        self.save_btn.setVisible(not self._preview and self._on_save is not None)
+        top.addWidget(self.save_btn)
+
+        layout.addLayout(top)
+
+        header = QHBoxLayout()
+
+        self.icon_label = QLabel()
+        self.icon_label.setFixedSize(190, 190)
+        self.icon_label.setAlignment(Qt.AlignCenter)
+        header.addWidget(self.icon_label, 0, Qt.AlignTop)
+
+        text_block = QVBoxLayout()
+        self.name_label = QLabel()
+        self.name_label.setWordWrap(True)
+        text_block.addWidget(self.name_label)
+
+        self.meta_label = QLabel()
+        self.meta_label.setWordWrap(True)
+        self.meta_label.setProperty("role", "muted")
+        text_block.addWidget(self.meta_label)
+
+        text_block.addStretch(1)
+        header.addLayout(text_block, 1)
+        layout.addLayout(header)
+
+        self.description_panel = QWidget()
+        description_layout = QVBoxLayout(self.description_panel)
+        description_layout.setContentsMargins(0, 0, 0, 0)
+        description_layout.setSpacing(2)
+
+        self.description_caption = QLabel("Описание")
+        self.description_caption.setProperty("role", "muted")
+        description_layout.addWidget(self.description_caption)
+
+        self.description_label = QLabel()
+        self.description_label.setWordWrap(True)
+        self.description_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.description_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+
+        self.description_scroll = QScrollArea()
+        self.description_scroll.setWidgetResizable(True)
+        self.description_scroll.setFrameShape(QFrame.NoFrame)
+        self.description_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarAlwaysOff
+        )
+        self.description_scroll.setWidget(self.description_label)
+        description_layout.addWidget(self.description_scroll, 1)
+
+        self.fields_table = QTableWidget(0, 2)
+        self.fields_table.setHorizontalHeaderLabels(["Поле", "Значение"])
+        self.fields_table.verticalHeader().setVisible(False)
+        self.fields_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.fields_table.setSelectionBehavior(
+            QAbstractItemView.SelectRows
+        )
+        self.fields_table.setAlternatingRowColors(True)
+        self.fields_table.setWordWrap(True)
+        self.fields_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.fields_table.customContextMenuRequested.connect(
+            self._on_fields_context_menu
+        )
+        self.fields_table.itemChanged.connect(
+            self._on_field_item_changed
+        )
+
+        header_view = self.fields_table.horizontalHeader()
+        header_view.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header_view.setSectionResizeMode(1, QHeaderView.Stretch)
+
+        self.details_splitter = QSplitter(Qt.Vertical)
+        self.details_splitter.setChildrenCollapsible(False)
+        self.details_splitter.setHandleWidth(6)
+        self.details_splitter.addWidget(self.description_panel)
+        self.details_splitter.addWidget(self.fields_table)
+        self.details_splitter.setStretchFactor(0, 0)
+        self.details_splitter.setStretchFactor(1, 1)
+        self.details_splitter.setSizes([110, 450])
+
+        border = self._palette("border", "#3C3F41")
+        accent = self._palette("accent", "#3592E4")
+        self.details_splitter.setStyleSheet(
+            "QSplitter::handle:vertical { height: 6px; "
+            "background-color: %s; }"
+            "QSplitter::handle:vertical:hover { "
+            "background-color: %s; }" % (border, accent)
+        )
+
+        self.description_panel.setVisible(False)
+        layout.addWidget(self.details_splitter, 1)
+
+        self.empty_label = QLabel("Секция не найдена или не является предметом")
+        self.empty_label.setWordWrap(True)
+        self.empty_label.setProperty("role", "muted")
+        self.empty_label.setVisible(False)
+        layout.addWidget(self.empty_label)
+
+    def _init_shortcuts(self):
+        if self._on_save is not None:
+            QShortcut(
+                QKeySequence("Ctrl+S"),
+                self,
+                context=Qt.WidgetWithChildrenShortcut,
+                activated=self._save,
+            )
+        if self._on_undo is not None:
+            QShortcut(
+                QKeySequence("Ctrl+Z"),
+                self,
+                context=Qt.WidgetWithChildrenShortcut,
+                activated=self._undo,
+            )
+        if self._on_redo is not None:
+            QShortcut(
+                QKeySequence("Ctrl+Y"),
+                self,
+                context=Qt.WidgetWithChildrenShortcut,
+                activated=self._redo,
+            )
+            QShortcut(
+                QKeySequence("Ctrl+Shift+Z"),
+                self,
+                context=Qt.WidgetWithChildrenShortcut,
+                activated=self._redo,
+            )
+
+    # -------------------------------------------------- состояние
+    def section(self):
+        return self._section
+
+    def set_section(self, section):
+        self._section = str(section or "")
+        self.refresh()
+
+    def refresh(self, entry=None):
+        try:
+            from PyQt5 import sip
+
+            if sip.isdeleted(self):
+                return
+        except Exception:
+            pass
+
+        if entry is None:
+            try:
+                entry = self._get_entry() if self._get_entry else None
+            except Exception:
+                entry = None
+        if entry is None:
+            self._entry = None
+            self._clear_details()
+            self.empty_label.setVisible(True)
+            return
+
+        self.empty_label.setVisible(False)
+        self._show_details(entry)
+
+    # -------------------------------------------------- отрисовка
+    def _show_details(self, entry):
+        self._entry = entry
+        image = self._get_image(entry.section) if self._get_image else None
+        self.icon_label.setPixmap(self._detail_pixmap(image))
+
+        self.section_label.setText("[%s]" % entry.section)
+
+        name = entry.name_text or entry.field("inv_name") or entry.section
+        description = (
+            entry.description_text
+            or entry.field("description")
+            or ""
+        )
+        self.name_label.setText(name)
+        self.name_label.setToolTip(name)
+
+        has_description = bool(description.strip())
+        self.description_panel.setVisible(has_description)
+        self.description_label.setText(description)
+
+        kind = entry.field("kind") or "—"
+        texture = entry.field("icons_texture") or entry.icon_texture
+        texture_path = (
+            str(entry.icon_path) if entry.icon_path is not None else "не найдена"
+        )
+        meta = (
+            "kind: %s\n"
+            "Сетка: x=%d, y=%d; %d×%d (%.0f×%.0f px)\n"
+            "Текстура: %s\n%s"
+            % (
+                kind,
+                entry.icon_x,
+                entry.icon_y,
+                entry.icon_width,
+                entry.icon_height,
+                entry.icon_width * GRID_SIZE,
+                entry.icon_height * GRID_SIZE,
+                texture,
+                texture_path,
+            )
+        )
+        self.meta_label.setText(meta)
+
+        self._populating_fields = True
+        self.fields_table.setUpdatesEnabled(False)
+        self.fields_table.clearContents()
+        self.fields_table.setRowCount(len(entry.fields))
+
+        editable = bool(self._can_edit())
+        any_editable = False
+
+        for row, field in enumerate(entry.fields):
+            key_item = QTableWidgetItem(field.key)
+            value_item = QTableWidgetItem(field.value)
+            value_item.setToolTip(field.value)
+
+            can_edit_field = editable and field.line_number > 0
+            any_editable = any_editable or can_edit_field
+            for column, table_item in ((0, key_item), (1, value_item)):
+                flags = table_item.flags()
+                if can_edit_field:
+                    flags |= Qt.ItemIsEditable
+                else:
+                    flags &= ~Qt.ItemIsEditable
+                table_item.setFlags(flags)
+                self.fields_table.setItem(row, column, table_item)
+
+        self.fields_table.setEditTriggers(
+            (
+                QAbstractItemView.DoubleClicked
+                | QAbstractItemView.EditKeyPressed
+            )
+            if any_editable
+            else QAbstractItemView.NoEditTriggers
+        )
+
+        self.fields_table.resizeRowsToContents()
+        self.fields_table.setUpdatesEnabled(True)
+        self._populating_fields = False
+
+    def _clear_details(self):
+        self.icon_label.clear()
+        self.section_label.setText("—")
+        self.name_label.clear()
+        self.meta_label.clear()
+        self.description_label.clear()
+        self.description_panel.setVisible(False)
+        self.fields_table.clearContents()
+        self.fields_table.setRowCount(0)
+
+    # -------------------------------------------------- правка
+    def _on_field_item_changed(self, item):
+        if self._populating_fields or self._entry is None:
+            return
+        if not self._can_edit():
+            return
+
+        row = item.row()
+        if row < 0 or row >= len(self._entry.fields):
+            return
+
+        field = self._entry.fields[row]
+        if field.line_number <= 0:
+            return
+
+        key_item = self.fields_table.item(row, 0)
+        value_item = self.fields_table.item(row, 1)
+        if key_item is None or value_item is None:
+            return
+
+        new_key = key_item.text().strip()
+        new_value = value_item.text().strip()
+        if not new_key:
+            self.refresh()
+            return
+
+        if new_key == field.key and new_value == field.value:
+            return
+
+        new_line = "%s = %s" % (new_key, new_value)
+        if new_key != field.key and self._on_field_rename is not None:
+            if not self._on_field_rename(
+                self._entry.section,
+                field.key,
+                new_key,
+                new_value,
+            ):
+                self.refresh()
+            else:
+                QTimer.singleShot(0, self.refresh)
+            return
+
+        if new_key == field.key and self._on_field_edit is not None:
+            if not self._on_field_edit(
+                self._entry.section,
+                new_key,
+                new_value,
+            ):
+                self.refresh()
+            else:
+                QTimer.singleShot(0, self.refresh)
+            return
+
+        if self._on_replace_line is None:
+            self.refresh()
+            return
+        if not self._on_replace_line(int(field.line_number), new_line):
+            self.refresh()
+        else:
+            QTimer.singleShot(0, self.refresh)
+
+    def _on_fields_context_menu(self, position):
+        index = self.fields_table.indexAt(position)
+        if not index.isValid():
+            return
+
+        entry = self._entry
+        row = index.row()
+        if entry is None or row < 0 or row >= len(entry.fields):
+            return
+
+        field = entry.fields[row]
+        line = field.line_number or entry.line_number
+        editable = bool(self._can_edit())
+
+        menu = QMenu(self)
+
+        go_action = menu.addAction("Перейти к строке")
+        go_action.setEnabled(line > 0)
+
+        add_action = menu.addAction("Добавить строку под")
+        add_action.setEnabled(editable and line > 0)
+
+        delete_action = menu.addAction("Удалить строку")
+        delete_action.setEnabled(editable and field.line_number > 0)
+
+        chosen = menu.exec_(
+            self.fields_table.mapToGlobal(position)
+        )
+
+        if chosen is go_action and line > 0:
+            self._go_to_line(line)
+        elif chosen is add_action and line > 0:
+            self._add_line_under(entry, field, line)
+        elif chosen is delete_action and field.line_number > 0:
+            self._delete_selected_line(entry, field)
+
+    def _go_to_line(self, line_number):
+        if self._on_go_to_line is not None:
+            self._on_go_to_line(int(line_number))
+
+    def _add_line_under(self, entry, field, line_number):
+        text, ok = QInputDialog.getText(
+            self,
+            "Добавить строку под",
+            "Строка LTX:",
+            text="",
+        )
+        if not ok:
+            return
+
+        text = str(text).rstrip("\r\n")
+        if not text.strip():
+            return
+
+        if "=" not in text:
+            QMessageBox.warning(
+                self,
+                "Строка LTX",
+                "Введите строку вида: ключ = значение",
+            )
+            return
+
+        if self._on_insert_line is None:
+            return
+        if self._on_insert_line(int(line_number), text):
+            self.refresh()
+
+    def _delete_selected_line(self, entry, field):
+        if self._on_delete_line is None:
+            return
+        if self._on_delete_line(int(field.line_number)):
+            self.refresh()
+
+    def _save(self):
+        if self._on_save is not None:
+            self._on_save()
+
+    def _undo(self):
+        if self._on_undo is not None:
+            self._on_undo()
+
+    def _redo(self):
+        if self._on_redo is not None:
+            self._on_redo()
+
+    def undo(self):
+        self._undo()
+
+    def redo(self):
+        self._redo()
+
+    def _open_as_tab(self):
+        if self._on_open_as_tab is not None:
+            self._on_open_as_tab(self._section)
+
+    def _open_document(self):
+        if self._on_open_document is not None:
+            self._on_open_document()
+
+    # -------------------------------------------------- утилиты
+    def _detail_pixmap(self, image):
+        if image is None or image.isNull():
+            return self._placeholder
+
+        pixmap = QPixmap.fromImage(image)
+        if pixmap.width() > 170 or pixmap.height() > 170:
+            pixmap = pixmap.scaled(
+                170,
+                170,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+        return pixmap
+
+    def _palette(self, name, fallback=None):
+        try:
+            value = self._theme_color(name, fallback)
+        except Exception:
+            value = fallback
+        return value or fallback or "#787878"
+
+
 class ItemViewerWindow(QDialog):
     """Немодальное окно: список предметов слева, поля и иконка справа."""
 
@@ -1441,9 +2375,17 @@ class ItemViewerWindow(QDialog):
         on_replace_line=None,
         on_delete_line=None,
         on_insert_line=None,
+        on_field_edit=None,
+        on_field_rename=None,
         on_go_to_line=None,
         on_save=None,
         on_create_item=None,
+        on_item_entry=None,
+        on_open_card=None,
+        on_open_document=None,
+        on_undo=None,
+        on_redo=None,
+        document_title="",
         parent=None,
     ):
         super().__init__(parent)
@@ -1456,9 +2398,17 @@ class ItemViewerWindow(QDialog):
         self._on_replace_line = on_replace_line
         self._on_delete_line = on_delete_line
         self._on_insert_line = on_insert_line
+        self._on_field_edit = on_field_edit
+        self._on_field_rename = on_field_rename
         self._on_go_to_line = on_go_to_line
         self._on_save = on_save
         self._on_create_item = on_create_item
+        self._on_item_entry = on_item_entry
+        self._on_open_card = on_open_card
+        self._on_open_document = on_open_document
+        self._on_undo = on_undo
+        self._on_redo = on_redo
+        self._document_title = str(document_title or "")
 
         self._catalog = None
         self._images = {}
@@ -1561,108 +2511,32 @@ class ItemViewerWindow(QDialog):
         self.list_view.selectionModel().currentChanged.connect(
             self._on_current_changed
         )
+        self.list_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list_view.customContextMenuRequested.connect(
+            self._on_item_context_menu
+        )
         splitter.addWidget(self.list_view)
 
-        details = QWidget()
-        details_layout = QVBoxLayout(details)
-        details_layout.setContentsMargins(8, 0, 0, 0)
-
-        header = QHBoxLayout()
-
-        self.icon_label = QLabel()
-        self.icon_label.setFixedSize(190, 190)
-        self.icon_label.setAlignment(Qt.AlignCenter)
-        header.addWidget(self.icon_label, 0, Qt.AlignTop)
-
-        text_block = QVBoxLayout()
-        self.section_label = QLabel("—")
-        self.section_label.setStyleSheet("font-weight: 600;")
-        self.section_label.setWordWrap(True)
-        text_block.addWidget(self.section_label)
-
-        self.name_label = QLabel()
-        self.name_label.setWordWrap(True)
-        text_block.addWidget(self.name_label)
-
-        self.meta_label = QLabel()
-        self.meta_label.setWordWrap(True)
-        self.meta_label.setProperty("role", "muted")
-        text_block.addWidget(self.meta_label)
-
-        text_block.addStretch(1)
-        header.addLayout(text_block, 1)
-        details_layout.addLayout(header)
-
-        # Описание — отдельная прокручиваемая область: текст из
-        # text/<lang>, а не ключ локализации из inv_name/description.
-        self.description_panel = QWidget()
-        description_layout = QVBoxLayout(self.description_panel)
-        description_layout.setContentsMargins(0, 0, 0, 0)
-        description_layout.setSpacing(2)
-
-        self.description_caption = QLabel("Описание")
-        self.description_caption.setProperty("role", "muted")
-        description_layout.addWidget(self.description_caption)
-
-        self.description_label = QLabel()
-        self.description_label.setWordWrap(True)
-        self.description_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self.description_label.setTextInteractionFlags(
-            Qt.TextSelectableByMouse
+        self.card = ItemCardView(
+            get_entry=self._live_entry,
+            get_image=self._image_for,
+            can_edit=self._can_edit,
+            on_replace_line=self._on_replace_line,
+            on_delete_line=self._on_delete_line,
+            on_insert_line=self._on_insert_line,
+            on_field_edit=self._on_field_edit,
+            on_field_rename=self._on_field_rename,
+            on_go_to_line=self._on_go_to_line,
+            on_save=self._on_save,
+            on_undo=self._on_undo,
+            on_redo=self._on_redo,
+            on_open_as_tab=self._open_current_card,
+            on_open_document=None,
+            theme_color=self._theme_color,
+            document_title=self._document_title,
+            preview=True,
         )
-
-        self.description_scroll = QScrollArea()
-        self.description_scroll.setWidgetResizable(True)
-        self.description_scroll.setFrameShape(QFrame.NoFrame)
-        self.description_scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarAlwaysOff
-        )
-        self.description_scroll.setWidget(self.description_label)
-        description_layout.addWidget(self.description_scroll, 1)
-
-        self.fields_table = QTableWidget(0, 2)
-        self.fields_table.setHorizontalHeaderLabels(["Поле", "Значение"])
-        self.fields_table.verticalHeader().setVisible(False)
-        self.fields_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.fields_table.setSelectionBehavior(
-            QAbstractItemView.SelectRows
-        )
-        self.fields_table.setAlternatingRowColors(True)
-        self.fields_table.setWordWrap(True)
-        self.fields_table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.fields_table.customContextMenuRequested.connect(
-            self._on_fields_context_menu
-        )
-        self.fields_table.itemChanged.connect(
-            self._on_field_item_changed
-        )
-
-        header_view = self.fields_table.horizontalHeader()
-        header_view.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        header_view.setSectionResizeMode(1, QHeaderView.Stretch)
-
-        # Один вертикальный захват между описанием и свойствами.
-        self.details_splitter = QSplitter(Qt.Vertical)
-        self.details_splitter.setChildrenCollapsible(False)
-        self.details_splitter.setHandleWidth(6)
-        self.details_splitter.addWidget(self.description_panel)
-        self.details_splitter.addWidget(self.fields_table)
-        self.details_splitter.setStretchFactor(0, 0)
-        self.details_splitter.setStretchFactor(1, 1)
-        self.details_splitter.setSizes([110, 450])
-
-        border = self._palette("border", "#3C3F41")
-        accent = self._palette("accent", "#3592E4")
-        self.details_splitter.setStyleSheet(
-            "QSplitter::handle:vertical { height: 6px; "
-            "background-color: %s; }"
-            "QSplitter::handle:vertical:hover { "
-            "background-color: %s; }" % (border, accent)
-        )
-
-        self.description_panel.setVisible(False)
-        details_layout.addWidget(self.details_splitter, 1)
-        splitter.addWidget(details)
+        splitter.addWidget(self.card)
 
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 0)
@@ -1761,7 +2635,7 @@ class ItemViewerWindow(QDialog):
         self._updating = False
 
         self._current_entry = None
-        self._clear_details()
+        self.card.set_section(None)
         self._select_first_visible()
 
     def _first_entry(self):
@@ -1772,7 +2646,7 @@ class ItemViewerWindow(QDialog):
     def _select_first_visible(self):
         entry = self._first_entry()
         if entry is None:
-            self._clear_details()
+            self.card.set_section(None)
             return
 
         was_updating = self._updating
@@ -1781,7 +2655,7 @@ class ItemViewerWindow(QDialog):
         self._updating = was_updating
 
         self._current_entry = entry
-        self._show_details(entry)
+        self.card.set_section(entry.section)
 
     def _entry_from_index(self, index):
         if index is None or not index.isValid():
@@ -1804,20 +2678,6 @@ class ItemViewerWindow(QDialog):
             pixmap = pixmap.scaled(
                 GALLERY_ICON_SIZE,
                 GALLERY_ICON_SIZE,
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation,
-            )
-        return pixmap
-
-    def _detail_pixmap(self, image):
-        if image is None or image.isNull():
-            return self._placeholder
-
-        pixmap = QPixmap.fromImage(image)
-        if pixmap.width() > 170 or pixmap.height() > 170:
-            pixmap = pixmap.scaled(
-                170,
-                170,
                 Qt.KeepAspectRatio,
                 Qt.SmoothTransformation,
             )
@@ -1876,6 +2736,29 @@ class ItemViewerWindow(QDialog):
         ).lower()
 
     # -------------------------------------------------- выбор
+    def _on_item_context_menu(self, position):
+        """ПКМ по предмету: открыть его карточку как вкладку."""
+        if self._on_open_card is None:
+            return
+
+        viewport = self.list_view.viewport()
+        viewport_pos = viewport.mapFrom(self.list_view, position)
+        index = self.list_view.indexAt(viewport_pos)
+        if not index.isValid():
+            return
+
+        entry = self._entry_from_index(index)
+        if entry is None:
+            return
+
+        self.list_view.setCurrentIndex(index)
+
+        menu = QMenu(self.list_view)
+        open_action = menu.addAction("Открыть в новой вкладке")
+        chosen = menu.exec_(viewport.mapToGlobal(viewport_pos))
+        if chosen is open_action:
+            self._open_current_card(entry.section)
+
     def _on_current_changed(self, current, _previous):
         if self._updating:
             return
@@ -1883,390 +2766,125 @@ class ItemViewerWindow(QDialog):
         entry = self._entry_from_index(current)
         if entry is None:
             self._current_entry = None
-            self._clear_details()
+            self.card.set_section(None)
             return
 
         if entry is self._current_entry:
             return
 
         self._current_entry = entry
-        self._show_details(entry)
+        self.card.set_section(entry.section)
 
-    def _show_details(self, entry):
-        image = self._images.get(entry.section)
-        self.icon_label.setPixmap(self._detail_pixmap(image))
+    def _live_entry(self):
+        section = self.card.section()
+        if self._on_item_entry is not None:
+            return self._on_item_entry(section)
+        return self._entry_for_section(section)
 
-        self.section_label.setText("[%s]" % entry.section)
+    def _entry_for_section(self, section):
+        wanted = str(section or "").lower()
+        for entry in self._entries:
+            if entry.section.lower() == wanted:
+                return entry
+        return None
 
-        name = entry.name_text or entry.field("inv_name") or entry.section
-        description = (
-            entry.description_text
-            or entry.field("description")
-            or ""
-        )
-        self.name_label.setText(name)
-        self.name_label.setToolTip(name)
+    def _image_for(self, section):
+        return self._images.get(section)
 
-        has_description = bool(description.strip())
-        self.description_panel.setVisible(has_description)
-        self.description_label.setText(description)
+    def _open_current_card(self, section):
+        if self._on_open_card is not None:
+            self._on_open_card(section)
 
-        kind = entry.field("kind") or "—"
-        texture = entry.field("icons_texture") or entry.icon_texture
-        texture_path = (
-            str(entry.icon_path) if entry.icon_path is not None else "не найдена"
-        )
-        meta = (
-            "kind: %s\n"
-            "Сетка: x=%d, y=%d; %d×%d (%.0f×%.0f px)\n"
-            "Текстура: %s\n%s"
-            % (
-                kind,
-                entry.icon_x,
-                entry.icon_y,
-                entry.icon_width,
-                entry.icon_height,
-                entry.icon_width * GRID_SIZE,
-                entry.icon_height * GRID_SIZE,
-                texture,
-                texture_path,
+    def update_section(self, section, entry):
+        """Обновить одну строку каталога после изменения документа."""
+        if entry is None:
+            self._remove_section(section)
+            return
+
+        replaced = False
+        for index, existing in enumerate(self._entries):
+            if existing.section == entry.section:
+                self._entries[index] = entry
+                replaced = True
+                break
+        if not replaced:
+            self._entries.append(entry)
+
+        model_item = self._model_items.get(entry.section)
+        if model_item is None:
+            item = QStandardItem(
+                QIcon(
+                    self._gallery_pixmap(
+                        self._images.get(entry.section)
+                    )
+                ),
+                self._item_label(entry),
             )
-        )
-        self.meta_label.setText(meta)
-
-        self._populating_fields = True
-        self.fields_table.setUpdatesEnabled(False)
-        self.fields_table.clearContents()
-        self.fields_table.setRowCount(len(entry.fields))
-
-        editable = bool(self._can_edit())
-        any_editable = False
-
-        for row, field in enumerate(entry.fields):
-            key_item = QTableWidgetItem(field.key)
-            value_item = QTableWidgetItem(field.value)
-            value_item.setToolTip(field.value)
-
-            can_edit_field = editable and field.line_number > 0
-            any_editable = any_editable or can_edit_field
-            for column, table_item in ((0, key_item), (1, value_item)):
-                flags = table_item.flags()
-                if can_edit_field:
-                    flags |= Qt.ItemIsEditable
-                else:
-                    flags &= ~Qt.ItemIsEditable
-                table_item.setFlags(flags)
-                self.fields_table.setItem(row, column, table_item)
-
-        self.fields_table.setEditTriggers(
-            (
-                QAbstractItemView.DoubleClicked
-                | QAbstractItemView.EditKeyPressed
+            item.setEditable(False)
+            item.setData(entry, ENTRY_ROLE)
+            item.setData(self._search_text(entry), SEARCH_ROLE)
+            item.setData(
+                (entry.field("kind") or "").strip(),
+                KIND_ROLE,
             )
-            if any_editable
-            else QAbstractItemView.NoEditTriggers
-        )
+            item.setToolTip(self._entry_tooltip(entry))
+            self.model.appendRow(item)
+            self._model_items[entry.section] = item
+            model_item = item
+        else:
+            model_item.setData(entry, ENTRY_ROLE)
+            model_item.setData(self._search_text(entry), SEARCH_ROLE)
+            model_item.setData(
+                (entry.field("kind") or "").strip(),
+                KIND_ROLE,
+            )
+            model_item.setText(self._item_label(entry))
+            model_item.setToolTip(self._entry_tooltip(entry))
 
-        self.fields_table.resizeRowsToContents()
-        self.fields_table.setUpdatesEnabled(True)
-        self._populating_fields = False
+        self.proxy.invalidateFilter()
+        if (
+            self._current_entry is not None
+            and self._current_entry.section == entry.section
+        ):
+            self._current_entry = entry
+            self.card.refresh(entry)
 
-    def _clear_details(self):
-        self.icon_label.clear()
-        self.section_label.setText("—")
-        self.name_label.clear()
-        self.meta_label.clear()
-        self.description_label.clear()
-        self.description_panel.setVisible(False)
-        self.fields_table.clearContents()
-        self.fields_table.setRowCount(0)
+    def _remove_section(self, section):
+        wanted = str(section or "").lower()
+        if not wanted:
+            return
+        self._entries = [
+            entry
+            for entry in self._entries
+            if entry.section.lower() != wanted
+        ]
+        model_item = self._model_items.pop(wanted, None)
+        if model_item is None:
+            for key, candidate in list(self._model_items.items()):
+                if str(key).lower() == wanted:
+                    model_item = self._model_items.pop(key)
+                    break
+        if model_item is not None:
+            row = self.model.row(model_item)
+            if row >= 0:
+                self.model.removeRow(row)
+        self.proxy.invalidateFilter()
+        if (
+            self._current_entry is not None
+            and self._current_entry.section.lower() == wanted
+        ):
+            self._current_entry = None
+            self.card.set_section(None)
 
+    # -------------------------------------------------- фильтр / кнопки
     def showEvent(self, event):
         super().showEvent(event)
-        if self._current_entry is not None:
-            self._show_details(self._current_entry)
+        self.card.refresh()
 
-    # -------------------------------------------------- правка system.ltx
     def _request_save(self):
         if self._on_save is not None:
             self._on_save()
 
-    def _on_fields_context_menu(self, position):
-        index = self.fields_table.indexAt(position)
-        if not index.isValid():
-            return
-
-        entry = self._current_entry
-        row = index.row()
-        if entry is None or row < 0 or row >= len(entry.fields):
-            return
-
-        field = entry.fields[row]
-        line = field.line_number or entry.line_number
-        editable = bool(self._can_edit())
-
-        menu = QMenu(self)
-
-        go_action = menu.addAction("Перейти к строке")
-        go_action.setEnabled(line > 0)
-
-        add_action = menu.addAction("Добавить строку под")
-        add_action.setEnabled(editable and line > 0)
-
-        delete_action = menu.addAction("Удалить строку")
-        delete_action.setEnabled(editable and field.line_number > 0)
-
-        chosen = menu.exec_(
-            self.fields_table.viewport().mapToGlobal(position)
-        )
-
-        if chosen is go_action and line > 0:
-            self._go_to_line(line)
-        elif chosen is add_action and line > 0:
-            self._add_line_under(entry, field, line)
-        elif chosen is delete_action and field.line_number > 0:
-            self._delete_selected_line(entry, row, field)
-
-    def _go_to_line(self, line_number):
-        if self._on_go_to_line is not None:
-            self._on_go_to_line(int(line_number))
-
-    def _add_line_under(self, entry, field, line_number):
-        text, ok = QInputDialog.getText(
-            self,
-            "Добавить строку под",
-            "Строка LTX:",
-            text="",
-        )
-        if not ok:
-            return
-
-        text = str(text).rstrip("\r\n")
-        if not text.strip():
-            return
-
-        if "=" not in text:
-            QMessageBox.warning(
-                self,
-                "Строка LTX",
-                "Введите строку вида: ключ = значение",
-            )
-            return
-
-        if self._on_insert_line is None:
-            return
-        if not self._on_insert_line(int(line_number), text):
-            return
-
-        self._apply_local_insert(entry, field, line_number, text)
-
-    def _delete_selected_line(self, entry, row, field):
-        if self._on_delete_line is None:
-            return
-        if not self._on_delete_line(int(field.line_number)):
-            return
-
-        self._apply_local_delete(entry, row, field)
-
-    def _on_field_item_changed(self, item):
-        if self._populating_fields or self._current_entry is None:
-            return
-        if not self._can_edit():
-            return
-
-        row = item.row()
-        if row < 0 or row >= len(self._current_entry.fields):
-            return
-
-        field = self._current_entry.fields[row]
-        if field.line_number <= 0:
-            return
-
-        key_item = self.fields_table.item(row, 0)
-        value_item = self.fields_table.item(row, 1)
-        if key_item is None or value_item is None:
-            return
-
-        new_key = key_item.text().strip()
-        new_value = value_item.text().strip()
-        if not new_key:
-            self._show_details(self._current_entry)
-            return
-
-        if new_key == field.key and new_value == field.value:
-            return
-
-        new_line = "%s = %s" % (new_key, new_value)
-        if self._on_replace_line is None:
-            return
-        if not self._on_replace_line(int(field.line_number), new_line):
-            self._show_details(self._current_entry)
-            return
-
-        self._apply_local_replace(
-            self._current_entry,
-            row,
-            new_key,
-            new_value,
-        )
-
-    def _apply_local_replace(self, entry, row, new_key, new_value):
-        fields = list(entry.fields)
-        fields[row] = replace(
-            fields[row],
-            key=new_key,
-            value=new_value,
-        )
-
-        updates = {}
-        key_lower = new_key.lower()
-        if key_lower == "inv_name":
-            updates["name_text"] = new_value
-        elif key_lower == "description":
-            updates["description_text"] = new_value
-
-        self._replace_entry(
-            entry,
-            replace(entry, fields=tuple(fields), **updates),
-        )
-
-    def _apply_local_delete(self, entry, row, field):
-        fields = list(entry.fields)
-        if row < len(fields):
-            del fields[row]
-
-        updates = {}
-        key_lower = field.key.lower()
-        if key_lower == "inv_name":
-            updates["name_text"] = ""
-        elif key_lower == "description":
-            updates["description_text"] = ""
-
-        new_entry = replace(entry, fields=tuple(fields), **updates)
-        self._set_entry(new_entry)
-        self._shift_lines(field.line_number, -1)
-        self._show_details(self._current_entry)
-
-    def _apply_local_insert(self, entry, field, line_number, text):
-        key, value = self._parse_line(text)
-
-        new_line_number = int(line_number) + 1
-        self._shift_lines(line_number, +1)
-
-        current = self._current_entry
-        fields = list(current.fields)
-
-        insert_at = len(fields)
-        if line_number == current.line_number:
-            insert_at = 0
-        else:
-            for index, candidate in enumerate(fields):
-                if candidate.line_number == line_number:
-                    insert_at = index + 1
-                    break
-
-        fields.insert(
-            insert_at,
-            replace(
-                field,
-                key=key,
-                value=value,
-                line_number=new_line_number,
-            ),
-        )
-
-        updates = {}
-        key_lower = key.lower()
-        if key_lower == "inv_name":
-            updates["name_text"] = value
-        elif key_lower == "description":
-            updates["description_text"] = value
-
-        self._replace_entry(
-            current,
-            replace(current, fields=tuple(fields), **updates),
-        )
-
-    @staticmethod
-    def _parse_line(text):
-        if "=" in text:
-            key, value = text.split("=", 1)
-            return key.strip(), value.strip()
-        return text.strip(), ""
-
-    def _shift_lines(self, after_line, delta):
-        """Сдвинуть номера строк во всех записях после правки."""
-        section = (
-            self._current_entry.section
-            if self._current_entry is not None
-            else None
-        )
-
-        for index, entry in enumerate(self._entries):
-            fields = tuple(
-                replace(
-                    field,
-                    line_number=(
-                        field.line_number + delta
-                        if field.line_number > after_line
-                        else field.line_number
-                    ),
-                )
-                for field in entry.fields
-            )
-            entry_line = entry.line_number
-            if entry_line > after_line:
-                entry_line += delta
-
-            new_entry = replace(
-                entry,
-                fields=fields,
-                line_number=entry_line,
-            )
-            self._entries[index] = new_entry
-
-            model_item = self._model_items.get(entry.section)
-            if model_item is not None:
-                model_item.setData(new_entry, ENTRY_ROLE)
-
-        if section is not None:
-            self._current_entry = next(
-                (
-                    entry for entry in self._entries
-                    if entry.section == section
-                ),
-                None,
-            )
-
-    def _replace_entry(self, old_entry, new_entry):
-        for index, entry in enumerate(self._entries):
-            if entry.section == old_entry.section:
-                self._entries[index] = new_entry
-                break
-
-        model_item = self._model_items.get(new_entry.section)
-        if model_item is not None:
-            model_item.setData(new_entry, ENTRY_ROLE)
-            model_item.setData(self._search_text(new_entry), SEARCH_ROLE)
-            model_item.setData(
-                (new_entry.field("kind") or "").strip(),
-                KIND_ROLE,
-            )
-            model_item.setText(self._item_label(new_entry))
-            model_item.setToolTip(self._entry_tooltip(new_entry))
-
-        self.proxy.invalidateFilter()
-        self._current_entry = new_entry
-        self._show_details(new_entry)
-
-    def _set_entry(self, new_entry):
-        for index, entry in enumerate(self._entries):
-            if entry.section == new_entry.section:
-                self._entries[index] = new_entry
-                break
-        self._current_entry = new_entry
-
-    # -------------------------------------------------- фильтр / кнопки
     def _schedule_filter(self, _text):
         """Не фильтровать на каждый символ: один проход после паузы."""
         self._filter_timer.start()
@@ -2303,12 +2921,12 @@ class ItemViewerWindow(QDialog):
 
         if entry is None:
             self._current_entry = None
-            self._clear_details()
+            self.card.set_section(None)
             return
 
         if entry is not previous:
             self._current_entry = entry
-            self._show_details(entry)
+            self.card.set_section(entry.section)
 
     def _restore_or_first_entry(self, previous):
         """Сохранить выбранный предмет, если он прошёл фильтр."""

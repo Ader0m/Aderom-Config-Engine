@@ -50,6 +50,11 @@ class _Ui:
         self.files[Path(path)] = str(text)
         return True
 
+    def write_project_texts(self, files):
+        for path, text in files:
+            self.files[Path(path)] = str(text)
+        return True
+
     def show_error(self, message):
         self.errors.append(str(message))
 
@@ -222,7 +227,13 @@ class NewItemFileEditTest(unittest.TestCase):
             )
             feature.show = lambda: None
 
-            self.assertTrue(feature._replace_line(5, "kind = i_med"))
+            self.assertTrue(
+                feature._replace_line(
+                    feature._tab_id,
+                    5,
+                    "kind = i_med",
+                )
+            )
 
             self.assertIn("kind = i_med", ctx.ui.files[path])
             self.assertEqual(

@@ -80,7 +80,7 @@ class LtxRawOpenTest(unittest.TestCase):
 
     def test_raw_file_line_accounts_for_header(self):
         ui = self._open("items.ltx", 2)
-        self.assertEqual(ui.label, "RAW: items.ltx")
+        self.assertEqual(ui.label, "[Raw]items.ltx")
         self.assertIn("СЫРОЙ ФАЙЛ", ui.notice)
 
     def test_patch_file_line_accounts_for_header(self):

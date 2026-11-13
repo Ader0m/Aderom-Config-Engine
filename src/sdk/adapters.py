@@ -318,34 +318,7 @@ class CoreApiAdapter:
 
         items = []
         for item in (getattr(raw, "items", ()) or ()):
-            icon_path = getattr(item, "icon_path", None)
-            if icon_path is not None:
-                icon_path = Path(icon_path)
-
-            items.append(ItemEntry(
-                section=str(getattr(item, "section", "")),
-                fields=tuple(
-                    ItemField(
-                        key=str(getattr(field, "key", "")),
-                        value=str(getattr(field, "value", "")),
-                        line_number=int(
-                            getattr(field, "line_number", 0) or 0
-                        ),
-                    )
-                    for field in (getattr(item, "fields", ()) or ())
-                ),
-                icon_texture=str(getattr(item, "icon_texture", "")),
-                icon_path=icon_path,
-                icon_x=int(getattr(item, "icon_x", 0) or 0),
-                icon_y=int(getattr(item, "icon_y", 0) or 0),
-                icon_width=int(getattr(item, "icon_width", 1) or 1),
-                icon_height=int(getattr(item, "icon_height", 1) or 1),
-                line_number=int(getattr(item, "line_number", 0) or 0),
-                name_text=str(getattr(item, "name_text", "") or ""),
-                description_text=str(
-                    getattr(item, "description_text", "") or ""
-                ),
-            ))
+            items.append(self._item_entry(item))
 
         sections = tuple(
             ItemSection(
@@ -373,6 +346,67 @@ class CoreApiAdapter:
                 for name in (getattr(raw, "parent_names", ()) or ())
             ),
         )
+
+    @staticmethod
+    def _item_entry(item) -> ItemEntry:
+        icon_path = getattr(item, "icon_path", None)
+        if icon_path is not None:
+            icon_path = Path(icon_path)
+
+        return ItemEntry(
+            section=str(getattr(item, "section", "")),
+            fields=tuple(
+                ItemField(
+                    key=str(getattr(field, "key", "")),
+                    value=str(getattr(field, "value", "")),
+                    line_number=int(
+                        getattr(field, "line_number", 0) or 0
+                    ),
+                )
+                for field in (getattr(item, "fields", ()) or ())
+            ),
+            icon_texture=str(getattr(item, "icon_texture", "")),
+            icon_path=icon_path,
+            icon_x=int(getattr(item, "icon_x", 0) or 0),
+            icon_y=int(getattr(item, "icon_y", 0) or 0),
+            icon_width=int(getattr(item, "icon_width", 1) or 1),
+            icon_height=int(getattr(item, "icon_height", 1) or 1),
+            line_number=int(getattr(item, "line_number", 0) or 0),
+            name_text=str(getattr(item, "name_text", "") or ""),
+            description_text=str(
+                getattr(item, "description_text", "") or ""
+            ),
+        )
+
+    def build_item_entry(self, forest, resolved_text, section, log=None):
+        raw = self._provider.build_item_entry(
+            forest,
+            resolved_text,
+            section,
+            log=log,
+        )
+        if raw is None:
+            return None
+        return self._item_entry(raw)
+
+    def build_item_entry_from_block(
+        self,
+        forest,
+        block_text,
+        section,
+        offset=0,
+        log=None,
+    ):
+        raw = self._provider.build_item_entry_from_block(
+            forest,
+            block_text,
+            section,
+            offset=offset,
+            log=log,
+        )
+        if raw is None:
+            return None
+        return self._item_entry(raw)
 
     def read_texture_region(self, path, x, y, width, height):
         raw = self._provider.read_texture_region(path, x, y, width, height)
@@ -674,6 +708,9 @@ class UiApiAdapter:
     def write_project_text(self, path, text):
         return self._platform.write_project_text(path, text)
 
+    def write_project_texts(self, files):
+        return self._platform.write_project_texts(files)
+
     def register_project_asset_type(self, asset_type):
         return self._platform.register_project_asset_type(asset_type)
 
@@ -803,6 +840,65 @@ class UiApiAdapter:
     def resolved_draft(self, tab_id):
         return self._platform.resolved_draft(tab_id)
 
+    def has_resolved_document(self, tab_id):
+        return self._platform.has_resolved_document(tab_id)
+
+    def resolved_document_title(self, tab_id):
+        return self._platform.resolved_document_title(tab_id)
+
+    def apply_resolved_line_edit(self, tab_id, action, line_number, text=""):
+        return self._platform.apply_resolved_line_edit(
+            tab_id,
+            action,
+            line_number,
+            text,
+        )
+
+    def apply_resolved_field_edit(self, tab_id, section, key, value):
+        return self._platform.apply_resolved_field_edit(
+            tab_id,
+            section,
+            key,
+            value,
+        )
+
+    def rename_resolved_field(
+        self,
+        tab_id,
+        section,
+        old_key,
+        new_key,
+        value,
+    ):
+        return self._platform.rename_resolved_field(
+            tab_id,
+            section,
+            old_key,
+            new_key,
+            value,
+        )
+
+    def undo_resolved_document(self, tab_id):
+        return self._platform.undo_resolved_document(tab_id)
+
+    def redo_resolved_document(self, tab_id):
+        return self._platform.redo_resolved_document(tab_id)
+
+    def resolved_section_at_line(self, tab_id, line_number):
+        return self._platform.resolved_section_at_line(tab_id, line_number)
+
+    def item_entry(self, tab_id, section):
+        return self._platform.item_entry(tab_id, section)
+
+    def retain_resolved_document(self, tab_id):
+        return self._platform.retain_resolved_document(tab_id)
+
+    def release_resolved_document(self, tab_id):
+        return self._platform.release_resolved_document(tab_id)
+
+    def open_item_card_at_cursor(self):
+        return self._platform.open_item_card_at_cursor()
+
     def update_resolved_draft(
         self,
         tab_id,
@@ -842,6 +938,22 @@ class UiApiAdapter:
             text,
             line_sources,
             root_path,
+            line_number,
+        )
+
+    def ensure_resolved_document(self, tab_id, root_path, title="", text="",
+                                 line_sources=()):
+        return self._platform.ensure_resolved_document(
+            tab_id,
+            root_path,
+            title,
+            text,
+            line_sources,
+        )
+
+    def open_resolved_document(self, tab_id, line_number=None):
+        return self._platform.open_resolved_document(
+            tab_id,
             line_number,
         )
 

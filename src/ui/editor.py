@@ -26,6 +26,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QShortcut,
     QVBoxLayout,
@@ -817,6 +818,7 @@ class ResolvedView(QWidget):
     source_raw_activated = pyqtSignal(object, str)  # сырой файл (XML/script)
     diagnostic = pyqtSignal(str)
     content_changed = pyqtSignal(str)
+    item_requested = pyqtSignal(str)  # секция под курсором
     save_requested = pyqtSignal()
     dirty_changed = pyqtSignal(bool)
     lexer_status = pyqtSignal(str)
@@ -833,6 +835,7 @@ class ResolvedView(QWidget):
         self._editing_supported = True
         self._baseline_text = ""
         self._dirty = False
+        self._document = None
         self._init_ui()
         self._init_shortcuts()
         self._lexer_scheduler = _LexerScheduler(
@@ -882,6 +885,10 @@ class ResolvedView(QWidget):
         self.editor = QsciScintilla()
         self._setup_editor()
         self.editor.textChanged.connect(self._on_text_changed)
+        self.editor.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.editor.customContextMenuRequested.connect(
+            self._on_editor_context_menu
+        )
 
         self.source_list = SourceListView()
         self.source_list.lineActivated.connect(self._on_source_activated)
@@ -941,6 +948,12 @@ class ResolvedView(QWidget):
             context=Qt.WidgetWithChildrenShortcut,
             activated=self._request_save,
         )
+        QShortcut(
+            QKeySequence("Ctrl+Shift+I"),
+            self,
+            context=Qt.WidgetWithChildrenShortcut,
+            activated=self.open_item_under_cursor,
+        )
 
     def _setup_editor(self):
         font = QFont(PALETTE.editor_font_family, PALETTE.editor_font_size_pt)
@@ -992,6 +1005,43 @@ class ResolvedView(QWidget):
         """Совместимость: применить лексер сразу (без отложенного запуска)."""
         self._set_lexer(create_lexer(path))
 
+    # -------------------------------------------------- документ
+    @property
+    def document(self):
+        return self._document
+
+    def bind_document(self, document):
+        """Привязать живой документ: правки идут в него, а не в копию."""
+        self._document = document
+        if document is not None:
+            document.bind_view(self)
+            self._line_sources = list(document.line_sources)
+            self.source_list.set_sources(self._line_sources)
+            self.set_dirty_state(document.is_dirty)
+
+    def unbind_document(self, document=None):
+        if document is None or self._document is document:
+            if self._document is not None:
+                self._document.unbind_view(self)
+            self._document = None
+
+    def cursor_line(self):
+        """Номер строки курсора (1-based)."""
+        try:
+            return self.editor.getCursorPosition()[0] + 1
+        except Exception:
+            return 1
+
+    def section_at_cursor(self):
+        if self._document is None:
+            return None
+        return self._document.section_at_line(self.cursor_line())
+
+    def open_item_under_cursor(self):
+        section = self.section_at_cursor()
+        if section:
+            self.item_requested.emit(section)
+
     # -------------------------------------------------- публичные API
     @property
     def root_path(self):
@@ -1030,6 +1080,49 @@ class ResolvedView(QWidget):
     def set_dirty_state(self, dirty):
         """Установить признак изменений без пересчёта всего текста."""
         self._set_dirty(bool(dirty))
+
+    def undo(self):
+        self.editor.undo()
+
+    def redo(self):
+        self.editor.redo()
+
+    def _on_editor_context_menu(self, position):
+        menu = QMenu(self.editor)
+        undo_action = menu.addAction("Отменить")
+        redo_action = menu.addAction("Повторить")
+        undo_action.setEnabled(self.editor.isUndoAvailable())
+        redo_action.setEnabled(self.editor.isRedoAvailable())
+        menu.addSeparator()
+
+        cut_action = menu.addAction("Вырезать")
+        copy_action = menu.addAction("Копировать")
+        paste_action = menu.addAction("Вставить")
+        select_action = menu.addAction("Выделить всё")
+        has_selection = self.editor.hasSelectedText()
+        cut_action.setEnabled(has_selection)
+        copy_action.setEnabled(has_selection)
+        paste_action.setEnabled(self._editable)
+        menu.addSeparator()
+
+        item_action = menu.addAction("Открыть карточку предмета")
+        item_action.setEnabled(self.section_at_cursor() is not None)
+
+        chosen = menu.exec_(self.editor.mapToGlobal(position))
+        if chosen is undo_action:
+            self.undo()
+        elif chosen is redo_action:
+            self.redo()
+        elif chosen is cut_action:
+            self.editor.cut()
+        elif chosen is copy_action:
+            self.editor.copy()
+        elif chosen is paste_action:
+            self.editor.paste()
+        elif chosen is select_action:
+            self.editor.selectAll()
+        elif chosen is item_action:
+            self.open_item_under_cursor()
 
     def apply_line_edit(self, action, line_number, text=""):
         """Точечная правка строки без замены всего текста.
@@ -1117,6 +1210,7 @@ class ResolvedView(QWidget):
                     del sources[index]
 
             self._line_sources = sources
+            self.source_list.set_sources(sources)
             return True
         finally:
             editor.setReadOnly(old_readonly)
@@ -1134,6 +1228,12 @@ class ResolvedView(QWidget):
             return
         text = self.text()
         self.content_changed.emit(text)
+        if self._document is not None:
+            self._document.replace_text(
+                text,
+                origin=self,
+                focus_line=self.cursor_line(),
+            )
         self._set_dirty(text != self._baseline_text)
 
     def _request_save(self):
@@ -1168,7 +1268,7 @@ class ResolvedView(QWidget):
         self.source_list.set_sources(self._line_sources)
 
         rel = str(root_path)
-        self.file_label.setText("RESOLVED: %s" % rel)
+        self.file_label.setText("[Res]%s" % rel)
         self.editor.setCursorPosition(0, 0)
 
         # Покраска запускается после отображения текста.
@@ -1191,6 +1291,9 @@ class ResolvedView(QWidget):
 
     def _show_find(self):
         self.find_bar.show_and_focus()
+
+    def show_find(self):
+        self._show_find()
 
     # -------------------------------------------------- синхронизация
     def _on_editor_scroll(self, _value):

@@ -317,6 +317,32 @@ class CoreServices:
             reuse_snapshot_cache=reuse_snapshot_cache,
         )
 
+    def build_item_entry(self, forest, resolved_text, section, log=None):
+        """Собрать один предмет из текущего resolved-текста."""
+        return self.items.build_entry(
+            forest,
+            resolved_text,
+            section,
+            log=log,
+        )
+
+    def build_item_entry_from_block(
+        self,
+        forest,
+        block_text,
+        section,
+        offset=0,
+        log=None,
+    ):
+        """Собрать один предмет из готового блока секции."""
+        return self.items.build_entry_from_block(
+            forest,
+            block_text,
+            section,
+            offset=offset,
+            log=log,
+        )
+
     def read_texture_region(self, path, x, y, width, height):
         """Декодировать прямоугольник DDS в RGBA (с кэшем регионов)."""
         return self.item_icons.read_region(path, x, y, width, height)

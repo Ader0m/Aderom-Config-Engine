@@ -269,24 +269,28 @@ class EditorTabs(QTabWidget):
         )
 
     def goto_line(self, line_number):
-        editor = self._active_editor()
-        if editor is not None:
-            editor.goto_line(line_number)
+        widget = self._active_widget()
+        goto = getattr(widget, "goto_line", None)
+        if callable(goto):
+            goto(line_number)
 
     def undo(self):
-        editor = self._active_editor()
-        if editor is not None:
-            editor.undo()
+        widget = self._active_widget()
+        undo = getattr(widget, "undo", None)
+        if callable(undo):
+            undo()
 
     def redo(self):
-        editor = self._active_editor()
-        if editor is not None:
-            editor.redo()
+        widget = self._active_widget()
+        redo = getattr(widget, "redo", None)
+        if callable(redo):
+            redo()
 
     def show_find(self):
-        editor = self._active_editor()
-        if editor is not None:
-            editor.show_find()
+        widget = self._active_widget()
+        find = getattr(widget, "show_find", None)
+        if callable(find):
+            find()
 
     # -------------------------------------------------- служебное
     def _add_tab(self, tab_id, title, widget):
@@ -298,6 +302,9 @@ class EditorTabs(QTabWidget):
     def _active_editor(self):
         widget = self.currentWidget()
         return widget if isinstance(widget, CodeEditor) else None
+
+    def _active_widget(self):
+        return self.currentWidget()
 
     def _tab_id_for_widget(self, widget):
         for tab_id, candidate in self._tab_ids.items():

@@ -441,6 +441,30 @@ class ResolvedLineEdit:
     text: str = ""
 
 
+@dataclass(frozen=True)
+class ResolvedDocumentChange:
+    """Событие изменения живого resolved-документа.
+
+    ``sections`` — секции, которых коснулась правка. Пустой кортеж
+    означает «неизвестно, обновите интересующую секцию».
+    """
+
+    tab_id: str
+    revision: int
+    sections: tuple[str, ...] = field(default_factory=tuple)
+    full: bool = False
+    focus_line: int = 0
+
+
+@dataclass(frozen=True)
+class ItemCardRequest:
+    """Запрос на открытие карточки предмета из resolved-документа."""
+
+    tab_id: str
+    section: str
+    line_number: int = 0
+
+
 # ---------------------------------------------------------------- контракты
 
 
@@ -587,6 +611,30 @@ class CoreApi(Protocol):
         ``resolved_text`` — готовый текст (черновик проекта); тогда резолв
         не выполняется, а кэш ключуется хэшем текста.
         """
+
+    def build_item_entry(
+        self,
+        forest,
+        resolved_text: str,
+        section: str,
+        log: Optional[Callable[[str], None]] = None,
+    ) -> Optional[ItemEntry]:
+        """Собрать один предмет из текущего resolved-текста.
+
+        Дешёвый путь для карточки: разбирается только блок секции.
+        Возвращает ``None``, если секция не найдена или не является
+        предметом.
+        """
+
+    def build_item_entry_from_block(
+        self,
+        forest,
+        block_text: str,
+        section: str,
+        offset: int = 0,
+        log: Optional[Callable[[str], None]] = None,
+    ) -> Optional[ItemEntry]:
+        """Собрать предмет из готового блока секции и смещения строк."""
 
     def read_texture_region(
         self,
@@ -768,6 +816,9 @@ class UiApi(Protocol):
     def write_project_text(self, path: Path, text: str) -> bool:
         """Записать текст в черновик проекта, не меняя оригинальный файл."""
 
+    def write_project_texts(self, files) -> bool:
+        """Атомарно записать несколько текстовых черновиков проекта."""
+
     def register_project_asset_type(self, asset_type: ProjectAssetType) -> bool:
         """Зарегистрировать тип двоичного ресурса проекта.
 
@@ -842,6 +893,65 @@ class UiApi(Protocol):
     def resolved_draft(self, tab_id: str) -> Optional[ResolvedDraftInfo]:
         """Текущий resolved-черновик проекта по id вкладки."""
 
+    def has_resolved_document(self, tab_id: str) -> bool:
+        """Есть ли живой resolved-документ по id вкладки."""
+
+    def resolved_document_title(self, tab_id: str) -> str:
+        """Заголовок resolved-документа (для карточки и тултипов)."""
+
+    def apply_resolved_line_edit(
+        self,
+        tab_id: str,
+        action: str,
+        line_number: int,
+        text: str = "",
+    ) -> bool:
+        """Точечно изменить живой resolved-документ.
+
+        Возвращает ``False``, если строка/документ не найдены или
+        изменение не удалось зафиксировать.
+        """
+
+    def apply_resolved_field_edit(
+        self,
+        tab_id: str,
+        section: str,
+        key: str,
+        value: str,
+    ) -> bool:
+        """Заменить или добавить поле в секции resolved-документа."""
+
+    def rename_resolved_field(
+        self,
+        tab_id: str,
+        section: str,
+        old_key: str,
+        new_key: str,
+        value: str,
+    ) -> bool:
+        """Переименовать поле, найдя его по секции и старому ключу."""
+
+    def undo_resolved_document(self, tab_id: str) -> bool:
+        """Отменить последнюю правку resolved-документа."""
+
+    def redo_resolved_document(self, tab_id: str) -> bool:
+        """Повторить последнюю отменённую правку документа."""
+
+    def resolved_section_at_line(self, tab_id: str, line_number: int):
+        """Имя секции по номеру строки resolved-документа."""
+
+    def item_entry(self, tab_id: str, section: str):
+        """Текущая проекция предмета из документа или ``None``."""
+
+    def retain_resolved_document(self, tab_id: str) -> bool:
+        """Удержать документ, пока карточка открыта."""
+
+    def release_resolved_document(self, tab_id: str) -> bool:
+        """Освободить документ после закрытия карточки."""
+
+    def open_item_card_at_cursor(self) -> bool:
+        """Открыть карточку предмета для секции под курсором."""
+
     def update_resolved_draft(
         self,
         tab_id: str,
@@ -880,6 +990,23 @@ class UiApi(Protocol):
         line_number: Optional[int] = None,
     ) -> None:
         """Открыть вкладку резолв-вида с панелью источников."""
+
+    def ensure_resolved_document(
+        self,
+        tab_id: str,
+        root_path: Path,
+        title: str = "",
+        text: str = "",
+        line_sources: Sequence[Optional[LineSource]] = (),
+    ) -> None:
+        """Создать/получить живой resolved-документ по id вкладки."""
+
+    def open_resolved_document(
+        self,
+        tab_id: str,
+        line_number: Optional[int] = None,
+    ) -> bool:
+        """Открыть или сфокусировать resolved-документ по id вкладки."""
 
     def open_xml_resolved_tab(
         self,

@@ -108,6 +108,10 @@ class BaseModule(ModuleBase):
             self._item_viewer.show, "Ctrl+I",
         )
         ui.register_menu(
+            "Инструменты", "Открыть карточку предмета под курсором",
+            self._open_item_card_at_cursor, "Ctrl+Shift+I",
+        )
+        ui.register_menu(
             "Вид", "Сортировать по убыванию (Файлов в дереве)",
             self._tree_actions.sort_tree_by_files_desc,
         )
@@ -133,11 +137,18 @@ class BaseModule(ModuleBase):
         commands.register("base.edit_find", self._editor_actions.find)
         commands.register("base.section_graph", self._section_graph.show)
         commands.register("base.item_viewer", self._item_viewer.show)
+        commands.register("base.open_item_card", self._open_item_card_at_cursor)
         commands.register("base.sort_tree_files_desc", self._tree_actions.sort_tree_by_files_desc)
 
     def _register_open_handler(self, ctx):
         ctx.ui.register_open_handler(ResolvedLtxHandler(self._ltx_opener))
         ctx.ui.register_open_handler(XmlOpenHandler(self._xml_opener))
+
+    def _open_item_card_at_cursor(self):
+        opener = getattr(self.ctx.ui, "open_item_card_at_cursor", None)
+        if callable(opener):
+            return opener()
+        return False
 
     def _register_tree_actions(self, ctx):
         ui = ctx.ui

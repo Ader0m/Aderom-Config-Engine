@@ -758,6 +758,14 @@ class ProjectService:
         self._write_draft(project, draft)
         return draft
 
+    def restore_draft(self, draft: ProjectDraft) -> ProjectDraft:
+        """Вернуть снимок черновика (откат транзакции)."""
+        project = self._require_active()
+        project.drafts[self.path_key(draft.path)] = draft
+        self._invalidate_preview_cache(draft.path)
+        self._write_draft(project, draft)
+        return draft
+
     def save_text(self, path, text: str) -> ProjectDraft:
         """Сохранить конкретный текст как текущую версию черновика."""
         return self.save_draft(path, text)

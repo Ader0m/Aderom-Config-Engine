@@ -308,6 +308,87 @@ class ItemCatalogTest(unittest.TestCase):
         )
         self.assertEqual(second.cache_key, first.cache_key)
 
+    # -------------------------------------------------- один предмет
+    def test_build_entry_uses_global_line_numbers(self):
+        forest = self._forest()
+        service = ItemCatalogService(_FakeResolver(ITEMS_TEXT))
+
+        alpha = service.build_entry(forest, ITEMS_TEXT, "alpha_item")
+
+        self.assertIsNotNone(alpha)
+        self.assertEqual(alpha.section, "alpha_item")
+        self.assertEqual(alpha.field("inv_name"), "Alpha")
+        field = next(
+            item for item in alpha.fields if item.key == "inv_name"
+        )
+        self.assertEqual(
+            ITEMS_TEXT.splitlines()[field.line_number - 1].strip(),
+            "inv_name = Alpha",
+        )
+        self.assertEqual(
+            ITEMS_TEXT.splitlines()[alpha.line_number - 1].strip(),
+            "[alpha_item]",
+        )
+
+    def test_build_entry_returns_none_for_unknown_or_service(self):
+        forest = self._forest()
+        service = ItemCatalogService(_FakeResolver(ITEMS_TEXT))
+        self.assertIsNone(service.build_entry(forest, ITEMS_TEXT, "nope"))
+        self.assertIsNone(
+            service.build_entry(forest, ITEMS_TEXT, "tch_hidden")
+        )
+
+    def test_build_entry_reflects_edited_resolved_text(self):
+        forest = self._forest()
+        service = ItemCatalogService(_FakeResolver(ITEMS_TEXT))
+        edited = ITEMS_TEXT.replace("kind = i_misc\ncost = 10", "kind = i_med\ncost = 10")
+
+        alpha = service.build_entry(forest, edited, "alpha_item")
+
+        self.assertEqual(alpha.field("kind"), "i_med")
+        field = next(
+            item for item in alpha.fields if item.key == "kind"
+        )
+        self.assertEqual(
+            edited.splitlines()[field.line_number - 1].strip(),
+            "kind = i_med",
+        )
+
+    def test_build_entry_uses_last_duplicate_section(self):
+        text = (
+            "[dup]\ninv_name = First\n\n"
+            "[other]\nkind = i_misc\n\n"
+            "[dup]\ninv_name = Last\n"
+        )
+        forest = self._forest()
+        service = ItemCatalogService(_FakeResolver(text))
+
+        entry = service.build_entry(forest, text, "dup")
+
+        self.assertEqual(entry.field("inv_name"), "Last")
+
+    def test_build_entry_from_block_offsets_lines(self):
+        forest = self._forest()
+        service = ItemCatalogService(_FakeResolver(""))
+        block = (
+            "[alpha_item]\n"
+            "inv_name = Alpha\n"
+            "kind = i_misc\n"
+        )
+
+        entry = service.build_entry_from_block(
+            forest,
+            block,
+            "alpha_item",
+            offset=10,
+        )
+
+        self.assertEqual(entry.line_number, 11)
+        field = next(
+            item for item in entry.fields if item.key == "inv_name"
+        )
+        self.assertEqual(field.line_number, 12)
+
 
 if __name__ == "__main__":
     unittest.main()

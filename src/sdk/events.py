@@ -18,6 +18,10 @@ class Events:
     PROJECT_CHANGED = "project_changed"
     # Изменены настройки активного проекта (payload — {key: value}).
     PROJECT_SETTINGS_CHANGED = "project_settings_changed"
+    # Изменился живой resolved-документ (payload — ResolvedDocumentChange).
+    RESOLVED_DOCUMENT_CHANGED = "resolved.document.changed"
+    # Запрошено открытие карточки предмета по секции (payload — ItemCardRequest).
+    ITEM_CARD_REQUESTED = "item.card.requested"
 
     # -------------------------------------------------- UI-факты
     # Публикуются платформой после того, как действие уже выполнено.

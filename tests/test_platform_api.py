@@ -47,9 +47,24 @@ class FakeWidget:
 class FakeEditor:
     def __init__(self):
         self.widget = FakeWidget()
+        self.tabs = {}
+        self.dirty = {}
+        self.current = self.widget
 
     def currentWidget(self):
-        return self.widget
+        return self.current
+
+    def get_tab(self, tab_id):
+        return self.tabs.get(tab_id)
+
+    def set_tab_dirty(self, tab_id, dirty):
+        self.dirty[tab_id] = bool(dirty)
+
+    def mark_tab_clean(self, tab_id):
+        self.dirty[tab_id] = False
+
+    def setCurrentWidget(self, widget):
+        self.current = widget
 
 
 class FakeStatusBar:
@@ -69,6 +84,9 @@ class FakeWindow:
 
     def statusBar(self):
         return FakeStatusBar()
+
+    def setWindowTitle(self, _title):
+        pass
 
 
 class PublishingHandler:
@@ -278,6 +296,217 @@ class ProjectVfsRestoreTest(unittest.TestCase):
             self.assertEqual((added, removed), (0, 1))
             self.assertNotIn(path, api._forest.files)
             self.assertEqual(api.services.resolver.invalidations, 2)
+
+
+class ResolvedDocumentPlatformTest(unittest.TestCase):
+    def _api(self, root):
+        events = FakeEvents()
+        commands = FakeCommands()
+        paths = SimpleNamespace(
+            projects_dir=Path(root) / "projects",
+            app_dir=Path(root),
+        )
+        api = PlatformApi(events, commands, None, None, paths)
+        api.window = FakeWindow()
+        api.project.create("documents", save_mode="root")
+        api.services = _FakeServices()
+        api._forest = object()
+        return api, events
+
+    def test_line_edit_updates_document_and_project_draft(self):
+        with tempfile.TemporaryDirectory() as d:
+            api, _events = self._api(d)
+            tab_id = "base.resolved:system.ltx"
+
+            api.ensure_resolved_document(
+                tab_id,
+                Path(d) / "system.ltx",
+                "[Res]system.ltx",
+                "[sec]\nx = 1\n",
+                (None, None, None),
+            )
+            self.assertTrue(
+                api.apply_resolved_line_edit(
+                    tab_id,
+                    "replace",
+                    2,
+                    "x = 9",
+                )
+            )
+
+            document = api.resolved_document(tab_id)
+            self.assertEqual(document.current_text, "[sec]\nx = 9\n")
+            self.assertTrue(document.is_dirty)
+            self.assertEqual(
+                api.project.get_resolved_draft(tab_id).current_text,
+                "[sec]\nx = 9\n",
+            )
+
+    def test_update_with_line_edit_ignores_stale_full_text(self):
+        with tempfile.TemporaryDirectory() as d:
+            api, _events = self._api(d)
+            tab_id = "base.resolved:system.ltx"
+
+            api.ensure_resolved_document(
+                tab_id,
+                Path(d) / "system.ltx",
+                "[Res]system.ltx",
+                "[sec]\nx = 1\n",
+                (None, None, None),
+            )
+            # Карточка присылает устаревший полный текст, но актуальную
+            # строчную правку — должна примениться только она.
+            from sdk.api import ResolvedLineEdit
+
+            self.assertTrue(
+                api.update_resolved_draft(
+                    tab_id,
+                    Path(d) / "system.ltx",
+                    "[Res]system.ltx",
+                    "[sec]\nx = 1\n",
+                    "[sec]\nx = 999\n",
+                    (None, None, None),
+                    line_edit=ResolvedLineEdit(
+                        action="replace",
+                        line_number=2,
+                        text="x = 5",
+                    ),
+                )
+            )
+            self.assertEqual(
+                api.resolved_document(tab_id).current_text,
+                "[sec]\nx = 5\n",
+            )
+
+    def test_document_change_is_published(self):
+        with tempfile.TemporaryDirectory() as d:
+            api, events = self._api(d)
+            tab_id = "base.resolved:system.ltx"
+            api.ensure_resolved_document(
+                tab_id,
+                Path(d) / "system.ltx",
+                "[Res]system.ltx",
+                "[sec]\nx = 1\n",
+                (None, None, None),
+            )
+            seen = []
+            events.subscribe(
+                Events.RESOLVED_DOCUMENT_CHANGED,
+                lambda change: seen.append(change),
+            )
+            api.apply_resolved_line_edit(tab_id, "replace", 2, "x = 7")
+            self.assertEqual(len(seen), 1)
+            self.assertEqual(seen[0].tab_id, tab_id)
+            self.assertIn("sec", seen[0].sections)
+
+    def test_item_entry_projection(self):
+        with tempfile.TemporaryDirectory() as d:
+            api, _events = self._api(d)
+            tab_id = "base.resolved:system.ltx"
+            api.ensure_resolved_document(
+                tab_id,
+                Path(d) / "system.ltx",
+                "[Res]system.ltx",
+                "[sec]\nkind = i_food\n",
+                (None, None, None),
+            )
+            entry = api.item_entry(tab_id, "sec")
+            self.assertIsNotNone(entry)
+            self.assertEqual(entry.section, "sec")
+
+    def test_write_project_texts_rolls_back_on_failure(self):
+        from unittest.mock import patch
+
+        from ui.project import ProjectError
+
+        with tempfile.TemporaryDirectory() as d:
+            api, _events = self._api(d)
+            first = Path(d) / "first.ltx"
+            second = Path(d) / "second.ltx"
+            api.project.save_draft(first, "old")
+
+            original_save = api.project.save_draft
+            calls = {"count": 0}
+
+            def failing_save(path, text=None):
+                calls["count"] += 1
+                if calls["count"] == 2:
+                    raise ProjectError("disk full")
+                return original_save(path, text)
+
+            with patch.object(
+                api.project,
+                "save_draft",
+                side_effect=failing_save,
+            ):
+                self.assertFalse(
+                    api.write_project_texts(
+                        ((first, "new"), (second, "new"))
+                    )
+                )
+
+            self.assertEqual(api.project.get_text(first), "old")
+            self.assertIsNone(api.project.get_text(second))
+
+    def test_ensure_refreshes_clean_document(self):
+        with tempfile.TemporaryDirectory() as d:
+            api, _events = self._api(d)
+            tab_id = "base.resolved:system.ltx"
+            api.ensure_resolved_document(
+                tab_id,
+                Path(d) / "system.ltx",
+                "[Res]system.ltx",
+                "[a]\nx = 1\n",
+                (None, None, None),
+            )
+            api.ensure_resolved_document(
+                tab_id,
+                Path(d) / "system.ltx",
+                "[Res]system.ltx",
+                "[a]\nx = 2\n",
+                (None, None, None),
+            )
+            self.assertEqual(
+                api.resolved_document(tab_id).current_text,
+                "[a]\nx = 2\n",
+            )
+
+    def test_ensure_keeps_dirty_document(self):
+        with tempfile.TemporaryDirectory() as d:
+            api, _events = self._api(d)
+            tab_id = "base.resolved:system.ltx"
+            api.ensure_resolved_document(
+                tab_id,
+                Path(d) / "system.ltx",
+                "[Res]system.ltx",
+                "[a]\nx = 1\n",
+                (None, None, None),
+            )
+            api.apply_resolved_line_edit(tab_id, "replace", 2, "x = 5")
+            api.ensure_resolved_document(
+                tab_id,
+                Path(d) / "system.ltx",
+                "[Res]system.ltx",
+                "[a]\nx = 2\n",
+                (None, None, None),
+            )
+            self.assertEqual(
+                api.resolved_document(tab_id).current_text,
+                "[a]\nx = 5\n",
+            )
+
+
+class _FakeServices:
+    def invalidate_resolver_cache(self):
+        return None
+
+    def build_item_entry(self, forest, resolved_text, section, log=None):
+        from sdk.api import ItemEntry, ItemField
+
+        return ItemEntry(
+            section=str(section),
+            fields=(ItemField("kind", "i_food", 2),),
+        )
 
 
 if __name__ == "__main__":

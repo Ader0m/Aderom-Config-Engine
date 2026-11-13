@@ -24,7 +24,8 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -426,88 +427,229 @@ class ItemCatalogService:
             if self._is_service_section(name):
                 continue
 
-            values = view.present
-            lower = {str(key).lower(): value for key, value in values.items()}
-
-            if not self._looks_like_item(lower):
-                continue
-
-            icon_texture = self._clean(
-                lower.get("icons_texture") or DEFAULT_ICON_TEXTURE
-            )
-            if not icon_texture:
-                icon_texture = DEFAULT_ICON_TEXTURE
-
-            grid_x = self._to_int(lower.get("inv_grid_x"), 0)
-            grid_y = self._to_int(lower.get("inv_grid_y"), 0)
-            grid_w = self._to_int(lower.get("inv_grid_width"), 1)
-            grid_h = self._to_int(lower.get("inv_grid_height"), 1)
-
-            if grid_w <= 0:
-                grid_w = 1
-            if grid_h <= 0:
-                grid_h = 1
-
-            line_by_key = {}
-            for entry in section.entries:
-                key_lower = entry.key.lower()
-                if entry.operation == "delete":
-                    line_by_key.pop(key_lower, None)
-                else:
-                    line_by_key[key_lower] = entry.line_number
-
-            fields = [
-                ItemField(
-                    key=str(key),
-                    value="" if value is None else str(value),
-                    line_number=line_by_key.get(str(key).lower(), 0),
-                )
-                for key, value in values.items()
-            ]
-
-            # Показываем эффективные значения даже там, где ключ не задан
-            # явно: именно их использует игра (значения по умолчанию).
-            self._set_field(fields, "icons_texture", icon_texture)
-            self._set_field(fields, "inv_grid_x", str(grid_x))
-            self._set_field(fields, "inv_grid_y", str(grid_y))
-            self._set_field(fields, "inv_grid_width", str(grid_w))
-            self._set_field(fields, "inv_grid_height", str(grid_h))
-
-            icon_path = resolve_asset_path(
+            record = self._record_for_section(
+                name,
+                section,
                 scan_dir,
-                "texture",
-                icon_texture,
+                localization,
             )
-
-            name_key = self._clean(lower.get("inv_name") or "")
-            description_key = self._clean(lower.get("description") or "")
-
-            if localization is not None:
-                name_text = localization.translate(name_key)
-                description_text = localization.translate(description_key)
-            else:
-                name_text = name_key
-                description_text = description_key
-
-            items.append(
-                ItemRecord(
-                    section=name,
-                    fields=tuple(fields),
-                    icon_texture=icon_texture,
-                    icon_path=icon_path,
-                    icon_x=grid_x,
-                    icon_y=grid_y,
-                    icon_width=grid_w,
-                    icon_height=grid_h,
-                    line_number=int(getattr(section, "line_number", 0) or 0),
-                    name_text=name_text,
-                    description_text=description_text,
-                )
-            )
+            if record is not None:
+                items.append(record)
 
         items.sort(key=lambda item: item.section.lower())
         sections.sort(key=lambda item: item.name.lower())
         return items, sections
+
+    def _record_for_section(
+        self,
+        name,
+        section,
+        scan_dir,
+        localization=None,
+    ) -> Optional[ItemRecord]:
+        """Собрать запись об одном предмете из секции resolved-текста."""
+        view = section.view()
+        values = view.present
+        lower = {str(key).lower(): value for key, value in values.items()}
+
+        if not self._looks_like_item(lower):
+            return None
+
+        icon_texture = self._clean(
+            lower.get("icons_texture") or DEFAULT_ICON_TEXTURE
+        )
+        if not icon_texture:
+            icon_texture = DEFAULT_ICON_TEXTURE
+
+        grid_x = self._to_int(lower.get("inv_grid_x"), 0)
+        grid_y = self._to_int(lower.get("inv_grid_y"), 0)
+        grid_w = self._to_int(lower.get("inv_grid_width"), 1)
+        grid_h = self._to_int(lower.get("inv_grid_height"), 1)
+
+        if grid_w <= 0:
+            grid_w = 1
+        if grid_h <= 0:
+            grid_h = 1
+
+        line_by_key = {}
+        for entry in section.entries:
+            key_lower = entry.key.lower()
+            if entry.operation == "delete":
+                line_by_key.pop(key_lower, None)
+            else:
+                line_by_key[key_lower] = entry.line_number
+
+        fields = [
+            ItemField(
+                key=str(key),
+                value="" if value is None else str(value),
+                line_number=line_by_key.get(str(key).lower(), 0),
+            )
+            for key, value in values.items()
+        ]
+
+        # Показываем эффективные значения даже там, где ключ не задан
+        # явно: именно их использует игра (значения по умолчанию).
+        self._set_field(fields, "icons_texture", icon_texture)
+        self._set_field(fields, "inv_grid_x", str(grid_x))
+        self._set_field(fields, "inv_grid_y", str(grid_y))
+        self._set_field(fields, "inv_grid_width", str(grid_w))
+        self._set_field(fields, "inv_grid_height", str(grid_h))
+
+        icon_path = resolve_asset_path(
+            scan_dir,
+            "texture",
+            icon_texture,
+        )
+
+        name_key = self._clean(lower.get("inv_name") or "")
+        description_key = self._clean(lower.get("description") or "")
+
+        if localization is not None:
+            name_text = localization.translate(name_key)
+            description_text = localization.translate(description_key)
+        else:
+            name_text = name_key
+            description_text = description_key
+
+        return ItemRecord(
+            section=name,
+            fields=tuple(fields),
+            icon_texture=icon_texture,
+            icon_path=icon_path,
+            icon_x=grid_x,
+            icon_y=grid_y,
+            icon_width=grid_w,
+            icon_height=grid_h,
+            line_number=int(getattr(section, "line_number", 0) or 0),
+            name_text=name_text,
+            description_text=description_text,
+        )
+
+    # -------------------------------------------------- один предмет
+
+    def build_entry(
+        self,
+        forest,
+        resolved_text,
+        section,
+        log=None,
+    ) -> Optional[ItemRecord]:
+        """Собрать одну запись предмета из текущего resolved-текста.
+
+        Дешёвый путь для карточки: разбирается только блок нужной
+        секции, а не весь system.ltx.
+        """
+        text = str(resolved_text or "")
+        found = self._section_block(text, section)
+        if found is None:
+            return None
+
+        block_text, offset = found
+        return self.build_entry_from_block(
+            forest,
+            block_text,
+            section,
+            offset=offset,
+            log=log,
+        )
+
+    def build_entry_from_block(
+        self,
+        forest,
+        block_text,
+        section,
+        offset=0,
+        log=None,
+    ) -> Optional[ItemRecord]:
+        """Собрать запись предмета из готового блока секции."""
+        document = parse_ltx_document(str(block_text or ""))
+        model = document.section(section)
+        if model is None:
+            return None
+        if self._is_service_section(model.name):
+            return None
+
+        scan_dir = getattr(forest, "scan_dir", None)
+        localization = self._load_localization(
+            forest,
+            getattr(forest, "scan_dir", None),
+            log,
+        )
+        record = self._record_for_section(
+            model.name,
+            model,
+            scan_dir,
+            localization,
+        )
+        if record is None or not offset:
+            return record
+
+        fields = tuple(
+            replace(
+                field,
+                line_number=(
+                    field.line_number + offset
+                    if field.line_number > 0
+                    else 0
+                ),
+            )
+            for field in record.fields
+        )
+        return replace(
+            record,
+            line_number=(
+                record.line_number + offset
+                if record.line_number > 0
+                else 0
+            ),
+            fields=fields,
+        )
+
+    @staticmethod
+    def _section_block(text, section):
+        """Вырезать блок секции из resolved-текста.
+
+        Возвращает ``(block_text, offset)``, где ``offset`` — число
+        строк перед блоком (для пересчёта номеров строк).
+        """
+        wanted = str(section or "").strip().lower()
+        if not wanted:
+            return None
+
+        text = str(text or "")
+        target_re = re.compile(
+            r"^[ \t]*(?:!!|!|@)?\[%s\]" % re.escape(wanted),
+            re.MULTILINE | re.IGNORECASE,
+        )
+        matches = list(target_re.finditer(text))
+        if not matches:
+            return None
+
+        # Последнее объявление секции — эффективное (как в каталоге).
+        match = matches[-1]
+        next_re = re.compile(
+            r"^[ \t]*(?:!!|!|@)?\[",
+            re.MULTILINE,
+        )
+        following = next_re.search(text, match.end())
+        end = following.start() if following is not None else len(text)
+        offset = text.count("\n", 0, match.start())
+        return text[match.start():end], offset
+
+    def _load_localization(self, forest, cfg, log=None):
+        if self._localization is None:
+            return None
+        try:
+            return self._localization.load(
+                forest,
+                config_dir=cfg,
+                log=log,
+            )
+        except Exception as exc:
+            if log:
+                log("Предметы: локализация недоступна: %s" % exc)
+            return None
 
     @staticmethod
     def _collect_parent_names(forest) -> Tuple[str, ...]:

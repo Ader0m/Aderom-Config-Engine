@@ -45,6 +45,8 @@ from .api import (
     ItemSection,
     ResolvedDraftInfo,
     ResolvedLineEdit,
+    ResolvedDocumentChange,
+    ItemCardRequest,
     TextureRegion,
 )
 from .adapters import (
@@ -97,6 +99,8 @@ __all__ = [
     "ItemSection",
     "ResolvedDraftInfo",
     "ResolvedLineEdit",
+    "ResolvedDocumentChange",
+    "ItemCardRequest",
     "TextureRegion",
     "CoreApiAdapter",
     "EventApiAdapter",

@@ -107,7 +107,7 @@ class LtxFileOpener:
                 "; Итоговые значения: откройте %s обычным открытием." % rel,
                 "; ═══════════════════════════════════════════════════════════",
                 "",
-            ], "RAW: %s" % rel
+            ], "[Raw]%s" % rel
 
         forest = self.session.forest
         root = self.ctx.services.patch_target(forest, path)
@@ -227,7 +227,7 @@ class LtxFileOpener:
         tab_id = resolved_tab_id(rel)
         self.ctx.ui.open_resolved_tab(
             tab_id,
-            "RESOLVED: %s" % rel,
+            "[Res]%s" % rel,
             text,
             line_sources,
             str(path),
