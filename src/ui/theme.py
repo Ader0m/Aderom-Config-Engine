@@ -88,6 +88,7 @@ class Palette:
     syn_number: str = "#6897BB"     # числа (Darcula: Number)
     syn_constant: str = "#CC7832"   # true/false/nil, сущности XML
     syn_directive: str = "#CC7832"  # #include, ключевые слова Lua
+    syn_include: str = "#C586C0"    # LTX: #include
     syn_override: str = "#FFC66D"   # DLTX: ![section]
     syn_deleted: str = "#F14C4C"    # DLTX: !![section], !key, !parent
     syn_safe: str = "#4EC9B0"       # DLTX: @[section]

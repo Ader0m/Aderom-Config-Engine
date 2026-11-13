@@ -75,6 +75,38 @@ def _forest_index(forest):
     return index
 
 
+def _root_from_patch_name(path, files) -> Optional[Path]:
+    """Найти корень по имени DLTX-патча ``mod_<root>_<suffix>.ltx``.
+
+    Нужен для случаев, когда патч ещё не привязан к корню в дереве
+    (например, forest из теста или только что созданный виртуальный
+    файл). Ищем самый длинный подходящий stem в той же папке.
+    """
+    path = _as_path(path)
+    name = path.stem.lower()
+    if not name.startswith("mod_"):
+        return None
+
+    remainder = name[4:]
+    best = None
+
+    for candidate in files:
+        candidate = _as_path(candidate)
+        if candidate.parent != path.parent:
+            continue
+        if candidate.name.lower().startswith("mod_"):
+            continue
+
+        stem = candidate.stem.lower()
+        if not remainder.startswith(stem + "_"):
+            continue
+
+        if best is None or len(stem) > len(best.stem):
+            best = candidate
+
+    return best
+
+
 def root_candidates(forest, source_path) -> Tuple[Path, ...]:
     """Вернуть все корни загрузки, к которым относится файл."""
     source = _as_path(source_path)
@@ -82,6 +114,11 @@ def root_candidates(forest, source_path) -> Tuple[Path, ...]:
 
     if source not in files and source not in parents:
         return (source,)
+
+    if not parents.get(source) and source.name.lower().startswith("mod_"):
+        base = _root_from_patch_name(source, files)
+        if base is not None and base != source:
+            return root_candidates(forest, base)
 
     def walk(node: Path, trail: frozenset) -> set:
         if node in trail:

@@ -2,9 +2,11 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from tests.support import SRC  # noqa: F401
 
+from sdk import ProjectSetting, ProjectSettingChoice
 from sdk.events import Events
 from ui.platform_api import PlatformApi
 from ui.project import ProjectService
@@ -157,6 +159,59 @@ class PlatformApiTest(unittest.TestCase):
 
         self.assertEqual(api._pending_file_actions, {})
         self.assertEqual(api.window.editor.widget.lines, [])
+
+
+class ProjectSettingPlatformTest(unittest.TestCase):
+    def test_register_read_and_persist_module_setting(self):
+        with tempfile.TemporaryDirectory() as d:
+            paths = SimpleNamespace(
+                projects_dir=Path(d) / "projects",
+                app_dir=Path(d),
+            )
+            api = PlatformApi(
+                FakeEvents(),
+                FakeCommands(),
+                None,
+                None,
+                paths,
+            )
+            api.project.create("settings", save_mode="root")
+
+            setting = ProjectSetting(
+                key="test.mode",
+                label="Режим",
+                kind="choice",
+                default="override",
+                choices=(
+                    ProjectSettingChoice("override", "Override"),
+                    ProjectSettingChoice("merge", "Merge"),
+                ),
+            )
+
+            self.assertTrue(api.register_project_setting(setting))
+            self.assertEqual(
+                api.project_setting(setting.key),
+                "override",
+            )
+
+            self.assertTrue(
+                api.set_project_setting(setting.key, "merge")
+            )
+            self.assertEqual(
+                api.project.module_setting(setting.key),
+                "merge",
+            )
+            self.assertEqual(
+                api.project_setting(setting.key),
+                "merge",
+            )
+
+            self.assertFalse(
+                api.set_project_setting("unknown.setting", 1)
+            )
+            self.assertTrue(
+                api.unregister_project_setting(setting.key)
+            )
 
 
 class _RestoreResolver:

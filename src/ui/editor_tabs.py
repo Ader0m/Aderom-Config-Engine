@@ -236,7 +236,8 @@ class EditorTabs(QTabWidget):
         if path.is_file() or text is not None:
             self._present_default_tab(path.name, str(path), path)
 
-    def show_text(self, text, label, readonly=True, source_path=None):
+    def show_text(self, text, label, readonly=True, source_path=None,
+                  line_number=None, syntax=True, notice=None):
         editor = self._ensure_default_tab()
         self.setCurrentWidget(editor)
         editor.show_text(
@@ -244,6 +245,9 @@ class EditorTabs(QTabWidget):
             label,
             readonly=readonly,
             source_path=source_path,
+            line_number=line_number,
+            syntax=syntax,
+            notice=notice,
         )
 
         title = str(label)

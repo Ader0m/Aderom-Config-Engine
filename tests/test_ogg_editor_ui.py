@@ -93,6 +93,9 @@ class _Ui:
     def set_status(self, message, timeout=0):
         self.status = message
 
+    def copy_to_clipboard(self, text):
+        self.clipboard = text
+
     def show_error(self, text):
         self.error = text
 
@@ -715,6 +718,30 @@ class OggEditorUiTest(unittest.TestCase):
             )
         finally:
             window.close()
+
+    def test_copy_sound_reference_path(self):
+        with tempfile.TemporaryDirectory() as d:
+            game = Path(d) / "gamedata"
+            sound = game / "sounds" / "weapons" / "kar98k"
+            sound.mkdir(parents=True)
+            path = sound / "kar98k_shoot.ogg"
+            path.write_bytes(b"x")
+
+            ctx = _Ctx()
+            window = OggExplorerWindow(
+                ctx,
+                on_open=lambda target: None,
+                on_add=lambda: None,
+            )
+            try:
+                window.set_game_root(game)
+                window._copy_sound_path(path)
+                self.assertEqual(
+                    ctx.ui.clipboard,
+                    "weapons\\kar98k\\kar98k_shoot",
+                )
+            finally:
+                window.close()
 
     def test_selection_mode_locks_controls_and_highlights_rows(self):
         with tempfile.TemporaryDirectory() as d:

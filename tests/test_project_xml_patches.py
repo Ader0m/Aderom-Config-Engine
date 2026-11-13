@@ -166,7 +166,7 @@ class ProjectXmlPatchTest(unittest.TestCase):
         self.assertEqual(item.plan.xml_mode, "mixed")
 
     def test_resolved_xml_preview(self):
-        self.project.set_patch_mode("in_place")
+        self.project.set_patch_mode("on_file")
         self.project.set_xml_patch_mode("dxml_lua")
         self.project.update_resolved_draft(
             "tab-xml",

@@ -17,13 +17,17 @@ def is_ltx_path(path) -> bool:
 class TreeActions:
     """Контекстные действия дерева файлов."""
 
-    def __init__(self, ctx, session):
+    def __init__(self, ctx, session, raw_opener=None):
         self.ctx = ctx
         self.session = session
+        self._raw_opener = raw_opener
 
     def open_raw(self, path):
         self.ctx.ui.log("Открытие исходного файла: %s" % Path(path).name)
-        self.ctx.ui.open_raw(path)
+        if self._raw_opener is not None:
+            self._raw_opener(path)
+        else:
+            self.ctx.ui.open_raw(path)
 
     def open_in_external_editor(self, path):
         self.ctx.ui.log("Открытие в Notepad++: %s" % Path(path).name)

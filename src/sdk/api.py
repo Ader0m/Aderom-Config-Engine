@@ -142,6 +142,46 @@ class ProjectAssetType:
 
 
 @dataclass(frozen=True)
+class ProjectSettingChoice:
+    """Один вариант настройки проекта типа ``choice``."""
+
+    value: str
+    label: str
+
+
+@dataclass(frozen=True)
+class ProjectSetting:
+    """Настройка, которую модуль добавляет в окно настроек проекта.
+
+    Ключ, подпись, варианты и значение по умолчанию задаёт сам модуль;
+    SDK знает только форму описания. Пример::
+
+        ProjectSetting(
+            key="example_module.mode",
+            label="Режим модуля",
+            kind="choice",
+            default="default",
+            choices=(
+                ProjectSettingChoice(
+                    value="default",
+                    label="Обычный режим",
+                ),
+            ),
+        )
+
+    Платформа хранит выбранные значения в ``project.json`` и отдаёт их
+    модулю через ``ctx.ui.project_setting(key)``.
+    """
+
+    key: str
+    label: str
+    kind: str = "choice"          # choice | bool | text
+    default: object = None
+    choices: tuple[ProjectSettingChoice, ...] = ()
+    description: str = ""
+
+
+@dataclass(frozen=True)
 class TreeSummary:
     """Краткая сводка по построенному дереву."""
 
@@ -162,6 +202,9 @@ class GraphMatch:
     # Второй участник связи: для наследования — имя родителя или
     # дочерней секции.
     related: Optional[str] = None
+    # True — related является родителем (искомая секция от него
+    # унаследована); False — related является дочерней секцией.
+    related_is_parent: bool = False
 
 
 @dataclass(frozen=True)
@@ -224,10 +267,24 @@ class GraphNode:
         """Узел ссылается на бинарный ресурс (текстура/модель)."""
         return self.is_texture or self.is_visual
 
-    @property
-    def is_sound(self) -> bool:
-        """Узел ссылается на звуковой файл (.ogg)."""
-        return "sound_reference" in self.edge_types
+
+@dataclass(frozen=True)
+class GraphEdgeStyle:
+    """Подпись и цвет маркера связи, который добавляет модуль."""
+
+    label: str
+    color_key: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class SectionGraphContribution:
+    """Дополнительные связи от модуля и их оформление."""
+
+    children: tuple[GraphNode, ...] = field(default_factory=tuple)
+    lost_children: tuple[GraphNode, ...] = field(default_factory=tuple)
+    edge_styles: dict = field(default_factory=dict)
+    # edge_type -> callable(node): модуль сам открывает свои узлы.
+    openers: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -443,6 +500,12 @@ class CoreApi(Protocol):
     def start_prebuild(self, forest, config_dir: Path, overlay=None) -> None:
         """Запустить фоновую сборку всех LTX-файлов дерева."""
 
+    def ensure_prebuild(self, forest=None, config_dir=None, overlay=None) -> bool:
+        """Запустить/перезапустить сборку, если кеш устарел.
+
+        Возвращает True, если сборка была запущена.
+        """
+
     def prebuild_status(self) -> dict:
         """Текущий статус фоновой сборки: state/done/total/error."""
 
@@ -563,9 +626,9 @@ class CoreApi(Protocol):
         """Построить граф связей для секции.
 
         ``vfs_mode=True`` — обойти всю VFS, не ограничиваясь LtxForest,
-        и сравнить её с сырым итоговым деревом без запуска резолвера.
-        В ``SectionGraph.lost_children`` попадут связи, которых нет в
-        итоговом дереве.
+        без запуска резолвера. Ядро возвращает один список ``children``;
+        разделение на живые и потерянные делает вызывающая сторона,
+        сравнивая его с уже построенным resolved-графом.
         """
 
     def register_section_graph_contributor(
@@ -588,6 +651,13 @@ class CoreApi(Protocol):
         log: Optional[Callable[[str], None]] = None,
     ) -> tuple[GraphNode, ...]:
         """Собрать дополнительные узлы у всех зарегистрированных модулей."""
+
+    def collect_section_graph_contribution(
+        self,
+        request: SectionGraphRequest,
+        log: Optional[Callable[[str], None]] = None,
+    ) -> SectionGraphContribution:
+        """Собрать дополнительные связи и их оформление у модулей."""
 
     def open_external_editor(self, path: Path) -> tuple[bool, str]:
         """Открыть файл во внешнем редакторе. Возвращает ``(ok, message)``."""
@@ -711,6 +781,30 @@ class UiApi(Protocol):
     def project_asset_types(self) -> tuple[ProjectAssetType, ...]:
         """Все зарегистрированные типы двоичных ресурсов."""
 
+    def register_project_setting(self, setting: ProjectSetting) -> bool:
+        """Зарегистрировать настройку в окне настроек проекта.
+
+        Регистрация действует до выгрузки модуля. Настройка показывается
+        только у активного проекта; значение по умолчанию берётся из
+        :attr:`ProjectSetting.default`.
+        """
+
+    def unregister_project_setting(self, key: str) -> bool:
+        """Убрать настройку, зарегистрированную модулем."""
+
+    def project_settings(self) -> tuple[ProjectSetting, ...]:
+        """Все настройки проекта, зарегистрированные модулями."""
+
+    def project_setting(self, key: str, default=None):
+        """Текущее значение настройки активного проекта.
+
+        Если проект не создан или значение ещё не сохранялось, возвращается
+        ``default``, затем ``ProjectSetting.default``.
+        """
+
+    def set_project_setting(self, key: str, value) -> bool:
+        """Сохранить значение настройки в активном проекте."""
+
     def register_file_reader(self, reader):
         """Зарегистрировать читатель файлов.
 
@@ -830,11 +924,15 @@ class UiApi(Protocol):
         label: str,
         readonly: bool = True,
         source_path: Optional[Path] = None,
+        line_number: Optional[int] = None,
+        syntax: bool = True,
+        notice: Optional[str] = None,
     ) -> None:
         """Показать текст в редакторе/просмотрщике платформы.
 
         ``source_path`` — файл, содержимое которого показано. Нужен, чтобы
         событие открытия можно было сопоставить с отложенной навигацией.
+        ``line_number`` — перейти к строке после показа.
         """
 
     def show_module_window(self, key: str, window) -> None:
@@ -869,9 +967,6 @@ class UiApi(Protocol):
 
     def open_at_line(self, path: Path, line_number: int) -> None:
         """Открыть файл и перейти к строке."""
-
-    def open_raw_at_line(self, path: Path, line_number: int) -> None:
-        """Открыть исходный файл без резолва и перейти к строке."""
 
     def undo(self) -> None:
         """Отменить действие в редакторе."""

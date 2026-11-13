@@ -15,7 +15,13 @@ from typing import Dict, Optional
 
 from PyQt5.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 
-from sdk import ModuleBase, ModuleManifest, ProjectAssetType
+from sdk import (
+    ModuleBase,
+    ModuleManifest,
+    ProjectAssetType,
+    ProjectSetting,
+    ProjectSettingChoice,
+)
 from sdk.events import Events
 
 from .editor_tab import OggEditorTab
@@ -46,6 +52,23 @@ ASSET_TYPE = ProjectAssetType(
     label="Звук Ogg Vorbis",
     extensions=(".ogg",),
     vfs_root="sounds",
+)
+
+OGG_SAVE_SETTING = ProjectSetting(
+    key="ogg_editor.save_mode",
+    label="ogg-патч",
+    kind="choice",
+    default="override",
+    choices=(
+        ProjectSettingChoice(
+            value="override",
+            label="Override — заменить файл целиком",
+        ),
+    ),
+    description=(
+        "Способ попадания изменённого .ogg в патч-мод. "
+        "Сейчас поддерживается только полная замена файла."
+    ),
 )
 
 
@@ -84,6 +107,7 @@ class OggEditorModule(ModuleBase):
         self._forest = None
         self._tabs: Dict[str, OggEditorTab] = {}
         self._asset_type_registered = False
+        self._setting_registered = False
         self._file_reader_sub = None
         self._section_graph_contributor = None
         self._suspend_refresh = False
@@ -117,6 +141,20 @@ class OggEditorModule(ModuleBase):
             ctx.ui.log(
                 "ogg_editor: не удалось зарегистрировать тип %s"
                 % ASSET_TYPE.key
+            )
+
+        self._setting_registered = ctx.ui.register_project_setting(
+            OGG_SAVE_SETTING
+        )
+        if self._setting_registered:
+            ctx.ui.log(
+                "ogg_editor: добавлена настройка проекта %s"
+                % OGG_SAVE_SETTING.key
+            )
+        else:
+            ctx.ui.log(
+                "ogg_editor: не удалось добавить настройку %s"
+                % OGG_SAVE_SETTING.key
             )
 
         self._file_reader_sub = ctx.ui.register_file_reader(
@@ -177,6 +215,13 @@ class OggEditorModule(ModuleBase):
             except Exception:
                 pass
             self._asset_type_registered = False
+
+        if self._setting_registered:
+            try:
+                ctx.ui.unregister_project_setting(OGG_SAVE_SETTING.key)
+            except Exception:
+                pass
+            self._setting_registered = False
 
         for sub in self._subs:
             try:

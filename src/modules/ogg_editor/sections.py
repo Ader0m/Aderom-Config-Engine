@@ -7,7 +7,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 _SECTION_RE = re.compile(r"^\[([^\]]+)\](?::.*)?$")
 _KEY_RE = re.compile(r"^([^=]+?)\s*=\s*(.*)$")
@@ -50,6 +50,7 @@ class SoundReference:
     value: str
     line_number: int
     line_text: str
+    source_path: Optional[Path] = None
 
 
 def _parse_document(text: str):
@@ -269,7 +270,7 @@ def extract_sound_paths(fields, sounds_root) -> List[Path]:
     )
 
 
-def extract_sound_references(text, section, sounds_root):
+def extract_sound_references(text, section, sounds_root, source_path=None):
     """Ссылки на .ogg с полями и номерами строк (для графа связей)."""
     if sounds_root is None:
         return []
@@ -319,6 +320,7 @@ def extract_sound_references(text, section, sounds_root):
                     value=value,
                     line_number=line_number,
                     line_text=line_text,
+                    source_path=source_path,
                 )
             )
     return references

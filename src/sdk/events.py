@@ -16,6 +16,8 @@ class Events:
     PROJECT_SAVED = "project_saved"
     # Активный проект создан, загружен или удалён.
     PROJECT_CHANGED = "project_changed"
+    # Изменены настройки активного проекта (payload — {key: value}).
+    PROJECT_SETTINGS_CHANGED = "project_settings_changed"
 
     # -------------------------------------------------- UI-факты
     # Публикуются платформой после того, как действие уже выполнено.

@@ -25,4 +25,4 @@
 ## Текущие эталонные тесты
 
 - `tests/main_unit_test_patch.py` — патчинг `game.ltx` и его
-  include-файлов в режимах Root, In-place и Override.
+  include-файлов в режимах Root, On-file и Override.

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Граф связей секции: построение через ядро и собственное окно модуля."""
 
+import os
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -33,16 +34,18 @@ EDGE_STYLES = {
     "xml_reference": ("XML", "graph_xml"),
     "texture_reference": ("Текстура", "graph_texture"),
     "visual_reference": ("Модель", "graph_visual"),
-    "sound_reference": ("Звук", "graph_sound"),
 }
 
 
-def _edge_style(edge_type, color_fn=None):
+def _edge_style(edge_type, color_fn=None, styles=None):
     """(маркер, QColor|None) для типа связи."""
-    label, attr = EDGE_STYLES.get(
-        str(edge_type or ""),
-        (str(edge_type or "Связь"), None),
-    )
+    entry = (styles or EDGE_STYLES).get(str(edge_type or ""))
+    if entry is None:
+        label, attr = str(edge_type or "Связь"), None
+    elif hasattr(entry, "label"):
+        label, attr = entry.label, entry.color_key
+    else:
+        label, attr = entry
     color = color_fn(attr) if (color_fn and attr) else None
     return label, QColor(color) if color else None
 
@@ -85,12 +88,18 @@ class SectionGraphFeature:
 
     WINDOW_KEY = "base.section_graph"
 
-    def __init__(self, ctx, session):
+    def __init__(self, ctx, session, open_raw=None):
         self.ctx = ctx
         self.session = session
+        self._open_raw = open_raw
         self._window = None
         self._current_section = None
         self._request_seq = 0
+        self._live_graph = None
+        self._live_section = None
+        self._live_match_keys = set()
+        self._live_xml_files = set()
+        self._live_node_keys = set()
 
     def show(self):
         if not self.session.has_tree:
@@ -107,12 +116,9 @@ class SectionGraphFeature:
             return
 
         self._current_section = section_name
-        vfs_mode = (
-            self._window.vfs_enabled()
-            if self._window is not None
-            else False
-        )
-        self._request_graph(section_name, vfs_mode)
+        if self._window is not None and self._window.vfs_enabled():
+            self._window.vfs_check_box.setChecked(False)
+        self._request_graph(section_name, False)
 
     def close(self):
         if self._window is not None:
@@ -141,9 +147,21 @@ class SectionGraphFeature:
         )
 
         def work(log):
-            # Обычный граф идёт по кэшу резолвера, поэтому ждём фоновую
-            # сборку. VFS-режим читает сырые файлы и в резолве не нуждается.
+            # Обычный граф идёт по кэшу резолвера, поэтому сначала
+            # гарантируем актуальную предсборку. VFS-режим читает сырые
+            # файлы и в резолве не нуждается.
             if not vfs_mode:
+                ensure = getattr(
+                    self.ctx.services,
+                    "ensure_prebuild",
+                    None,
+                )
+                if callable(ensure):
+                    ensure(
+                        forest,
+                        self.session.config_dir,
+                        overlay=overlay,
+                    )
                 self.ctx.services.wait_prebuild(log)
             graph = self.ctx.services.build_section_graph(
                 forest,
@@ -154,14 +172,15 @@ class SectionGraphFeature:
             )
 
             # Дополнительные связи от модулей (например, .ogg из snd_*).
+            contribution = None
             collect = getattr(
                 self.ctx.services,
-                "collect_section_graph_nodes",
+                "collect_section_graph_contribution",
                 None,
             )
             if callable(collect):
                 try:
-                    extra = collect(
+                    contribution = collect(
                         SectionGraphRequest(
                             forest=forest,
                             section_name=section_name,
@@ -173,21 +192,16 @@ class SectionGraphFeature:
                     )
                 except Exception as exc:
                     log("связи секции: дополнительный поставщик: %s" % exc)
-                    extra = ()
-                if extra:
-                    graph = replace(
-                        graph,
-                        children=tuple(graph.children) + tuple(extra),
-                    )
-            return graph
+                    contribution = None
+            return graph, contribution
 
         def on_log(message, key=progress_key):
             self._on_graph_log(message, key)
 
         self.ctx.tasks.run(
             work,
-            on_done=lambda graph, err: self._on_done(
-                graph,
+            on_done=lambda result, err: self._on_done(
+                result,
                 err,
                 section_name,
                 vfs_mode,
@@ -206,18 +220,20 @@ class SectionGraphFeature:
             or message.startswith("Ожидание фоновой сборки")
             or message.startswith("Фоновая сборка завершена")
         ):
-            self.ctx.ui.log_status(
-                progress_key,
-                message,
-            )
+            self.ctx.ui.log_status(progress_key, message)
         else:
             self.ctx.ui.log(message)
 
     def _on_vfs_toggled(self, checked):
-        """Переключение режима: повторяем запрос для текущей секции."""
+        """Включить/выключить поиск потерянных, не трогая левый граф."""
+        if not checked:
+            self._request_seq += 1
+            if self._window is not None:
+                self._window.clear_lost_nodes()
+            return
         if not self._current_section:
             return
-        self._request_graph(self._current_section, bool(checked))
+        self._request_graph(self._current_section, True)
 
     def _on_window_message(self, message):
         """Сообщение окна графа: в журнал, статус и диалог при ошибке."""
@@ -228,7 +244,7 @@ class SectionGraphFeature:
         if "не найден" in low or "не удалось" in low:
             self.ctx.ui.show_error(message)
 
-    def _on_done(self, graph, err, section_name, vfs_mode, token):
+    def _on_done(self, result, err, section_name, vfs_mode, token):
         if token != self._request_seq:
             return
 
@@ -244,47 +260,104 @@ class SectionGraphFeature:
             )
             return
 
-        main, lost = _split_children(graph)
-        status = "Связи секции: %d узлов" % len(main)
-        if vfs_mode:
-            status += "; потерянных: %d" % len(lost)
-        self.ctx.ui.set_status(status, 5000)
-        self.ctx.ui.log(
-            "Связи секции '%s'%s: узлов %d%s"
-            % (
-                section_name,
-                " (VFS)" if vfs_mode else "",
-                len(main),
-                "; потерянных: %d" % len(lost) if vfs_mode else "",
-            )
+        graph, contribution = result
+        edge_styles = dict(
+            getattr(contribution, "edge_styles", None) or {}
+        )
+        openers = dict(
+            getattr(contribution, "openers", None) or {}
         )
 
         if self._window is None:
             self._window = SectionGraphWindow(
                 self.ctx.ui.open_at_line,
-                open_raw_at_line=self.ctx.ui.open_raw_at_line,
-                open_file=self.ctx.ui.open_file,
+                open_raw=self._open_raw,
                 on_vfs_toggled=self._on_vfs_toggled,
                 open_with_shell=self.ctx.services.open_with_shell,
                 on_message=self._on_window_message,
                 theme_color=self.ctx.ui.theme_color,
             )
 
-        self._window.update_graph(graph, vfs_mode=vfs_mode)
+        if not vfs_mode:
+            if contribution is not None and contribution.children:
+                graph = replace(
+                    graph,
+                    children=tuple(graph.children)
+                    + tuple(contribution.children),
+                )
+            self._live_graph = graph
+            self._live_section = section_name
+            self._live_match_keys, self._live_xml_files = (
+                _live_graph_state(graph)
+            )
+            self._live_node_keys = {
+                _node_key(node) for node in graph.children
+            }
+            self._window.update_graph(
+                graph,
+                vfs_mode=False,
+                edge_styles=edge_styles,
+                openers=openers,
+            )
+            status = "Связи секции: %d узлов" % len(graph.children)
+            self.ctx.ui.set_status(status, 5000)
+            self.ctx.ui.log(
+                "Связи секции '%s': узлов %d"
+                % (section_name, len(graph.children))
+            )
+        else:
+            if (
+                self._live_graph is None
+                or self._live_section != section_name
+            ):
+                self.ctx.ui.set_status(
+                    "Сначала постройте итоговые связи",
+                    5000,
+                )
+                self._window.clear_lost_nodes()
+                return
+
+            raw_lost = _lost_from_raw(
+                graph,
+                self._live_match_keys,
+                self._live_xml_files,
+            )
+            extra = (
+                tuple(contribution.lost_children)
+                if contribution is not None
+                else ()
+            )
+            lost = _unique_lost(
+                raw_lost + list(extra),
+                self._live_node_keys,
+            )
+            self._window.set_lost_nodes(
+                lost,
+                edge_styles=edge_styles,
+                openers=openers,
+            )
+            self.ctx.ui.set_status(
+                "Потерянные связи: %d" % len(lost),
+                5000,
+            )
+            self.ctx.ui.log(
+                "Связи секции '%s' (VFS): потерянных %d"
+                % (section_name, len(lost))
+            )
+
         self.ctx.ui.show_module_window(self.WINDOW_KEY, self._window)
 
 
 class SectionGraphWindow(QDialog):
     """Немодальное окно графа. Создаётся и наполняется модулем."""
 
-    def __init__(self, open_at_line, open_raw_at_line=None,
-                 open_file=None, on_vfs_toggled=None, parent=None,
+    def __init__(self, open_at_line, open_raw=None,
+                 on_vfs_toggled=None, parent=None,
                  open_with_shell=None, on_message=None,
                  theme_color=None):
         super().__init__(parent)
         self._open_at_line = open_at_line
-        self._open_raw_at_line = open_raw_at_line
-        self._open_file = open_file
+        self._open_raw = open_raw
         self._on_vfs_toggled = on_vfs_toggled
         self._open_with_shell = open_with_shell
         self._on_message = on_message
@@ -292,6 +365,8 @@ class SectionGraphWindow(QDialog):
         self._graph = None
         self._vfs_mode = False
         self._lost_panel_expanded = False
+        self._edge_styles = dict(EDGE_STYLES)
+        self._openers = {}
 
         self.setWindowTitle("Связи секции")
         self.resize(800, 600)
@@ -381,24 +456,25 @@ class SectionGraphWindow(QDialog):
 
     def _on_vfs_check_box_toggled(self, checked):
         if not checked:
-            self.lost_panel.setVisible(False)
+            self.clear_lost_nodes()
         if self._on_vfs_toggled is not None:
             self._on_vfs_toggled(bool(checked))
 
     # -------------------------------------------------- наполнение
-    def update_graph(self, graph, vfs_mode=False):
-        """Полностью пересобрать содержимое окна под новый граф."""
+    def update_graph(self, graph, vfs_mode=False, edge_styles=None,
+                     openers=None):
+        """Показать итоговый (resolved) граф в левой панели."""
         self._graph = graph
         self._vfs_mode = bool(vfs_mode)
+        self._edge_styles = dict(EDGE_STYLES)
+        if edge_styles:
+            self._edge_styles.update(edge_styles)
+        self._openers = dict(openers or {})
 
         title = "Связи секции"
         if self._vfs_mode:
             title += " (VFS)"
         self.setWindowTitle("%s: %s" % (title, graph.section_name))
-
-        # Найденные и потерянные связи не пересекаются: потерянные
-        # показываются только в правой панели, в левый список не попадают.
-        main, lost = _split_children(graph)
 
         info = (
             "Секция: %s\n"
@@ -409,37 +485,58 @@ class SectionGraphWindow(QDialog):
                 graph.section_name,
                 _node_file_name(graph.root),
                 graph.root.first_match_line,
-                len(main),
+                len(graph.children),
             )
         )
-        if self._vfs_mode:
-            info += (
-                "\nРежим: вся VFS без фильтра LtxForest"
-                "\nПотерянных связей: %d" % len(lost)
-            )
-        else:
-            info += "\nРежим: итоговое дерево"
+        info += "\nРежим: итоговое дерево"
         self.info_label.setText(info)
         self.info_label.setToolTip(_path_text(graph.root.file_path))
 
-        self._populate_list(self.list_widget, main, include_root=True)
+        # Левый список — только итоговые связи. Потерянные сюда
+        # не добавляются и отсюда не удаляются.
+        self._populate_list(
+            self.list_widget,
+            graph.children,
+            include_root=True,
+        )
         self.lost_list_widget.clear()
-
-        if self._vfs_mode:
-            self._populate_list(
-                self.lost_list_widget,
-                lost,
-                include_root=False,
-            )
-            if not self.lost_panel.isVisible():
-                self.lost_panel.setVisible(True)
-                if not self._lost_panel_expanded:
-                    self.resize(self.width() + 420, self.height())
-                    self._lost_panel_expanded = True
-        else:
-            self.lost_panel.setVisible(False)
-
+        self.lost_panel.setVisible(False)
         self._set_active_list(self.list_widget)
+
+    def set_lost_nodes(self, nodes, edge_styles=None, openers=None):
+        """Заполнить правую панель, не меняя левый список."""
+        if edge_styles:
+            self._edge_styles.update(edge_styles)
+        if openers is not None:
+            self._openers = dict(openers)
+
+        self._populate_list(
+            self.lost_list_widget,
+            nodes,
+            include_root=False,
+        )
+        self.lost_panel.setVisible(True)
+        if not self._lost_panel_expanded:
+            self.resize(self.width() + 420, self.height())
+            self._lost_panel_expanded = True
+
+        info = self.info_label.text()
+        info = "\n".join(
+            line for line in info.splitlines()
+            if not line.startswith("Потерянных связей:")
+        )
+        info += "\nПотерянных связей: %d" % len(nodes)
+        self.info_label.setText(info)
+
+    def clear_lost_nodes(self):
+        """Скрыть правую панель, не трогая левый список."""
+        self.lost_list_widget.clear()
+        self.lost_panel.setVisible(False)
+        info = "\n".join(
+            line for line in self.info_label.text().splitlines()
+            if not line.startswith("Потерянных связей:")
+        )
+        self.info_label.setText(info)
 
     def _populate_list(self, list_widget, nodes, include_root):
         list_widget.clear()
@@ -453,7 +550,11 @@ class SectionGraphWindow(QDialog):
             list_widget.addTopLevelItem(self._make_item(node))
 
     def _make_root_item(self, node):
-        label, color = _edge_style("declaration", self._theme_color)
+        label, color = _edge_style(
+            "declaration",
+            self._theme_color,
+            self._edge_styles,
+        )
         item = QTreeWidgetItem()
         item.setText(0, "[%s] %s" % (label, _node_file_name(node)))
         item.setText(1, str(getattr(node, "matches_count", 1) or 1))
@@ -465,10 +566,22 @@ class SectionGraphWindow(QDialog):
         return item
 
     def _make_item(self, node):
-        label, color = _edge_style(
-            getattr(node, "primary_edge_type", "declaration"),
-            self._theme_color,
-        )
+        edge_type = getattr(node, "primary_edge_type", "declaration")
+        if edge_type == "inheritance":
+            is_parent = self._inheritance_is_parent(node)
+            label = "Родитель" if is_parent else "Ребенок"
+            _decl_label, color = _edge_style(
+                "inheritance",
+                self._theme_color,
+                self._edge_styles,
+            )
+        else:
+            label, color = _edge_style(
+                edge_type,
+                self._theme_color,
+                self._edge_styles,
+            )
+
         item = QTreeWidgetItem()
         item.setText(0, "[%s] %s" % (label, _node_file_name(node)))
         item.setText(1, str(node.matches_count))
@@ -479,6 +592,15 @@ class SectionGraphWindow(QDialog):
         item.setData(0, Qt.UserRole, node)
         item.setToolTip(0, self._node_tooltip(node))
         return item
+
+    @staticmethod
+    def _inheritance_is_parent(node):
+        for match in getattr(node, "matches", ()):
+            if getattr(match, "edge_type", "") == "inheritance":
+                return bool(
+                    getattr(match, "related_is_parent", False)
+                )
+        return False
 
     @staticmethod
     def _node_tooltip(node):
@@ -498,7 +620,12 @@ class SectionGraphWindow(QDialog):
             line_text = ""
             if getattr(node, "matches", None):
                 line_text = str(node.matches[0].line_text or "").strip()
-            parts = ["Связь: %s" % related]
+            role = (
+                "Родитель"
+                if SectionGraphWindow._inheritance_is_parent(node)
+                else "Ребенок"
+            )
+            parts = ["%s: %s" % (role, related)]
             if line_text:
                 parts.append("Запись: %s" % line_text)
             parts.append("Файл: %s" % source)
@@ -510,12 +637,8 @@ class SectionGraphWindow(QDialog):
                 )
             return "\n".join(parts)
 
-        if getattr(node, "is_sound", False):
-            lines = []
-            if target is not None:
-                lines.append("Звук: %s" % target)
-            else:
-                lines.append("Звук не найден: %s" % (raw_ref or "—"))
+        if target is not None and not getattr(node, "is_asset", False):
+            lines = ["Файл: %s" % target]
             fields = sorted({
                 match.related
                 for match in getattr(node, "matches", ())
@@ -566,25 +689,12 @@ class SectionGraphWindow(QDialog):
         if node is None:
             return
 
-        # Звуковые файлы (.ogg) открываются в редакторе звуков через
-        # общий маршрутизатор, а не приложением Windows.
-        if getattr(node, "is_sound", False):
-            target = (
-                getattr(node, "target_path", None)
-                or getattr(node, "physical_path", None)
-            )
-            if target is not None and self._open_file is not None:
-                self._open_file(target)
-                return
-            self._notify(
-                "Звуковой файл не найден: %s\nОбъявлено в %s, строка %s"
-                % (
-                    getattr(node, "raw_ref", None) or node.display_name,
-                    _path_text(node.file_path),
-                    node.first_match_line,
-                )
-            )
-            self._open_node_source(node)
+        # Модуль, добавивший тип связи, сам открывает свои узлы.
+        opener = self._openers.get(
+            str(getattr(node, "primary_edge_type", ""))
+        )
+        if opener is not None:
+            opener(node)
             return
 
         # Визуальные модели (.ogf) обычно лежат в игровых архивах и
@@ -636,28 +746,25 @@ class SectionGraphWindow(QDialog):
         if related_path is not None:
             line_number = int(getattr(node, "related_line", None) or 0)
             resolved = bool(getattr(node, "related_resolved", False))
-            if resolved or self._open_raw_at_line is None:
+            if resolved or self._open_raw is None:
                 self._open_at_line(related_path, line_number)
             else:
-                self._open_raw_at_line(related_path, line_number)
+                self._open_raw(related_path, line_number)
             return
 
         self._open_node_source(node)
 
     def _open_node_source(self, node):
-        """Открыть строку объявления/совпадения в редакторе."""
+        """Открыть узел: итоговый через шину, сырой — через raw-view."""
         if node.file_path is None:
             return
 
         resolved = bool(getattr(node, "resolved", False))
-
-        if resolved or self._open_raw_at_line is None:
-            # Итоговый файл резолвера: открываем через общую шину —
-            # обработчик сам выберет резолв и кэш.
+        if resolved or self._open_raw is None:
             self._open_at_line(node.file_path, node.first_match_line)
-        else:
-            # VFS/скрипты: строка относится к исходному файлу.
-            self._open_raw_at_line(node.file_path, node.first_match_line)
+            return
+
+        self._open_raw(node.file_path, node.first_match_line)
 
     def _notify(self, message):
         if self._on_message is not None:
@@ -668,29 +775,116 @@ class SectionGraphWindow(QDialog):
 
 
 def _node_key(node):
-    """Ключ узла: файл + строка + ссылка, для сравнения узлов между собой."""
+    """Ключ узла: файл + строка + ссылка + target, для сравнения узлов."""
+    target = getattr(node, "target_path", None)
     return (
         str(node.file_path) if node.file_path is not None else None,
         getattr(node, "first_match_line", None),
         getattr(node, "raw_ref", None),
         getattr(node, "display_name", None),
         getattr(node, "related_name", None),
+        str(target) if target is not None else None,
     )
 
 
-def _split_children(graph):
-    """Разделить детей графа на (найденные, потерянные) без пересечений.
+def _match_key(file_path, match):
+    """Семантический ключ текстовой связи raw VFS и resolved-графа.
 
-    Потерянные (перезаписанные) связи исключаются из общего списка,
-    чтобы не дублироваться в левой колонке окна.
+    Номера строк и имена файлов после резолва меняются, поэтому
+    сравниваем саму связь: тип, участника, направление и текст записи.
     """
-    lost = list(getattr(graph, "lost_children", ()) or ())
-    lost_keys = {_node_key(node) for node in lost}
-    main = [
-        node for node in graph.children
-        if _node_key(node) not in lost_keys
-    ]
-    return main, lost
+    return (
+        str(getattr(match, "edge_type", "") or ""),
+        getattr(match, "related", None),
+        bool(getattr(match, "related_is_parent", False)),
+        str(getattr(match, "line_text", "") or "").strip(),
+    )
+
+
+def _link_key(node, match):
+    """Ключ связи. Для ресурсов сравниваем сам файл, а не строку."""
+    edge_type = str(getattr(match, "edge_type", "") or "")
+    target = getattr(node, "target_path", None)
+    if edge_type in ("texture_reference", "visual_reference") or (
+        target is not None
+        and edge_type not in ("inheritance", "declaration")
+    ):
+        if target is not None:
+            return (edge_type, _path_key(target))
+        raw_ref = str(getattr(node, "raw_ref", "") or "")
+        return (
+            edge_type,
+            raw_ref.replace("/", "\\").strip().lower(),
+        )
+    return _match_key(None, match)
+
+
+def _path_key(path):
+    if path is None:
+        return None
+    try:
+        return os.path.normcase(os.path.abspath(str(path)))
+    except (TypeError, ValueError):
+        return str(path)
+
+
+def _live_graph_state(graph):
+    """Ключи связей и XML-файлов, уже попавших в resolved-граф."""
+    match_keys = set()
+    xml_files = set()
+    nodes = [graph.root] + list(graph.children)
+    for node in nodes:
+        file_path = getattr(node, "file_path", None)
+        if file_path is not None:
+            if str(file_path).lower().endswith(".xml"):
+                xml_files.add(_path_key(file_path))
+        for match in getattr(node, "matches", ()):
+            match_keys.add(_link_key(node, match))
+    return match_keys, xml_files
+
+
+def _lost_from_raw(raw_graph, live_match_keys, live_xml_files):
+    """Оставить в сыром VFS-списке только связи, которых нет в живом графе."""
+    lost = []
+    for node in raw_graph.children:
+        file_path = getattr(node, "file_path", None)
+        if (
+            file_path is not None
+            and str(file_path).lower().endswith(".xml")
+            and _path_key(file_path) in live_xml_files
+        ):
+            continue
+
+        remaining = tuple(
+            match
+            for match in getattr(node, "matches", ())
+            if _link_key(node, match) not in live_match_keys
+        )
+        if not remaining:
+            continue
+
+        lost.append(
+            replace(
+                node,
+                matches=remaining,
+                first_match_line=remaining[0].line_number,
+                resolved=False,
+            )
+        )
+    return lost
+
+
+def _unique_lost(nodes, live_node_keys):
+    """Добавить в правую панель только то, чего нет в левой."""
+    seen = set(live_node_keys)
+    result = []
+    for node in nodes:
+        key = _node_key(node)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(node)
+    return result
 
 
 def _path_text(path) -> str:

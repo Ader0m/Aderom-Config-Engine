@@ -41,7 +41,7 @@ class LtxFileOpener:
             return False
 
         if path.name.lower().startswith("mod_"):
-            return self._open_patch(path)
+            return self.open_raw(path)
 
         return self._open_resolved(path)
 
@@ -49,38 +49,75 @@ class LtxFileOpener:
         """Сообщить платформе, что открытие этого пути не состоится."""
         self.ctx.events.publish(Events.FILE_OPEN_FAILED, path)
 
-    # -------------------------------------------------- DLTX-патч
-    def _open_patch(self, path: Path) -> bool:
-        self.ctx.ui.set_status("Патч: %s…" % path.name)
-        self.ctx.ui.log("DLTX-патч: %s" % path.name)
+    # -------------------------------------------------- сырой просмотр
+    def open_raw(self, path, line_number=None) -> bool:
+        """Единственная точка входа для сырого просмотра.
 
-        try:
-            # Виртуальный черновик проекта может ещё не существовать
-            # на диске, поэтому сначала спрашиваем текст у платформы.
-            reader = getattr(self.ctx.ui, "read_project_text", None)
-            raw_content = (
-                reader(path)
-                if callable(reader)
-                else self.ctx.services.read_text(path)
-            )
-            if not raw_content and Path(path).is_file():
-                raw_content = self.ctx.services.read_text(path)
-        except Exception as exc:
+        Для ``mod_*`` добавляется шапка DLTX-патча, для остальных —
+        шапка сырого файла. Оба варианта показываются одинаково:
+        через ``show_text``, только для чтения.
+        """
+        path = Path(path)
+        if not self.session.has_tree:
             self._open_failed(path)
-            self.ctx.ui.show_error("Не удалось прочитать: %s" % exc)
+            self.ctx.ui.show_error(
+                "Дерево не построено: сначала «Пересобрать VFS»."
+            )
+            return False
+
+        is_patch = path.name.lower().startswith("mod_")
+        label = "Патч" if is_patch else "Сырой файл"
+        self.ctx.ui.set_status("%s: %s…" % (label, path.name))
+        self.ctx.ui.log("%s: %s" % (label, path.name))
+
+        raw_content = self._read_raw(path)
+        if raw_content is None:
             return False
 
         forest = self.session.forest
-        root = self.ctx.services.patch_target(forest, path)
+        rel = self.ctx.services.relative_path(forest, path)
+        header, title = self._raw_header(
+            path,
+            rel,
+            is_patch,
+        )
+        self.ctx.ui.show_text(
+            raw_content,
+            title,
+            readonly=True,
+            source_path=path,
+            line_number=(
+                int(line_number) if line_number is not None else None
+            ),
+            syntax=True,
+            notice="\n".join(header).strip(),
+        )
+        self.ctx.ui.set_status("Открыт %s: %s" % (label.lower(), rel), 5000)
+        return True
 
+    def _raw_header(self, path: Path, rel: str, is_patch: bool):
+        """Шапка сырого просмотра. Одна для патчей и обычных файлов."""
+        if not is_patch:
+            return [
+                "; ═══════════════════════════════════════════════════════════",
+                ";                СЫРОЙ ФАЙЛ (БЕЗ РЕЗОЛВА)",
+                "; ═══════════════════════════════════════════════════════════",
+                "; Файл: %s" % rel,
+                "; Это исходный файл без include, DLTX и итоговых значений.",
+                "; Итоговые значения: откройте %s обычным открытием." % rel,
+                "; ═══════════════════════════════════════════════════════════",
+                "",
+            ], "RAW: %s" % rel
+
+        forest = self.session.forest
+        root = self.ctx.services.patch_target(forest, path)
         header = [
             "; ═══════════════════════════════════════════════════════════",
             ";                    DLTX-ПАТЧ",
             "; ═══════════════════════════════════════════════════════════",
-            "; Файл: %s" % path.name,
+            "; Файл: %s" % rel,
             "; Тип: Патч (не загружается отдельно движком)",
         ]
-
         if root is not None:
             header += [
                 "; Применяется к: %s"
@@ -95,25 +132,32 @@ class LtxFileOpener:
                 "; ⚠️ Патч не подключился ни к одному базовому файлу!",
                 "; Проверьте имя (должно быть mod_<имя_базы>_<что-то>.ltx)",
             ]
-
         header += [
             "; ═══════════════════════════════════════════════════════════",
             "",
         ]
-
-        rel = self.ctx.services.relative_path(forest, path)
         title = "DLTX PATCH: %s" % rel
         if root is None:
             title = "⚠️ " + title
+        return header, title
 
-        self.ctx.ui.show_text(
-            "\n".join(header) + raw_content,
-            title,
-            readonly=True,
-            source_path=path,
-        )
-        self.ctx.ui.set_status("Открыт патч: %s" % rel, 5000)
-        return True
+    def _read_raw(self, path: Path):
+        try:
+            # Виртуальный черновик проекта может ещё не существовать
+            # на диске, поэтому сначала спрашиваем текст у платформы.
+            reader = getattr(self.ctx.ui, "read_project_text", None)
+            raw_content = (
+                reader(path)
+                if callable(reader)
+                else self.ctx.services.read_text(path)
+            )
+            if not raw_content and Path(path).is_file():
+                raw_content = self.ctx.services.read_text(path)
+            return raw_content or ""
+        except Exception as exc:
+            self._open_failed(path)
+            self.ctx.ui.show_error("Не удалось прочитать: %s" % exc)
+            return None
 
     # -------------------------------------------------- резолв
     def open_resolved_at_line(self, path, line_number) -> bool:

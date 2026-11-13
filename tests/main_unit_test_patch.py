@@ -12,9 +12,10 @@
 * изменяемая строка ``music\\marsh_2`` вместе с секцией
   ``[___level_music_tracks]`` принадлежит ``game_maps_single.ltx``.
 
-Ожидаемые результаты режимов Root / In-place / Override называют
-владельцем строки именно ``game_maps_single.ltx`` (патч In-place
-создаётся рядом с победителем, а Override копирует его целиком).
+Ожидаемые результаты режимов Root / On-file / Override:
+
+* Root и On-file привязывают патч к корню загрузки ``game.ltx``;
+* Override копирует файл-победитель ``game_maps_single.ltx`` целиком.
 """
 
 import tempfile
@@ -175,7 +176,7 @@ class ResolveDataSetTest(PatchDataSetBase):
 
 
 class PatchModesTest(PatchDataSetBase):
-    """Патчинг в трёх режимах проекта: Root, In-place, Override."""
+    """Патчинг в трёх режимах проекта: Root, On-file, Override."""
 
     def _services(self):
         return CoreServices(
@@ -225,18 +226,18 @@ class PatchModesTest(PatchDataSetBase):
             _normalize(_expected_dltx(self.root, self.root)),
         )
 
-    def test_in_place_mode_patches_line_owner(self):
-        item = self._preview_item("in_place")
+    def test_on_file_mode_patches_load_root(self):
+        item = self._preview_item("on_file")
         file = item.generated.files[0]
 
-        self.assertEqual(item.plan.format, "ltx_in_place")
+        self.assertEqual(item.plan.format, "ltx")
         self.assertEqual(
             file.relative_path,
-            CONFIGS / "mod_game_maps_single_~ace_override.ltx",
+            CONFIGS / "mod_game_~ace_override.ltx",
         )
         self.assertEqual(
             _normalize(file.text),
-            _normalize(_expected_dltx(self.root, self.maps)),
+            _normalize(_expected_dltx(self.root, self.root)),
         )
 
     def test_override_mode_copies_line_owner(self):

@@ -45,9 +45,17 @@ class BaseModule(ModuleBase):
         self._clean_run = CleanRunFeature(ctx, self.session)
         self._ltx_opener = LtxFileOpener(ctx, self.session)
         self._xml_opener = XmlFileOpener(ctx, self.session)
-        self._section_graph = SectionGraphFeature(ctx, self.session)
+        self._section_graph = SectionGraphFeature(
+            ctx,
+            self.session,
+            open_raw=self._ltx_opener.open_raw,
+        )
         self._item_viewer = ItemViewerFeature(ctx, self.session)
-        self._tree_actions = TreeActions(ctx, self.session)
+        self._tree_actions = TreeActions(
+            ctx,
+            self.session,
+            raw_opener=self._ltx_opener.open_raw,
+        )
         self._editor_actions = EditorActions(ctx)
 
         self.session.config_dir = self._clean_run.detect_config_dir()

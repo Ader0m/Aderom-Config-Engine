@@ -9,7 +9,7 @@
     обычный текст                 syn_default
     ; комментарий                 syn_comment
     // комментарий                syn_comment
-    #include "file.ltx"           syn_directive + syn_value
+    #include "file.ltx"           syn_include + syn_value
     [section]                     syn_section
     ![section]                    syn_override   (DLTX: переопределение)
     !![section]                   syn_deleted    (DLTX: удаление секции)
@@ -67,7 +67,7 @@ STYLE_LIST_VALUE = 18
 _STYLE_COLORS = {
     STYLE_DEFAULT: PALETTE.syn_default,
     STYLE_COMMENT: PALETTE.syn_comment,
-    STYLE_DIRECTIVE: PALETTE.syn_directive,
+    STYLE_DIRECTIVE: PALETTE.syn_include,
     STYLE_SECTION: PALETTE.syn_section,
     STYLE_SECTION_OVERRIDE: PALETTE.syn_override,
     STYLE_SECTION_DELETE: PALETTE.syn_deleted,

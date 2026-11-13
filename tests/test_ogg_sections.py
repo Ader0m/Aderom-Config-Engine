@@ -156,6 +156,14 @@ snd_reload = weapon\\shot
             ltx_path.parent.mkdir(parents=True)
             ltx_path.write_text(text, encoding="utf-8")
 
+            other_ltx = game / "configs" / "weapons_override.ltx"
+            other_ltx.write_text(
+                "[wpn]\nsnd_lost = weapon\\lost\n",
+                encoding="utf-8",
+            )
+            lost_ogg = weapon / "lost.ogg"
+            lost_ogg.write_bytes(b"x")
+
             class Services:
                 def forest_scan_dir(self, _forest):
                     return ltx_path.parent
@@ -177,6 +185,13 @@ snd_reload = weapon\\shot
                     file_path=ltx_path,
                     first_match_line=2,
                 ),
+                children=(
+                    GraphNode(
+                        display_name="weapons_override.ltx",
+                        file_path=other_ltx,
+                        first_match_line=1,
+                    ),
+                ),
             )
             request = SectionGraphRequest(
                 forest=None,
@@ -184,11 +199,19 @@ snd_reload = weapon\\shot
                 graph=graph,
             )
 
-            nodes = contributor(request)
+            contribution = contributor(request)
 
-            self.assertEqual(len(nodes), 1)
-            node = nodes[0]
-            self.assertTrue(node.is_sound)
+            self.assertIn(
+                "sound_reference",
+                contribution.edge_styles,
+            )
+            self.assertIn(
+                "sound_reference",
+                contribution.openers,
+            )
+            self.assertEqual(len(contribution.children), 1)
+            node = contribution.children[0]
+            self.assertEqual(node.edge_types, ("sound_reference",))
             self.assertEqual(node.target_path, shot)
             self.assertEqual(node.raw_ref, "weapon\\shot")
             self.assertEqual(node.matches_count, 2)
@@ -196,16 +219,25 @@ snd_reload = weapon\\shot
                 [match.line_number for match in node.matches],
                 [3, 4],
             )
+
+            vfs_contribution = contributor(
+                SectionGraphRequest(
+                    forest=None,
+                    section_name="wpn",
+                    graph=graph,
+                    vfs_mode=True,
+                )
+            )
+            # В VFS-режиме левый граф уже заморожен: модуль отдаёт
+            # только потерянные звуки.
+            self.assertEqual(vfs_contribution.children, ())
+            self.assertEqual(len(vfs_contribution.lost_children), 1)
             self.assertEqual(
-                contributor(
-                    SectionGraphRequest(
-                        forest=None,
-                        section_name="wpn",
-                        graph=graph,
-                        vfs_mode=True,
-                    )
-                ),
-                (),
+                vfs_contribution.lost_children[0].target_path,
+                lost_ogg,
+            )
+            self.assertFalse(
+                vfs_contribution.lost_children[0].resolved
             )
 
     def test_extract_sound_paths_uses_sounds_root_heuristic(self):

@@ -3,8 +3,9 @@
 
 Режимы:
 
-- ``root`` — DLTX-дельта для корня;
-- ``in_place`` — DLTX-патч рядом с файлом-победителем каждой строки;
+- ``root`` — DLTX-дельта для корня открытого документа;
+- ``on_file`` — то же планирование на один документ; отдельные патч-файлы
+  на каждый изменённый документ собирает уровень проекта;
 - ``override`` — полная копия файла-победителя.
 
 Вход совпадает по форме с :class:`core.patching.xml.service.XmlPatchService`.
@@ -17,7 +18,6 @@ from pathlib import Path
 from typing import Optional
 
 from core.patching.ltx.generator import DltxGenerator
-from core.patching.ltx.in_place import LtxInPlaceService
 from core.patching.ltx.override import LtxOverrideService
 from core.patching.ltx.verifier import ModelPatchVerifier
 from core.patching.models import PatchOptions, PatchResult
@@ -25,13 +25,12 @@ from core.patching.planner import PatchPlanner
 
 
 class LtxPatchService:
-    """Планирование LTX-патча в одном из трёх режимов."""
+    """Планирование LTX-патча в одном из режимов."""
 
     def __init__(self, services=None):
         self.services = services
         self.planner = PatchPlanner()
         self.override = LtxOverrideService()
-        self.in_place = LtxInPlaceService(services)
 
     def plan(
         self,
@@ -46,6 +45,10 @@ class LtxPatchService:
         resolved: bool = False,
     ) -> PatchResult:
         mode = (mode or "root").lower().replace("-", "_")
+        if mode == "in_place":
+            # Старое имя: патчили файл-победитель строки, что для DLTX
+            # неверно. Новый режим — on_file, но цель — корень загрузки.
+            mode = "on_file"
         options = options or PatchOptions()
         source_path = Path(source_path)
 
@@ -67,24 +70,7 @@ class LtxPatchService:
                 ),
             )
 
-        if mode == "in_place":
-            result = self.in_place.plan(
-                source_path,
-                before_text,
-                after_text,
-                line_sources=line_sources,
-                forest=forest,
-                options=options,
-                resolved=resolved,
-            )
-            return PatchResult(
-                plan=result.plan,
-                generated=result.generated,
-                notes=result.notes,
-                plans=result.plans,
-            )
-
-        if mode != "root":
+        if mode not in ("root", "on_file"):
             raise ValueError("Неизвестный режим LTX-патча: %s" % mode)
 
         if resolved:

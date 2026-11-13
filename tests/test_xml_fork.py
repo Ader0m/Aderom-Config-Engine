@@ -95,7 +95,7 @@ class XmlForkTest(unittest.TestCase):
                 project_tag="proj",
                 patch_mod="ACE Patch - proj",
             ),
-            project_mode="in_place",
+            project_mode="on_file",
         )
         self.assertTrue(result.keys)
         self.assertEqual(result.keys[0].old_key, "old_key")
@@ -259,7 +259,7 @@ class XmlForkTest(unittest.TestCase):
         self.assertTrue(any(name.startswith("modxml_") for name in names))
         self.assertFalse(any(name == "other.xml" for name in names))
 
-    def test_mod_patch_reference_is_rewired_via_in_place(self):
+    def test_mod_patch_reference_is_rewired_via_on_file(self):
         mod_patch = self.config / "items" / "mod_items_old.ltx"
         mod_patch.write_bytes(b"[item]\nui = old_key\n")
         self.forest.files.append(mod_patch)

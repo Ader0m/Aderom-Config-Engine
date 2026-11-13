@@ -612,7 +612,9 @@ class ReferenceGraphBuilder:
             children=children,
         )
 
-        graph.lost_children = self._lost_children(graph, final_graph)
+        # Ядро отдаёт один список — все сырые связи VFS. Разделение
+        # на «живые» и «потерянные» делает вызывающая сторона,
+        # сравнивая этот список с уже построенным resolved-графом.
         return graph
 
     def _scan_vfs_file(self, file_path: Path, section: str) -> list[MatchInfo]:
@@ -651,74 +653,6 @@ class ReferenceGraphBuilder:
                     line_text=line,
                 ))
         return matches
-
-    def _lost_children(self, vfs_graph: SectionGraph, final_graph: SectionGraph):
-        """Оставить только те совпадения VFS, которых нет в итоговом графе."""
-        final_keys = set()
-
-        # XML сравниваем по файлу, а не по строке: разные представления
-        # (резолв/DXML) меняют форматирование и номера строк. Если файл
-        # уже найден в итоговом графе, он не потерян.
-        final_xml_files = set()
-
-        if final_graph is not None:
-            if final_graph.root.file_path is not None:
-                root_path = normalize_path(final_graph.root.file_path)
-                if root_path.suffix.lower() == ".xml":
-                    final_xml_files.add(root_path)
-            for match in final_graph.root.matches:
-                final_keys.add(self._match_key(final_graph.root.file_path, match))
-            for node in final_graph.children:
-                if node.file_path is not None:
-                    node_path = normalize_path(node.file_path)
-                    if node_path.suffix.lower() == ".xml":
-                        final_xml_files.add(node_path)
-                for match in node.matches:
-                    final_keys.add(self._match_key(node.file_path, match))
-
-        lost = []
-        for node in vfs_graph.children:
-            if (
-                node.file_path is not None
-                and normalize_path(node.file_path) in final_xml_files
-            ):
-                continue
-
-            matches = [
-                match
-                for match in node.matches
-                if self._match_key(node.file_path, match) not in final_keys
-            ]
-            if not matches:
-                continue
-
-            lost.append(GraphNode(
-                display_name=node.display_name,
-                file_path=node.file_path,
-                first_match_line=matches[0].line_number,
-                matches=matches,
-                raw_ref=node.raw_ref,
-                target_path=getattr(node, "target_path", None),
-                physical_path=getattr(node, "physical_path", None),
-                related_file_path=getattr(node, "related_file_path", None),
-                related_line=getattr(node, "related_line", None),
-                related_resolved=bool(
-                    getattr(node, "related_resolved", False)
-                ),
-            ))
-
-        return lost
-
-    @staticmethod
-    def _match_key(file_path, match: MatchInfo):
-        path = normalize_path(file_path) if file_path is not None else None
-        return (
-            path,
-            int(match.line_number),
-            match.edge_type,
-            getattr(match, "related", None),
-            match.line_text.strip(),
-        )
 
     # ------------------------------------------------------------ поиск объявления
 

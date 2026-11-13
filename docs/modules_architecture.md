@@ -69,16 +69,18 @@ Python-порт логики движка `themrdemonized/xray-monolith`:
   (`<old>_ace_<project>`; для блока без ключа — `ace_<project>`);
 - старый ключ остаётся в исходном файле;
 - ссылки на старый ключ в LTX меняются по настройке DLTX проекта
-  (Root, In-place или Override);
+  (Root, On-file или Override);
 - ссылки в XML меняются по настройке DXML проекта: DXML-Lua создаёт
   скрипт, XML/Override — полную копию XML-файла;
 - ссылки в `gamedata/scripts` не патчатся и показываются предупреждением.
 
 Режим `dxml_lua` оставлен для правки XML на месте: он генерирует
 `gamedata/scripts/modxml_*.script` и не создаёт новый ключ.
-DLTX In-place реализован в `core/patching/ltx/in_place.py`: он определяет
-файл-победителя каждой строки и создаёт `mod_*`-патч рядом с ним, а
-Override (`core/patching/ltx/override.py`) пишет полную копию победителя.
+On-file использует обычное планирование Root на каждый изменённый файл:
+целью всегда является корень загрузки, поэтому `mod_<root>_*.ltx`
+действительно загружается движком. Отдельные патч-файлы на каждый файл
+собирает уровень проекта. Override (`core/patching/ltx/override.py`)
+пишет полную копию победителя.
 Единые входы планирования — `core/patching/ltx/service.py` и
 `core/patching/xml/service.py`.
 Остальные модули дополняют приложение и не должны требовать своего порядка
@@ -209,6 +211,10 @@ deactivate  — закрыть окна, остановить свою акти�
 | Тип двоичного ресурса | `ctx.ui.register_project_asset_type(ProjectAssetType(...))` |
 | Снятие типа ресурса | `ctx.ui.unregister_project_asset_type(key)` |
 | Зарегистрированные типы | `ctx.ui.project_asset_types()` |
+| Настройка проекта | `ctx.ui.register_project_setting(ProjectSetting(...))` |
+| Снятие настройки | `ctx.ui.unregister_project_setting(key)` |
+| Значение настройки | `ctx.ui.project_setting(key, default=None)` |
+| Сохранить значение | `ctx.ui.set_project_setting(key, value)` |
 | Читатель файла | `ctx.ui.register_file_reader(FileReader)` |
 | Итоговый вид файла | `ctx.ui.read_file_view(path, data=None)` |
 | Признак изменённой вкладки | `ctx.ui.set_editor_tab_dirty(tab_id, dirty)` |
@@ -273,7 +279,42 @@ ctx.ui.register_project_asset_type(
 модуля поддержка исчезает, и проект показывает ошибку для таких
 черновиков, а не пишет их вслепую.
 
-### Читатели файлов
+### Настройки проекта
+
+Модуль может добавить в окно «Настройки проекта» собственные поля.
+Значения хранятся в `project.json` (`module_settings`) и доступны модулю
+через SDK:
+
+```python
+from sdk import ProjectSetting, ProjectSettingChoice
+
+MODE = ProjectSetting(
+    key="example_module.mode",
+    label="Режим модуля",
+    kind="choice",
+    default="default",
+    choices=(
+        ProjectSettingChoice(value="default", label="Обычный режим"),
+        ProjectSettingChoice(value="advanced", label="Расширенный режим"),
+    ),
+)
+
+def register(self, ctx):
+    ctx.ui.register_project_setting(MODE)
+
+def deactivate(self, ctx):
+    ctx.ui.unregister_project_setting(MODE.key)
+
+def save(self):
+    mode = self.ctx.ui.project_setting(MODE.key, MODE.default)
+```
+
+Конкретные ключи и подписи задаёт модуль; SDK и UI знают только
+описание настройки.
+
+Поддерживаются типы `choice`, `bool` и `text`. Диалог сам строит виджет
+по описанию настройки, поэтому UI не знает про конкретные модули.
+
 
 Тип ресурса отвечает на вопрос «можно ли это записать в патч». Отдельный
 вопрос — «как показать файл пользователю». Для него модуль регистрирует

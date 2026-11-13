@@ -103,6 +103,40 @@ class ProjectServiceTest(unittest.TestCase):
             self.assertFalse(root.exists())
             self.assertEqual(service.list_projects(), [])
 
+    def test_custom_project_directory_is_listed_and_deleted(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d) / "projects"
+            external = Path(d) / "custom projects" / "my project"
+            service = ProjectService(base)
+
+            project = service.create(
+                "My Project",
+                save_mode="root",
+                project_dir=external,
+            )
+            self.assertEqual(project.root_dir, external.resolve())
+            self.assertTrue((external / "project.json").is_file())
+
+            listed = service.list_projects()
+            self.assertEqual(
+                [item.root_dir for item in listed],
+                [external.resolve()],
+            )
+
+            project_id = project.id
+            service.close()
+
+            # Внешний каталог запоминается в project_roots.json.
+            reopened = ProjectService(base)
+            listed = reopened.list_projects()
+            self.assertEqual(len(listed), 1)
+            self.assertEqual(listed[0].root_dir, external.resolve())
+            loaded = reopened.load(project_id)
+            self.assertEqual(loaded.root_dir, external.resolve())
+
+            self.assertTrue(reopened.delete_active_project())
+            self.assertFalse(external.exists())
+
     def test_patch_mode_can_be_changed_and_persisted(self):
         with tempfile.TemporaryDirectory() as d:
             service = ProjectService(Path(d) / "projects")
@@ -543,7 +577,7 @@ class ProjectServiceTest(unittest.TestCase):
             self.assertNotEqual(baseline, edited)
 
             project = ProjectService(Path(d) / "projects")
-            project.create("Resolved Preview", save_mode="in_place")
+            project.create("Resolved Preview", save_mode="on_file")
             project.update_resolved_draft(
                 "resolved:system",
                 root,
@@ -559,7 +593,9 @@ class ProjectServiceTest(unittest.TestCase):
             item = preview.items[0]
             self.assertEqual(item.kind, "resolved")
             self.assertTrue(item.ok, item.error)
-            self.assertEqual(item.plan.target.root_path, source)
+            # On-file создаёт отдельный патч на изменённый документ, но
+            # привязывает его к корню загрузки, а не к include-файлу.
+            self.assertEqual(item.plan.target.root_path, root)
             self.assertIn("cost = 150", item.generated.text)
 
 

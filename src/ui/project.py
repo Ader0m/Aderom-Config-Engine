@@ -50,6 +50,27 @@ class ProjectError(Exception):
     """Ошибка работы с проектом."""
 
 
+SAVE_MODES = ("root", "on_file", "override")
+_LEGACY_SAVE_MODES = {"in_place": "on_file"}
+
+
+def normalize_save_mode(mode) -> str:
+    """Привести режим проекта к актуальному имени.
+
+    ``in_place`` — старое имя режима, который патчил файл-победитель
+    строки. Для DLTX это неверно, поэтому старые проекты переводятся в
+    ``on_file``: отдельный патч на каждый изменённый файл, но всегда для
+    корня загрузки.
+    """
+    value = str(mode or "root").strip().lower().replace("-", "_")
+    value = _LEGACY_SAVE_MODES.get(value, value)
+    if value not in SAVE_MODES:
+        raise ProjectError(
+            "Неизвестный режим формирования патча: %s" % mode
+        )
+    return value
+
+
 # ---------------------------------------------------------------- модели
 
 
@@ -163,6 +184,7 @@ class Project:
         default_factory=dict
     )
     assets: Dict[str, ProjectAssetDraft] = field(default_factory=dict)
+    module_settings: Dict[str, object] = field(default_factory=dict)
 
     def draft(self, path) -> Optional[ProjectDraft]:
         return self.drafts.get(ProjectService.path_key(path))
@@ -172,6 +194,9 @@ class Project:
 
     def asset_draft(self, path) -> Optional[ProjectAssetDraft]:
         return self.assets.get(ProjectService.path_key(path))
+
+    def module_setting(self, key, default=None):
+        return self.module_settings.get(str(key or "").strip(), default)
 
 
 @dataclass(frozen=True)
@@ -266,6 +291,7 @@ class ProjectService:
     DRAFTS_DIR = "drafts"
     RESOLVED_DIR = "resolved"
     ASSETS_DIR = "assets"
+    ROOTS_NAME = "project_roots.json"
 
     PREVIEW_CACHE_SIZE = 128
 
@@ -275,8 +301,9 @@ class ProjectService:
         asset_registry=None,
         file_readers=None,
     ):
-        self.base_dir = Path(base_dir)
+        self.base_dir = Path(base_dir).resolve()
         self.base_dir.mkdir(parents=True, exist_ok=True)
+        self._project_roots = self._load_project_roots()
         self.active: Optional[Project] = None
         # Нельзя использовать ``or``: пустой реестр — валидный объект,
         # а ``ProjectAssetRegistry`` определяет ``__len__`` и поэтому
@@ -301,10 +328,13 @@ class ProjectService:
     def patch_mode(self) -> str:
         if self.active is None:
             return "root"
-        return str(self.active.save_mode or "root")
+        return normalize_save_mode(self.active.save_mode or "root")
 
     def is_root_mode(self) -> bool:
         return self.patch_mode() == "root"
+
+    def is_on_file_mode(self) -> bool:
+        return self.patch_mode() == "on_file"
 
     @staticmethod
     def path_key(path) -> str:
@@ -316,8 +346,57 @@ class ProjectService:
         ).hexdigest()
         return digest + ".json"
 
+    def _load_project_roots(self):
+        roots = [self.base_dir]
+        path = self.base_dir / self.ROOTS_NAME
+        if not path.is_file():
+            return roots
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return roots
+        for value in data if isinstance(data, list) else ():
+            try:
+                root = Path(value).expanduser().resolve()
+            except (OSError, TypeError, ValueError):
+                continue
+            if root not in roots:
+                roots.append(root)
+        return roots
+
+    def _save_project_roots(self):
+        data = [
+            str(root)
+            for root in self._project_roots
+            if root != self.base_dir
+        ]
+        try:
+            (self.base_dir / self.ROOTS_NAME).write_text(
+                json.dumps(data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+    def _register_project_root(self, root) -> None:
+        try:
+            root = Path(root).expanduser().resolve()
+        except (OSError, TypeError, ValueError):
+            return
+        if root not in self._project_roots:
+            self._project_roots.append(root)
+            self._save_project_roots()
+
     def _project_dir(self, project_id: str) -> Path:
+        for root in self._project_roots:
+            candidate = root / project_id
+            if (candidate / self.META_NAME).is_file():
+                return candidate
         return self.base_dir / project_id
+
+    def suggest_project_dir(self, name: str) -> Path:
+        """Предложить каталог нового проекта по его названию."""
+        return self.base_dir / self._make_project_id(name)
 
     # -------------------------------------------------- создание / загрузка
     def create(
@@ -326,17 +405,14 @@ class ProjectService:
         modules: Optional[Iterable[str]] = None,
         save_mode: str = "root",
         xml_patch_mode: str = "xml",
+        project_dir=None,
     ) -> Project:
         name = (name or "").strip()
         if not name:
             raise ProjectError("Название проекта не может быть пустым")
 
-        save_mode = str(save_mode or "root").lower().replace("-", "_")
+        save_mode = normalize_save_mode(save_mode)
         xml_patch_mode = str(xml_patch_mode or "xml").lower()
-        if save_mode not in ("root", "in_place", "override"):
-            raise ProjectError(
-                "Неизвестный режим формирования патча: %s" % save_mode
-            )
         if xml_patch_mode not in ("dxml_lua", "xml", "xml_override"):
             raise ProjectError(
                 "Неизвестный режим XML-патча: %s" % xml_patch_mode
@@ -346,9 +422,43 @@ class ProjectService:
             self.close()
 
         self._preview_cache.clear()
-        project_id = self._make_project_id(name)
-        root_dir = self._project_dir(project_id)
-        root_dir.mkdir(parents=True, exist_ok=False)
+        if project_dir:
+            root_dir = Path(project_dir).expanduser()
+            if not root_dir.is_absolute():
+                raise ProjectError(
+                    "Каталог проекта должен быть абсолютным: %s"
+                    % root_dir
+                )
+            root_dir = root_dir.resolve()
+            if root_dir.parent == root_dir:
+                raise ProjectError(
+                    "Нельзя сохранить проект в корень диска"
+                )
+            if root_dir.exists():
+                if not root_dir.is_dir():
+                    raise ProjectError(
+                        "Каталог проекта не является папкой: %s"
+                        % root_dir
+                    )
+                if any(root_dir.iterdir()):
+                    raise ProjectError(
+                        "Каталог проекта уже существует и не пуст: %s"
+                        % root_dir
+                    )
+            else:
+                try:
+                    root_dir.mkdir(parents=True, exist_ok=True)
+                except OSError as exc:
+                    raise ProjectError(
+                        "Не удалось создать каталог проекта: %s" % exc
+                    )
+            project_id = root_dir.name
+        else:
+            project_id = self._make_project_id(name)
+            root_dir = self._project_dir(project_id)
+            root_dir.mkdir(parents=True, exist_ok=False)
+
+        self._register_project_root(root_dir.parent)
         (root_dir / self.DRAFTS_DIR).mkdir(parents=True, exist_ok=True)
         (root_dir / self.RESOLVED_DIR).mkdir(parents=True, exist_ok=True)
         (root_dir / self.ASSETS_DIR).mkdir(parents=True, exist_ok=True)
@@ -383,12 +493,22 @@ class ProjectService:
         except Exception as exc:
             raise ProjectError("Не удалось прочитать проект: %s" % exc)
 
-        save_mode = str(meta["save_mode"]).lower().replace("-", "_")
+        save_mode = normalize_save_mode(meta["save_mode"])
         xml_patch_mode = str(meta["xml_patch_mode"]).lower()
-        if save_mode not in ("root", "in_place", "override"):
-            raise ProjectError("Неизвестный режим формирования патча: %s" % save_mode)
         if xml_patch_mode not in ("dxml_lua", "xml", "xml_override"):
             raise ProjectError("Неизвестный режим XML-патча: %s" % xml_patch_mode)
+
+        module_settings = {}
+        raw_settings = meta.get("module_settings") or {}
+        if isinstance(raw_settings, dict):
+            for key, value in raw_settings.items():
+                if not isinstance(key, str) or not key.strip():
+                    continue
+                if value is None or isinstance(
+                    value,
+                    (str, bool, int, float),
+                ):
+                    module_settings[key] = value
 
         project = Project(
             id=str(meta["id"]),
@@ -401,6 +521,7 @@ class ProjectService:
             drafts={},
             resolved_drafts={},
             assets={},
+            module_settings=module_settings,
         )
 
         drafts_dir = root_dir / self.DRAFTS_DIR
@@ -431,10 +552,25 @@ class ProjectService:
 
     def list_projects(self) -> List[ProjectInfo]:
         result: List[ProjectInfo] = []
+        seen = set()
 
-        for entry in sorted(self.base_dir.iterdir()):
-            if not entry.is_dir():
+        entries = []
+        for root in self._project_roots:
+            if not root.is_dir():
                 continue
+            for entry in root.iterdir():
+                if not entry.is_dir():
+                    continue
+                try:
+                    key = entry.resolve()
+                except OSError:
+                    key = entry
+                if key in seen:
+                    continue
+                seen.add(key)
+                entries.append(entry)
+
+        for entry in sorted(entries, key=lambda item: str(item).lower()):
             meta_path = entry / self.META_NAME
             if not meta_path.is_file():
                 continue
@@ -455,13 +591,11 @@ class ProjectService:
                 draft_count += len(list(assets_dir.glob("*.json")))
 
             try:
-                save_mode = str(meta["save_mode"]).lower().replace("-", "_")
+                save_mode = normalize_save_mode(meta["save_mode"])
                 xml_patch_mode = str(meta["xml_patch_mode"]).lower()
-                if save_mode not in ("root", "in_place", "override"):
-                    continue
                 if xml_patch_mode not in ("dxml_lua", "xml", "xml_override"):
                     continue
-            except (KeyError, TypeError):
+            except (KeyError, TypeError, ProjectError):
                 continue
 
             result.append(
@@ -488,9 +622,7 @@ class ProjectService:
     def set_patch_mode(self, mode: str) -> Project:
         """Переключить режим формирования патча у активного проекта."""
         project = self._require_active()
-        mode = str(mode or "root").lower().replace("-", "_")
-        if mode not in ("root", "in_place", "override"):
-            raise ProjectError("Неизвестный режим формирования патча: %s" % mode)
+        mode = normalize_save_mode(mode)
 
         project.save_mode = mode
         self._preview_cache.clear()
@@ -509,6 +641,30 @@ class ProjectService:
         self._write_meta(project)
         return project
 
+    def module_setting(self, key, default=None):
+        """Текущее значение настройки модуля у активного проекта."""
+        if self.active is None:
+            return default
+        return self.active.module_setting(key, default)
+
+    def module_settings(self) -> Dict[str, object]:
+        """Копия всех сохранённых настроек модулей активного проекта."""
+        if self.active is None:
+            return {}
+        return dict(self.active.module_settings)
+
+    def set_module_setting(self, key, value):
+        """Сохранить значение настройки модуля в активном проекте."""
+        project = self._require_active()
+        key = str(key or "").strip()
+        if not key:
+            raise ProjectError("Ключ настройки проекта не может быть пустым")
+
+        project.module_settings[key] = value
+        self._preview_cache.clear()
+        self._write_meta(project)
+        return value
+
     def delete_active_project(self) -> bool:
         """Удалить активный проект со всеми черновиками.
 
@@ -518,19 +674,29 @@ class ProjectService:
         """
         project = self._require_active()
         root = Path(project.root_dir)
-
-        base = Path(self.base_dir).resolve()
         target = root.resolve()
 
-        try:
-            common = os.path.commonpath([str(target), str(base)])
-            inside = os.path.normcase(common) == os.path.normcase(str(base))
-        except (ValueError, OSError):
-            inside = False
+        inside = False
+        for allowed in self._project_roots:
+            allowed_path = allowed.resolve()
+            if target == allowed_path:
+                continue
+            try:
+                common = os.path.commonpath(
+                    [str(target), str(allowed_path)]
+                )
+            except (ValueError, OSError):
+                continue
+            if os.path.normcase(common) == os.path.normcase(
+                str(allowed_path)
+            ):
+                inside = True
+                break
 
         if not inside:
             raise ProjectError(
-                "Отказ: каталог проекта находится вне хранилища проектов"
+                "Отказ: каталог проекта находится вне известных "
+                "каталогов проектов"
             )
 
         self._preview_cache.clear()
@@ -944,11 +1110,7 @@ class ProjectService:
             + len(self.dirty_resolved_drafts())
             + len(self.dirty_asset_drafts())
         )
-        mode = (
-            "root"
-            if self.is_root_mode()
-            else ("override" if self.patch_mode() == "override" else "in_place")
-        )
+        mode = self.patch_mode()
         return (
             "Проект: %s | режим: %s | XML: %s | изменённых файлов: %d | "
             "несохранённых: %d"
@@ -991,6 +1153,12 @@ class ProjectService:
             project.save_mode,
             project.xml_patch_mode,
             project.name,
+            tuple(
+                sorted(
+                    (str(key), repr(value))
+                    for key, value in project.module_settings.items()
+                )
+            ),
         )
 
     def _draft_preview_key(self, draft, forest):
@@ -1408,7 +1576,6 @@ class ProjectService:
 
             is_xml = suffix_low == ".xml"
             override_mode = self.patch_mode() == "override"
-            in_place_mode = self.patch_mode() == "in_place"
             notes: Tuple[str, ...] = ()
             resolved_analysis = None
             if (
@@ -1416,7 +1583,6 @@ class ProjectService:
                 and resolved is not None
                 and not is_xml
                 and not override_mode
-                and not in_place_mode
             ):
                 resolved_analysis = analyze_multiline_edit(
                     original_text,
@@ -1488,31 +1654,6 @@ class ProjectService:
                 fork_result = None
                 fork_notes: Tuple[str, ...] = ()
                 if (
-                    not is_xml
-                    and in_place_mode
-                    and hasattr(services, "plan_ltx_in_place")
-                ):
-                    result = services.plan_ltx_in_place(
-                        source_path,
-                        original_text,
-                        current_text,
-                        line_sources=(
-                            resolved.line_sources
-                            if kind == "resolved" and resolved is not None
-                            else ()
-                        ),
-                        forest=forest,
-                        options=options,
-                        resolved=(
-                            kind == "resolved" and resolved is not None
-                        ),
-                    )
-                    plan = result.plan
-                    pre_generated = result.generated
-                    notes = notes + result.notes + tuple(
-                        issue.message for issue in plan.warnings
-                    )
-                elif (
                     not is_xml
                     and override_mode
                     and hasattr(services, "plan_ltx_override")
@@ -1605,6 +1746,16 @@ class ProjectService:
                         current_text,
                         forest,
                         options,
+                    )
+
+                if (
+                    not is_xml
+                    and self.patch_mode() == "on_file"
+                    and plan.target.root_path is not None
+                ):
+                    notes = notes + (
+                        "On-file: отдельный патч на файл; корень — %s"
+                        % Path(plan.target.root_path).name,
                     )
 
                 if pre_generated is not None:
@@ -1929,6 +2080,7 @@ class ProjectService:
             "modules": list(project.modules),
             "save_mode": project.save_mode,
             "xml_patch_mode": project.xml_patch_mode,
+            "module_settings": dict(project.module_settings),
         }
         (project.root_dir / self.META_NAME).write_text(
             json.dumps(data, ensure_ascii=False, indent=2),

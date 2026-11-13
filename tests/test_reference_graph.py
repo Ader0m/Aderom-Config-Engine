@@ -113,12 +113,6 @@ class ReferenceGraphTest(unittest.TestCase):
             )
         )
 
-        lost_xml = [
-            node for node in graph.lost_children
-            if node.file_path == self.xml
-        ]
-        self.assertEqual(lost_xml, [])
-
     def test_vfs_mode_does_not_call_resolved_providers(self):
         self.system.write_text(
             "[test]\nx=1\n[other]\nparent=test\n",
@@ -357,7 +351,7 @@ class ReferenceGraphTest(unittest.TestCase):
             )
             self.assertFalse(node.related_resolved)
 
-    def test_vfs_reports_lost_parent_link(self):
+    def test_vfs_returns_parent_link_in_single_list(self):
         self.system.write_text("[test]\nx=1\n", encoding="utf-8")
         other = self.root / "other.ltx"
         other.write_text("[test]:base_parent\n", encoding="utf-8")
@@ -377,18 +371,19 @@ class ReferenceGraphTest(unittest.TestCase):
             vfs_mode=True,
         )
 
-        lost_parents = [
-            node for node in graph.lost_children
+        parent_nodes = [
+            node for node in graph.children
             if node.related_name
         ]
         self.assertEqual(
-            [node.related_name for node in lost_parents],
+            [node.related_name for node in parent_nodes],
             ["base_parent"],
         )
-        lost = lost_parents[0]
-        self.assertEqual(lost.related_file_path, parents_file)
-        self.assertEqual(lost.related_line, 1)
-        self.assertFalse(lost.related_resolved)
+        found = parent_nodes[0]
+        self.assertEqual(found.related_file_path, parents_file)
+        self.assertEqual(found.related_line, 1)
+        self.assertFalse(found.related_resolved)
+        self.assertEqual(graph.lost_children, [])
 
     def test_resolved_graph_shows_section_parents(self):
         text = "[test]:base_a,base_b\nx=1\n"

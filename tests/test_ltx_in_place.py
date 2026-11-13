@@ -21,6 +21,18 @@ class InPlaceServices:
     def plan_ltx_in_place(self, *args, **kwargs):
         return self.ltx_in_place.plan(*args, **kwargs)
 
+    def generate_patch(self, plan):
+        from dataclasses import replace
+
+        from core.patching.ltx.generator import DltxGenerator
+        from core.patching.ltx.verifier import ModelPatchVerifier
+
+        generated = DltxGenerator().generate(plan)
+        return replace(
+            generated,
+            verification=ModelPatchVerifier().verify(generated),
+        )
+
 
 class Forest:
     def __init__(self, config_dir, files, parents=None):
@@ -154,24 +166,24 @@ class LtxInPlaceTest(unittest.TestCase):
         self.assertEqual(file.relative_path.name, "mod_system_~ace_proj.ltx")
         self.assertIn("x = new", file.text)
 
-    def test_project_explicit_in_place_mode(self):
+    def test_project_on_file_mode(self):
         projects = ProjectService(Path(self.temp.name) / "projects")
-        projects.create("inplace", save_mode="in_place")
+        projects.create("onfile", save_mode="on_file")
         projects.update_draft(self.source, "[item]\nx = new\n")
         forest = Forest(self.config, [self.source])
         preview = projects.build_preview(InPlaceServices(), forest)
         self.assertEqual(len(preview.items), 1)
         item = preview.items[0]
         self.assertTrue(item.ok, item.error)
-        self.assertEqual(item.plan.format, "ltx_in_place")
+        self.assertEqual(item.plan.format, "ltx")
         self.assertEqual(
             item.generated.files[0].relative_path.name,
-            "mod_items_~ace_inplace.ltx",
+            "mod_items_~ace_onfile.ltx",
         )
 
     def test_resolved_line_sources_persist(self):
         projects = ProjectService(Path(self.temp.name) / "projects")
-        project = projects.create("sources", save_mode="in_place")
+        project = projects.create("sources", save_mode="on_file")
         projects.update_resolved_draft(
             "resolved:items",
             self.source,

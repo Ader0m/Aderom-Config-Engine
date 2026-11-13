@@ -15,8 +15,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -1210,13 +1211,15 @@ class XmlForkService:
         if not references:
             return []
 
-        if dltx_mode in ("in_place", "override"):
+        if dltx_mode in ("on_file", "in_place", "override"):
             return self._ltx_reference_file_patches(
                 references,
                 forest,
                 options,
                 warnings,
-                dltx_mode=dltx_mode,
+                dltx_mode=(
+                    "override" if dltx_mode == "override" else "on_file"
+                ),
             )
 
         plans_by_root: Dict[Path, List[PatchPlan]] = {}
@@ -1236,7 +1239,7 @@ class XmlForkService:
                     forest,
                     options,
                     warnings,
-                    dltx_mode="in_place",
+                    dltx_mode="on_file",
                 )
             )
 
@@ -1302,11 +1305,12 @@ class XmlForkService:
         warnings,
         dltx_mode: str,
     ) -> List[GeneratedPatch]:
-        """Перепривязать LTX-ссылки по файлам-победителям.
+        """Перепривязать LTX-ссылки по отдельным файлам.
 
-        In-place создаёт отдельный DLTX-патч для победителя (привязанный
-        к корню), Override — полную копию файла. Так XML-режим соблюдает
-        настройку DLTX проекта, а не всегда собирает один патч на корень.
+        On-file создаёт отдельный DLTX-патч на каждый файл, но привязывает
+        его к корню загрузки. Override — полную копию файла. Так XML-режим
+        соблюдает настройку DLTX проекта, а не всегда собирает один патч
+        на корень.
         """
         by_file: Dict[Path, List[Tuple[str, str, str]]] = {}
         for (path, section, key), (_old, new_value) in references.items():
@@ -1368,31 +1372,43 @@ class XmlForkService:
                             options=options,
                             resolved=False,
                         )
+                    generated.append(result.generated)
                 else:
-                    planner = getattr(
-                        self.services, "plan_ltx_in_place", None
-                    )
-                    if planner is None:
-                        from core.patching.ltx.in_place import LtxInPlaceService
+                    # On-file: отдельный патч на этот файл, но привязанный
+                    # к его корню загрузки, а не к самому include-файлу.
+                    planner = getattr(self.services, "patch", None)
+                    if planner is None or not hasattr(
+                        planner,
+                        "plan_document_change",
+                    ):
+                        from core.patching.planner import PatchPlanner
 
-                        result = LtxInPlaceService(self.services).plan(
-                            path,
-                            baseline,
-                            edited,
-                            forest=forest,
-                            options=options,
-                            resolved=False,
+                        planner = PatchPlanner()
+
+                    # Несколько LTX-ссылок могут принадлежать одному
+                    # корню. Чтобы их патч-файлы не совпали по имени,
+                    # добавляем к суффиксу короткий хеш исходного файла.
+                    file_options = options
+                    if len(by_file) > 1:
+                        suffix = "%s_%s" % (
+                            options.suffix,
+                            hashlib.sha1(
+                                str(path).lower().encode(
+                                    "utf-8",
+                                    "replace",
+                                )
+                            ).hexdigest()[:6],
                         )
-                    else:
-                        result = planner(
-                            path,
-                            baseline,
-                            edited,
-                            forest=forest,
-                            options=options,
-                            resolved=False,
-                        )
-                generated.append(result.generated)
+                        file_options = replace(options, suffix=suffix)
+
+                    plan = planner.plan_document_change(
+                        path,
+                        baseline,
+                        edited,
+                        forest=forest,
+                        options=file_options,
+                    )
+                    generated.append(self.services.generate_patch(plan))
             except Exception as exc:
                 warnings.append(
                     PatchIssue(

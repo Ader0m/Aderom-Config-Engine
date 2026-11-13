@@ -23,6 +23,7 @@ from .module_windows import ModuleWindowManager
 from .project import ProjectError, ProjectService, SavedDraft
 from .project_assets import ProjectAssetRegistry, ProjectAssetTypeError
 from .project_readers import ProjectFileReaderRegistry
+from .project_settings import ProjectSettingError, ProjectSettingsRegistry
 from .project_dialogs import (
     ProjectCreateDialog,
     ProjectLoadDialog,
@@ -62,6 +63,7 @@ class PlatformApi:
                 / "projects"
             )
         self.asset_types = ProjectAssetRegistry()
+        self.project_setting_registry = ProjectSettingsRegistry()
         self.file_readers = ProjectFileReaderRegistry()
         self.project = ProjectService(
             projects_dir,
@@ -91,7 +93,6 @@ class PlatformApi:
 
         commands.register("ui.open_file", self.request_open_file)
         commands.register("ui.open_file_raw", self.request_open_file_raw)
-        commands.register("ui.open_file_raw_at_line", self.request_open_file_raw_at_line)
         commands.register("ui.editor_undo", self.request_editor_undo)
         commands.register("ui.editor_redo", self.request_editor_redo)
         commands.register("ui.editor_find", self.request_editor_find)
@@ -185,6 +186,24 @@ class PlatformApi:
     def _on_tree_ready(self, forest):
         self._forest = forest
 
+    def _invalidate_resolver_cache(self):
+        """Сбросить кеш и пометить предсборку устаревшей."""
+        invalidate = getattr(
+            self.services,
+            "invalidate_resolver_cache",
+            None,
+        )
+        if callable(invalidate):
+            invalidate()
+            return
+        invalidate = getattr(self.services, "invalidate_cache", None)
+        if callable(invalidate):
+            invalidate()
+            return
+        resolver = getattr(self.services, "resolver", None)
+        if resolver is not None and hasattr(resolver, "invalidate_cache"):
+            resolver.invalidate_cache()
+
     def has_forest(self):
         return self._forest is not None
 
@@ -268,7 +287,7 @@ class PlatformApi:
         if added or removed:
             self.events.publish(Events.TREE_READY, forest)
             try:
-                self.services.resolver.invalidate_cache()
+                self._invalidate_resolver_cache()
             except Exception:
                 pass
             self.log(
@@ -293,7 +312,7 @@ class PlatformApi:
             return False
 
         try:
-            self.services.resolver.invalidate_cache()
+            self._invalidate_resolver_cache()
         except Exception as exc:
             self.log("Проект: не удалось сбросить кэш резолва: %s" % exc)
 
@@ -336,6 +355,74 @@ class PlatformApi:
 
     def project_asset_types(self):
         return self.asset_types.types()
+
+    # -------------------------------------------------- настройки модулей
+    def register_project_setting(self, setting):
+        """Зарегистрировать настройку проекта от имени модуля."""
+        try:
+            registered = self.project_setting_registry.register(setting)
+        except ProjectSettingError as exc:
+            self.log("Проект: настройка не зарегистрирована: %s" % exc)
+            return False
+
+        self.project.invalidate_preview_cache()
+        self.log(
+            "Проект: зарегистрирована настройка %s (%s)"
+            % (registered.key, registered.label)
+        )
+        return True
+
+    def unregister_project_setting(self, key):
+        if not self.project_setting_registry.unregister(key):
+            return False
+        self.project.invalidate_preview_cache()
+        self.log("Проект: настройка снята: %s" % key)
+        return True
+
+    def project_setting_definitions(self):
+        """Описания настроек, которые показываются в окне проекта."""
+        return self.project_setting_registry.settings()
+
+    def project_setting(self, key, default=None):
+        """Текущее значение настройки активного проекта."""
+        setting = self.project_setting_registry.get(key)
+        fallback = (
+            default
+            if default is not None
+            else (setting.default if setting is not None else None)
+        )
+        if not self.project.is_active:
+            return fallback
+        value = self.project.module_setting(key, fallback)
+        if setting is None:
+            return value
+        try:
+            return self.project_setting_registry.normalize(key, value)
+        except ProjectSettingError:
+            return fallback
+
+    def set_project_setting(self, key, value):
+        """Сохранить значение настройки в активном проекте."""
+        setting = self.project_setting_registry.get(key)
+        if setting is None:
+            self.log("Проект: неизвестная настройка %s" % key)
+            return False
+
+        try:
+            normalized = self.project_setting_registry.normalize(key, value)
+            self.project.set_module_setting(key, normalized)
+        except (ProjectSettingError, ProjectError) as exc:
+            self.log("Проект: настройка %s не изменена: %s" % (key, exc))
+            return False
+
+        self.events.publish(
+            Events.PROJECT_SETTINGS_CHANGED,
+            {setting.key: normalized},
+        )
+        self.log(
+            "Проект: настройка %s = %r" % (setting.key, normalized)
+        )
+        return True
 
     def register_file_reader(self, reader):
         try:
@@ -610,7 +697,7 @@ class PlatformApi:
         # Черновик входит в VFS: ранее собранные корни больше нельзя
         # считать актуальными, даже если файл на диске не менялся.
         try:
-            self.services.resolver.invalidate_cache()
+            self._invalidate_resolver_cache()
         except Exception as exc:
             self.log("Проект: не удалось сбросить кэш резолва: %s" % exc)
 
@@ -637,7 +724,7 @@ class PlatformApi:
             return
 
         try:
-            self.services.resolver.invalidate_cache()
+            self._invalidate_resolver_cache()
         except Exception as exc:
             self.log("Проект: не удалось сбросить кэш резолва: %s" % exc)
 
@@ -702,22 +789,38 @@ class PlatformApi:
         if self.window is None:
             return
 
-        dialog = ProjectCreateDialog(self.window)
+        setting_definitions = self.project_setting_registry.settings()
+        setting_values = {
+            setting.key: setting.default
+            for setting in setting_definitions
+        }
+        dialog = ProjectCreateDialog(
+            self.window,
+            settings=setting_definitions,
+            setting_values=setting_values,
+            base_dir=self.project.base_dir,
+            suggest_dir=self.project.suggest_project_dir,
+        )
         if not dialog.exec_():
             return
 
-        name, modules, save_mode, xml_patch_mode = dialog.values()
+        name = dialog.project_name()
+        project_dir = dialog.project_directory() or None
 
         try:
             project = self.project.create(
                 name,
-                modules,
-                save_mode,
-                xml_patch_mode=xml_patch_mode,
+                [],
+                dialog.save_mode(),
+                xml_patch_mode=dialog.xml_patch_mode(),
+                project_dir=project_dir,
             )
         except ProjectError as exc:
             self.show_error(str(exc))
             return
+
+        for key, value in dialog.module_setting_values().items():
+            self.set_project_setting(key, value)
 
         self._restore_project_virtual_files()
         self.window.editor.set_editable(True)
@@ -792,10 +895,17 @@ class PlatformApi:
             )
             return
 
+        setting_definitions = self.project_setting_registry.settings()
+        setting_values = {
+            setting.key: self.project_setting(setting.key)
+            for setting in setting_definitions
+        }
         dialog = ProjectSettingsDialog(
             self.project.active,
             self.window,
             on_delete=self._delete_project,
+            settings=setting_definitions,
+            setting_values=setting_values,
         )
         if not dialog.exec_():
             return
@@ -811,6 +921,9 @@ class PlatformApi:
         except ProjectError as exc:
             self.show_error(str(exc))
             return
+
+        for key, value in dialog.module_setting_values().items():
+            self.set_project_setting(key, value)
 
         self._update_project_status()
         self.log(
@@ -1125,6 +1238,7 @@ class PlatformApi:
 
     # -------------------------------------------------- команды платформы
     def request_open_file(self, path):
+        self._pending_file_actions.pop(_path_key(path), None)
         ok = self.router.open(path, self)
         if not ok:
             self.show_error("Не найден обработчик для открытия файла: %s" % path)
@@ -1161,31 +1275,29 @@ class PlatformApi:
         self.window.editor.close_tab(tab_id)
 
     # -------------------------------------------------- ui-сервисы
-    def show_text(self, text, label, readonly=True, source_path=None):
+    def show_text(self, text, label, readonly=True, source_path=None,
+                  line_number=None, syntax=True, notice=None):
+        # Новое явное отображение отменяет старую отложенную навигацию
+        # для этого же файла.
+        if source_path is not None:
+            self._pending_file_actions.pop(_path_key(source_path), None)
         if self.window is not None:
             self.window.editor.show_text(
                 text,
                 label,
                 readonly=readonly,
                 source_path=source_path,
+                line_number=line_number,
+                syntax=syntax,
+                notice=notice,
             )
         else:
             self._log_buffer.append("[show_text до окна] %s" % label)
 
     def request_open_file_raw(self, path):
+        self._pending_file_actions.pop(_path_key(path), None)
         ok = self.router.open_default(path, self)
         if not ok:
-            self.show_error("Нет обработчика по умолчанию для: %s" % path)
-        return ok
-
-    def request_open_file_raw_at_line(self, path, line_number: int):
-        """Открыть исходный файл (без резолва) и перейти к строке."""
-        key = _path_key(path)
-        self._pending_file_actions[key] = ("line", int(line_number))
-
-        ok = self.router.open_default(path, self)
-        if not ok:
-            self._pending_file_actions.pop(key, None)
             self.show_error("Нет обработчика по умолчанию для: %s" % path)
         return ok
 
@@ -1221,6 +1333,7 @@ class PlatformApi:
         этого же пути.
         """
         key = _path_key(path)
+        self._pending_file_actions.pop(key, None)
         self._pending_file_actions[key] = ("line", int(line_number))
 
         ok = self.router.open(path, self)
@@ -1236,6 +1349,7 @@ class PlatformApi:
         для резолва .ltx виджет создаётся позже, после фоновой сборки.
         """
         key = _path_key(path)
+        self._pending_file_actions.pop(key, None)
         self._pending_file_actions[key] = ("search", search_text)
 
         ok = self.router.open(path, self)
@@ -1426,6 +1540,7 @@ class PlatformApi:
     def request_open_file_raw_with_search(self, path, search_text):
         """Открыть файл как сырой текст и перейти к строке поиска."""
         key = _path_key(path)
+        self._pending_file_actions.pop(key, None)
         self._pending_file_actions[key] = ("search", search_text)
 
         ok = self.router.open_default(path, self)

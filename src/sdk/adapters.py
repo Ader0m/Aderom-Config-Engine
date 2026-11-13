@@ -16,12 +16,16 @@ from .api import (
     GraphMatch,
     ProjectAssetType,
     GraphNode,
+    GraphEdgeStyle,
     ItemCatalog,
     ItemEntry,
     ItemField,
     ItemIcon,
     ItemSection,
+    ProjectSetting,
+    ProjectSettingChoice,
     SectionGraph,
+    SectionGraphContribution,
     SectionGraphRequest,
     TextureRegion,
     TreeSummary,
@@ -42,7 +46,34 @@ class CoreApiAdapter:
 
     def __init__(self, provider):
         self._provider = provider
-        self._section_graph_contributors = []
+        self._section_graph_contributors = self._shared_contributors()
+
+    def _shared_contributors(self):
+        """Один реестр на провайдера, даже если адаптеров несколько.
+
+        ``ModuleContext`` создаёт отдельный адаптер для каждого модуля,
+        поэтому хранить поставщиков в самом адаптере нельзя.
+        """
+        owner = self._provider
+        if isinstance(owner, CoreApiAdapter):
+            return owner._section_graph_contributors
+
+        registry = getattr(
+            owner,
+            "_sdk_section_graph_contributors",
+            None,
+        )
+        if registry is None:
+            registry = []
+            try:
+                setattr(
+                    owner,
+                    "_sdk_section_graph_contributors",
+                    registry,
+                )
+            except Exception:
+                pass
+        return registry
 
     @classmethod
     def wrap(cls, provider):
@@ -150,6 +181,23 @@ class CoreApiAdapter:
             config_dir,
             overlay=overlay,
         )
+
+    def ensure_prebuild(self, forest=None, config_dir=None, overlay=None):
+        fn = getattr(self._provider, "ensure_prebuild", None)
+        if callable(fn):
+            return fn(
+                forest,
+                config_dir,
+                overlay=overlay,
+            )
+        if forest is not None and config_dir is not None:
+            self._provider.start_prebuild(
+                forest,
+                config_dir,
+                overlay=overlay,
+            )
+            return True
+        return False
 
     def prebuild_status(self):
         return self._provider.prebuild_status()
@@ -395,8 +443,11 @@ class CoreApiAdapter:
             return False
         return True
 
-    def collect_section_graph_nodes(self, request, log=None):
-        nodes = []
+    def collect_section_graph_contribution(self, request, log=None):
+        children = []
+        lost_children = []
+        edge_styles = {}
+        openers = {}
         for contributor in tuple(self._section_graph_contributors):
             try:
                 result = contributor(request)
@@ -406,10 +457,30 @@ class CoreApiAdapter:
                 continue
             if not result:
                 continue
+
+            if isinstance(result, SectionGraphContribution):
+                children.extend(result.children)
+                lost_children.extend(result.lost_children)
+                edge_styles.update(result.edge_styles)
+                openers.update(result.openers)
+                continue
+
             for node in result:
                 if isinstance(node, GraphNode):
-                    nodes.append(node)
-        return tuple(nodes)
+                    children.append(node)
+
+        return SectionGraphContribution(
+            children=tuple(children),
+            lost_children=tuple(lost_children),
+            edge_styles=edge_styles,
+            openers=openers,
+        )
+
+    def collect_section_graph_nodes(self, request, log=None):
+        return self.collect_section_graph_contribution(
+            request,
+            log=log,
+        ).children
 
     def open_external_editor(self, path):
         for name in ("open_external_editor", "open_notepad", "open_in_notepad"):
@@ -628,6 +699,66 @@ class UiApiAdapter:
             )
         return tuple(result)
 
+    def register_project_setting(self, setting):
+        fn = getattr(self._platform, "register_project_setting", None)
+        if not callable(fn):
+            return False
+        return bool(fn(setting))
+
+    def unregister_project_setting(self, key):
+        fn = getattr(self._platform, "unregister_project_setting", None)
+        if not callable(fn):
+            return False
+        return bool(fn(key))
+
+    def project_settings(self):
+        fn = getattr(
+            self._platform,
+            "project_setting_definitions",
+            None,
+        )
+        if not callable(fn):
+            return ()
+        result = []
+        for item in fn():
+            result.append(
+                ProjectSetting(
+                    key=str(getattr(item, "key", "") or ""),
+                    label=str(getattr(item, "label", "") or ""),
+                    kind=str(getattr(item, "kind", "") or "choice"),
+                    default=getattr(item, "default", None),
+                    choices=tuple(
+                        ProjectSettingChoice(
+                            value=str(
+                                getattr(choice, "value", choice) or ""
+                            ),
+                            label=str(
+                                getattr(choice, "label", "")
+                                or getattr(choice, "value", choice)
+                                or ""
+                            ),
+                        )
+                        for choice in getattr(item, "choices", ()) or ()
+                    ),
+                    description=str(
+                        getattr(item, "description", "") or ""
+                    ),
+                )
+            )
+        return tuple(result)
+
+    def project_setting(self, key, default=None):
+        fn = getattr(self._platform, "project_setting", None)
+        if not callable(fn):
+            return default
+        return fn(key, default)
+
+    def set_project_setting(self, key, value):
+        fn = getattr(self._platform, "set_project_setting", None)
+        if not callable(fn):
+            return False
+        return bool(fn(key, value))
+
     def register_file_reader(self, reader):
         return self._platform.register_file_reader(reader)
 
@@ -748,12 +879,16 @@ class UiApiAdapter:
     def ask_text(self, prompt, initial=""):
         return self._platform.ask_text(prompt, initial)
 
-    def show_text(self, text, label, readonly=True, source_path=None):
+    def show_text(self, text, label, readonly=True, source_path=None,
+                  line_number=None, syntax=True, notice=None):
         self._platform.show_text(
             text,
             label,
             readonly=readonly,
             source_path=source_path,
+            line_number=line_number,
+            syntax=syntax,
+            notice=notice,
         )
 
     def show_module_window(self, key, window):
@@ -788,13 +923,6 @@ class UiApiAdapter:
     def open_at_line(self, path, line_number):
         self._platform.commands.execute(
             "ui.open_file_at_line",
-            path,
-            int(line_number),
-        )
-
-    def open_raw_at_line(self, path, line_number):
-        self._platform.commands.execute(
-            "ui.open_file_raw_at_line",
             path,
             int(line_number),
         )
@@ -841,6 +969,9 @@ def _to_graph_node_view(node) -> GraphNode:
             line_number=int(getattr(match, "line_number", 0) or 0),
             line_text=str(getattr(match, "line_text", "") or ""),
             related=getattr(match, "related", None),
+            related_is_parent=bool(
+                getattr(match, "related_is_parent", False)
+            ),
         )
         for match in (getattr(node, "matches", ()) or ())
     )

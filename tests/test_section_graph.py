@@ -5,8 +5,14 @@ from pathlib import Path
 from tests.support import SRC  # noqa: F401
 
 from tests.qt_support import qapp
-from modules.base_module.section_graph import SectionGraphWindow
-from sdk.api import GraphMatch, GraphNode, SectionGraph
+from modules.base_module.section_graph import (
+    SectionGraphWindow,
+    _live_graph_state,
+    _lost_from_raw,
+    _node_key,
+    _unique_lost,
+)
+from sdk.api import GraphEdgeStyle, GraphMatch, GraphNode, SectionGraph
 
 _app = qapp()
 
@@ -15,7 +21,7 @@ class SectionGraphWindowTest(unittest.TestCase):
     def _window(self, calls):
         return SectionGraphWindow(
             lambda path, line: calls.append(("bus", path, line)),
-            open_raw_at_line=lambda path, line: calls.append(
+            open_raw=lambda path, line: calls.append(
                 ("raw", path, line)
             ),
         )
@@ -72,7 +78,6 @@ class SectionGraphWindowTest(unittest.TestCase):
         opened = []
         window = SectionGraphWindow(
             lambda path, line: None,
-            open_file=opened.append,
         )
 
         ltx_path = Path("C:/game/gamedata/configs/weapons.ltx")
@@ -105,7 +110,18 @@ class SectionGraphWindowTest(unittest.TestCase):
                 section_name="wpn",
                 root=root,
                 children=(sound,),
-            )
+            ),
+            edge_styles={
+                "sound_reference": GraphEdgeStyle(
+                    "Звук",
+                    "graph_sound",
+                ),
+            },
+            openers={
+                "sound_reference": (
+                    lambda node: opened.append(node.target_path)
+                ),
+            },
         )
 
         sound_item = window.list_widget.topLevelItem(1)
@@ -122,7 +138,7 @@ class SectionGraphWindowTest(unittest.TestCase):
         messages = []
         window = SectionGraphWindow(
             lambda path, line: None,
-            open_raw_at_line=lambda path, line: None,
+            open_raw=lambda path, line: None,
             open_with_shell=lambda path: (
                 opened.append(path) or (True, "")
             ),
@@ -238,9 +254,7 @@ class SectionGraphWindowTest(unittest.TestCase):
         calls = []
         window = SectionGraphWindow(
             lambda path, line: calls.append(("bus", path, line)),
-            open_raw_at_line=lambda path, line: calls.append(
-                ("raw", path, line)
-            ),
+            open_raw=lambda path, line: None,
         )
 
         ltx_path = Path("C:/game/configs/items/weapons.ltx")
@@ -261,6 +275,7 @@ class SectionGraphWindowTest(unittest.TestCase):
                     10,
                     "[weapon]:base_weapon,weapon_common",
                     related="base_weapon",
+                    related_is_parent=True,
                 ),
             ),
             resolved=True,
@@ -278,11 +293,11 @@ class SectionGraphWindowTest(unittest.TestCase):
         )
 
         item = window.list_widget.topLevelItem(1)
-        self.assertEqual(item.text(0), "[Наследование] base_weapon")
+        self.assertEqual(item.text(0), "[Родитель] base_weapon")
         self.assertEqual(item.text(1), "1")
         self.assertEqual(item.text(2), "10")
         tooltip = item.toolTip(0)
-        self.assertIn("Связь: base_weapon", tooltip)
+        self.assertIn("Родитель: base_weapon", tooltip)
         self.assertIn("base_weapon,weapon_common", tooltip)
         self.assertIn(str(ltx_path), tooltip)
         self.assertIn(str(parent_path), tooltip)
@@ -291,12 +306,217 @@ class SectionGraphWindowTest(unittest.TestCase):
         self.assertEqual(calls, [("bus", parent_path, 42)])
         window.close()
 
+    def test_child_inheritance_rows_are_labelled_as_children(self):
+        window = self._window([])
+
+        ltx_path = Path("C:/game/configs/items/weapons.ltx")
+        root = GraphNode(
+            display_name="weapon",
+            file_path=ltx_path,
+            first_match_line=10,
+            matches=(GraphMatch("declaration", 10, "[weapon]"),),
+        )
+        child = GraphNode(
+            display_name="wpn_ak74",
+            file_path=ltx_path,
+            first_match_line=20,
+            matches=(
+                GraphMatch(
+                    "inheritance",
+                    20,
+                    "[wpn_ak74]:weapon",
+                    related="wpn_ak74",
+                ),
+            ),
+        )
+
+        window.update_graph(
+            SectionGraph(
+                section_name="weapon",
+                root=root,
+                children=(child,),
+            )
+        )
+
+        item = window.list_widget.topLevelItem(1)
+        self.assertEqual(item.text(0), "[Ребенок] wpn_ak74")
+        self.assertIn("Ребенок: wpn_ak74", item.toolTip(0))
+        window.close()
+
+    def test_lost_search_only_fills_right_panel(self):
+        ltx_path = Path("C:/game/configs/items/weapons.ltx")
+        root = GraphNode(
+            display_name="weapon",
+            file_path=ltx_path,
+            first_match_line=1,
+            matches=(GraphMatch("declaration", 1, "[weapon]"),),
+        )
+        sound = GraphNode(
+            display_name="shot.ogg",
+            file_path=ltx_path,
+            first_match_line=2,
+            matches=(GraphMatch("sound_reference", 2, "snd_shoot"),),
+            target_path=Path("C:/game/gamedata/sounds/weapon/shot.ogg"),
+        )
+        lost_parent = GraphNode(
+            display_name="old_parent",
+            file_path=ltx_path,
+            first_match_line=3,
+            matches=(
+                GraphMatch(
+                    "inheritance",
+                    3,
+                    "[other]:old_parent",
+                    related="old_parent",
+                    related_is_parent=True,
+                ),
+            ),
+        )
+        live = SectionGraph(
+            section_name="weapon",
+            root=root,
+            children=(sound,),
+        )
+        raw = SectionGraph(
+            section_name="weapon",
+            root=root,
+            children=(sound, lost_parent),
+        )
+
+        match_keys, xml_files = _live_graph_state(live)
+        raw_lost = _lost_from_raw(raw, match_keys, xml_files)
+        lost = _unique_lost(
+            raw_lost,
+            {_node_key(node) for node in live.children},
+        )
+
+        # Живой звук не попадает в потери, родитель — попадает.
+        self.assertEqual(lost, [lost_parent])
+
+        window = self._window([])
+        try:
+            window.update_graph(live)
+            left_before = window.list_widget.count()
+            window.set_lost_nodes(lost)
+            self.assertEqual(window.list_widget.count(), left_before)
+            self.assertEqual(window.lost_list_widget.count(), 1)
+        finally:
+            window.close()
+
+    def test_live_inheritance_is_not_lost_after_line_changes(self):
+        live_root = GraphNode(
+            display_name="weapon",
+            file_path=Path("C:/game/configs/system.ltx"),
+            first_match_line=1,
+            matches=(GraphMatch("declaration", 1, "[weapon]"),),
+        )
+        live_parent = GraphNode(
+            display_name="base",
+            file_path=Path("C:/game/configs/system.ltx"),
+            first_match_line=10,
+            matches=(
+                GraphMatch(
+                    "inheritance",
+                    10,
+                    "[weapon]:base",
+                    related="base",
+                    related_is_parent=True,
+                ),
+            ),
+        )
+        raw_parent = GraphNode(
+            display_name="base",
+            file_path=Path("C:/mods/override.ltx"),
+            first_match_line=99,
+            matches=(
+                GraphMatch(
+                    "inheritance",
+                    99,
+                    "[weapon]:base",
+                    related="base",
+                    related_is_parent=True,
+                ),
+            ),
+        )
+
+        live = SectionGraph(
+            section_name="weapon",
+            root=live_root,
+            children=(live_parent,),
+        )
+        raw = SectionGraph(
+            section_name="weapon",
+            root=live_root,
+            children=(raw_parent,),
+        )
+
+        match_keys, xml_files = _live_graph_state(live)
+        self.assertEqual(
+            _lost_from_raw(raw, match_keys, xml_files),
+            [],
+        )
+
+    def test_asset_with_same_target_is_not_lost(self):
+        ltx_path = Path("C:/game/configs/items/weapons.ltx")
+        target = Path("C:/game/gamedata/textures/ui/icon.dds")
+        live_root = GraphNode(
+            display_name="weapon",
+            file_path=ltx_path,
+            first_match_line=1,
+            matches=(GraphMatch("declaration", 1, "[weapon]"),),
+        )
+        live_texture = GraphNode(
+            display_name="icon.dds",
+            file_path=ltx_path,
+            first_match_line=5,
+            matches=(
+                GraphMatch(
+                    "texture_reference",
+                    5,
+                    "icons_texture = old\\icon",
+                ),
+            ),
+            raw_ref="old\\icon",
+            target_path=target,
+        )
+        raw_texture = GraphNode(
+            display_name="icon.dds",
+            file_path=Path("C:/mods/override.ltx"),
+            first_match_line=50,
+            matches=(
+                GraphMatch(
+                    "texture_reference",
+                    50,
+                    "icons_texture = new\\icon",
+                ),
+            ),
+            raw_ref="new\\icon",
+            target_path=target,
+        )
+
+        live = SectionGraph(
+            section_name="weapon",
+            root=live_root,
+            children=(live_texture,),
+        )
+        raw = SectionGraph(
+            section_name="weapon",
+            root=live_root,
+            children=(raw_texture,),
+        )
+
+        match_keys, xml_files = _live_graph_state(live)
+        self.assertEqual(
+            _lost_from_raw(raw, match_keys, xml_files),
+            [],
+        )
+
     def test_missing_asset_reports_and_opens_declaration(self):
         calls = []
         messages = []
         window = SectionGraphWindow(
             lambda path, line: calls.append(("bus", path, line)),
-            open_raw_at_line=lambda path, line: calls.append(
+            open_raw=lambda path, line: calls.append(
                 ("raw", path, line)
             ),
             open_with_shell=lambda path: (True, ""),

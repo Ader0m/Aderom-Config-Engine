@@ -81,6 +81,13 @@ class CoreServices:
         self.xml = xml_resolve_service or XmlResolveService()
         self.prebuild = PrebuildService(resolver_service, self.xml)
 
+        # Параметры последней сборки: нужны, чтобы после инвалидации
+        # кеша перезапустить именно её, а не резолвить корни по одному.
+        self._prebuild_forest = None
+        self._prebuild_config_dir = None
+        self._prebuild_overlay = {}
+        self._prebuild_stale = False
+
         # Кэш каталога и иконок переживает перезапуск приложения:
         # ключи включают снимок LTX-поддерева и подписи DDS-атласов.
         item_cache_dir = self.generated_dir / "item_cache"
@@ -119,7 +126,8 @@ class CoreServices:
     # -------------------------------------------------- кэш
 
     def invalidate_cache(self):
-        """Очистить общий кэш ядра."""
+        """Очистить общий кэш ядра и пометить предсборку устаревшей."""
+        self._prebuild_stale = True
         self.cache.clear()
         if hasattr(self.resolver, "invalidate_cache"):
             self.resolver.invalidate_cache()
@@ -132,11 +140,44 @@ class CoreServices:
         if hasattr(self.localization, "clear_memory"):
             self.localization.clear_memory()
 
+    def invalidate_resolver_cache(self):
+        """Сбросить только резолвер/XML и пометить предсборку устаревшей.
+
+        Используется при правках файлов: предметный и локализационный
+        кеши при каждом изменении текста пересоздавать не нужно.
+        """
+        self._prebuild_stale = True
+        if hasattr(self.resolver, "invalidate_cache"):
+            self.resolver.invalidate_cache()
+        if hasattr(self.xml, "clear"):
+            self.xml.clear()
+
     # -------------------------------------------------- фоновая предсборка
 
     def start_prebuild(self, forest, config_dir, overlay=None):
         """Запустить фоновую сборку всех LTX после построения дерева."""
+        self._prebuild_forest = forest
+        self._prebuild_config_dir = config_dir
+        self._prebuild_overlay = overlay or {}
+        self._prebuild_stale = False
         self.prebuild.start(forest, config_dir, overlay=overlay)
+
+    def ensure_prebuild(self, forest=None, config_dir=None, overlay=None):
+        """Гарантировать актуальную предсборку перед чтением кеша."""
+        forest = forest or self._prebuild_forest
+        config_dir = config_dir or self._prebuild_config_dir
+        if overlay is None:
+            overlay = self._prebuild_overlay
+        if forest is None or config_dir is None:
+            return False
+
+        status = self.prebuild.status()
+        running = status.get("state") == "running"
+        if self._prebuild_stale or not running:
+            if self._prebuild_stale or status.get("state") != "done":
+                self.start_prebuild(forest, config_dir, overlay=overlay)
+                return True
+        return False
 
     def prebuild_status(self):
         return self.prebuild.status()
@@ -300,8 +341,9 @@ class CoreServices:
     ):
         """Построить граф связей для секции.
 
-        ``vfs_mode=True`` — полный обход VFS без фильтра LtxForest;
-        в результате заполняется ``lost_children``.
+        ``vfs_mode=True`` — полный обход VFS без фильтра LtxForest.
+        Ядро в обоих режимах возвращает один список ``children``;
+        сравнение с resolved-графом выполняет вызывающая сторона.
 
         Обычный режим ищет по финальным файлам резолвера. Перед резолвом
         каждого корня проверяется :class:`ResolvedCache`.
@@ -531,7 +573,11 @@ class CoreServices:
         options=None,
         resolved=False,
     ):
-        """DLTX In-place: патч для файла-победителя каждой строки."""
+        """Устаревший In-place: оставлен только для совместимости.
+
+        Для DLTX патч нельзя привязать к include-файлу: автозагрузка
+        ``mod_<имя>_*.ltx`` работает только для корня загрузки.
+        """
         return self.ltx_in_place.plan(
             source_path,
             baseline_text,
@@ -553,7 +599,7 @@ class CoreServices:
         options=None,
         resolved=False,
     ):
-        """Единый вход LTX: root / in_place / override."""
+        """Единый вход LTX: root / on_file / override."""
         return self.ltx_patch.plan(
             source_path,
             baseline_text,

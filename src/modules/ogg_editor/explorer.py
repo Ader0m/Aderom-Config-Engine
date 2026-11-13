@@ -874,12 +874,34 @@ class OggExplorerWindow(QWidget):
 
         menu = QMenu(self)
         open_action = menu.addAction("Открыть")
+        copy_action = menu.addAction("Копировать путь к")
         unpin_action = menu.addAction("Открепить")
         chosen = menu.exec_(self.pinned_list.viewport().mapToGlobal(position))
         if chosen is open_action:
             self._on_open(path)
+        elif chosen is copy_action:
+            self._copy_sound_path(path)
         elif chosen is unpin_action:
             self.unpin_path(path)
+
+    def _sound_ref_path(self, path) -> str:
+        """Путь звука в VFS без .ogg: weapons\\kar98k\\kar98k_shoot."""
+        path = Path(path)
+        relative = path
+        if self._game_root is not None:
+            try:
+                relative = path.relative_to(Path(self._game_root) / "sounds")
+            except ValueError:
+                relative = path
+        return "\\".join(relative.with_suffix("").parts)
+
+    def _copy_sound_path(self, path):
+        reference = self._sound_ref_path(path)
+        self.ctx.ui.copy_to_clipboard(reference)
+        self.ctx.ui.set_status(
+            "Скопирован путь: %s" % reference,
+            3000,
+        )
 
     def _on_tree_context_menu(self, position):
         item = self.tree.itemAt(position)
@@ -892,6 +914,7 @@ class OggExplorerWindow(QWidget):
 
         menu = QMenu(self)
         open_action = menu.addAction("Открыть")
+        copy_action = menu.addAction("Копировать путь к")
         if self.is_pinned(path):
             pin_action = menu.addAction("Открепить")
         else:
@@ -900,6 +923,8 @@ class OggExplorerWindow(QWidget):
         chosen = menu.exec_(self.tree.viewport().mapToGlobal(position))
         if chosen is open_action:
             self._on_open(path)
+        elif chosen is copy_action:
+            self._copy_sound_path(path)
         elif chosen is pin_action:
             if self.is_pinned(path):
                 self.unpin_path(path)

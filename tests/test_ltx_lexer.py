@@ -65,6 +65,10 @@ class LtxLexerTest(unittest.TestCase):
         tokens = styles('#include "configs/defines.ltx"')
         self.assertIn((0, 8, lexers.STYLE_DIRECTIVE), tokens)
         self.assertIn((9, 30, lexers.STYLE_INCLUDE_PATH), tokens)
+        self.assertEqual(
+            lexers._STYLE_COLORS[lexers.STYLE_DIRECTIVE],
+            lexers.PALETTE.syn_include,
+        )
 
     def test_comment_inside_quotes_is_not_comment(self):
         tokens = styles('key = "a;//b"')

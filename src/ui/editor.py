@@ -304,6 +304,16 @@ class CodeEditor(QWidget):
         )
         layout.addWidget(self.file_label)
 
+        self.notice_label = QLabel()
+        self.notice_label.setWordWrap(True)
+        self.notice_label.setStyleSheet(
+            "padding: 6px 8px; background-color: {bg}; color: {fg};".format(
+                bg=PALETTE.bg_panel, fg=PALETTE.syn_comment
+            )
+        )
+        self.notice_label.hide()
+        layout.addWidget(self.notice_label)
+
         self.editor = QsciScintilla()
         self._setup_editor()
         self.editor.textChanged.connect(self._on_text_changed)
@@ -393,6 +403,19 @@ class CodeEditor(QWidget):
         self._lexer = lexer
         self.editor.setLexer(lexer)
         self.editor.setTabWidth(4)
+        # setLexer(None) сбрасывает цвета полей Scintilla на светлые.
+        self._restore_editor_colors()
+
+    def _restore_editor_colors(self):
+        """Вернуть цвета полей/фона после смены лексера."""
+        font = self._editor_font()
+        self.editor.setMarginsFont(font)
+        self.editor.setMarginsBackgroundColor(QColor(PALETTE.ed_margin_bg))
+        self.editor.setMarginsForegroundColor(QColor(PALETTE.ed_margin_fg))
+        self.editor.setColor(QColor(PALETTE.syn_default))
+        self.editor.setPaper(QColor(PALETTE.bg_main))
+        self.editor.setCaretForegroundColor(QColor(PALETTE.ed_caret))
+        self.editor.setCaretLineBackgroundColor(QColor(PALETTE.ed_caret_line))
 
     # -------------------------------------------------- публичные действия
     def show_find(self):
@@ -422,13 +445,16 @@ class CodeEditor(QWidget):
         except UnicodeDecodeError:
             return raw.decode("windows-1251", errors="replace")
 
-    def _show_content(self, text, label, source_path=None, readonly=False):
+    def _show_content(self, text, label, source_path=None, readonly=False,
+                      syntax=True, notice=None):
         """Единая точка отображения содержимого в редакторе.
 
         ``source_path`` задаёт файл, из которого взято содержимое: по нему
         выбирается лексер, и он же становится ``current_file``. И
         ``open_file``, и ``show_text`` делегируют сюда, поэтому оба пути
-        получают одинаковую подсветку синтаксиса.
+        получают одинаковую подсветку синтаксиса. ``syntax=False``
+        отключает лексер. ``notice`` показывает дисклеймер над файлом,
+        не добавляя его в текст и не сдвигая номера строк.
         """
         text = str(text or "")
         self._loading = True
@@ -449,11 +475,17 @@ class CodeEditor(QWidget):
 
         self.current_file = str(source_path) if source_path is not None else None
         self.file_label.setText(str(label))
+        notice_text = str(notice or "").strip()
+        self.notice_label.setText(notice_text)
+        self.notice_label.setVisible(bool(notice_text))
         self._loading = False
 
         # Покраска — отдельная отложенная задача. Файл уже доступен
         # для просмотра, прокрутки и редактирования.
-        self._lexer_scheduler.schedule(source_path)
+        if syntax:
+            self._lexer_scheduler.schedule(source_path)
+        else:
+            self._set_lexer(None)
 
         # Фокус в редактор: без этого внутренняя карта клавиш Scintilla
         # (undo/redo/копирование/поиск) "не работает" для пользователя.
@@ -537,9 +569,19 @@ class CodeEditor(QWidget):
             self.editor.setFocus(Qt.OtherFocusReason)
         return found
 
-    def show_text(self, text, label, readonly=True, source_path=None):
+    def show_text(self, text, label, readonly=True, source_path=None,
+                  line_number=None, syntax=True, notice=None):
         path = Path(source_path) if source_path is not None else None
-        self._show_content(text, label, source_path=path, readonly=readonly)
+        self._show_content(
+            text,
+            label,
+            source_path=path,
+            readonly=readonly,
+            syntax=syntax,
+            notice=notice,
+        )
+        if line_number is not None:
+            self.goto_line(int(line_number))
 
 
 class ResolvedFindBar(QWidget):
@@ -934,6 +976,17 @@ class ResolvedView(QWidget):
 
         self._lexer = lexer
         self.editor.setLexer(lexer)
+        self._restore_editor_colors()
+
+    def _restore_editor_colors(self):
+        font = QFont(PALETTE.editor_font_family, PALETTE.editor_font_size_pt)
+        self.editor.setMarginsFont(font)
+        self.editor.setMarginsBackgroundColor(QColor(PALETTE.ed_margin_bg))
+        self.editor.setMarginsForegroundColor(QColor(PALETTE.ed_margin_fg))
+        self.editor.setColor(QColor(PALETTE.syn_default))
+        self.editor.setPaper(QColor(PALETTE.bg_main))
+        self.editor.setCaretForegroundColor(QColor(PALETTE.ed_caret))
+        self.editor.setCaretLineBackgroundColor(QColor(PALETTE.ed_caret_line))
 
     def _apply_lexer(self, path):
         """Совместимость: применить лексер сразу (без отложенного запуска)."""

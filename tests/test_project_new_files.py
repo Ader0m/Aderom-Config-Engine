@@ -31,24 +31,31 @@ class _Forest:
         self.system_root = ""
 
 
-class _InPlaceServices:
-    """Считает, сколько раз планировщик реально запускался."""
+class _CountingPatchPlanner:
+    def __init__(self, owner):
+        self.owner = owner
 
-    def __init__(self):
-        self.calls = 0
-
-    def plan_ltx_in_place(
+    def plan_document_change(
         self,
         source_path,
         before_text,
         after_text,
-        line_sources=(),
         forest=None,
         options=None,
-        resolved=False,
     ):
+        return self.owner._plan(source_path)
+
+
+class _CountingServices:
+    """Считает, сколько раз планировщик реально запускался."""
+
+    def __init__(self):
+        self.calls = 0
+        self.patch = _CountingPatchPlanner(self)
+
+    def _plan(self, source_path):
         self.calls += 1
-        plan = PatchPlan(
+        return PatchPlan(
             source_path=Path(source_path),
             target=PatchTarget(
                 source_path=Path(source_path),
@@ -58,6 +65,9 @@ class _InPlaceServices:
             patch_file_rel=Path("a.ltx"),
             changes=(object(),),
         )
+
+    def plan_ltx_override(self, *args, **kwargs):
+        plan = self._plan(args[0])
         generated = GeneratedPatch(
             plan=plan,
             files=(),
@@ -73,8 +83,16 @@ class _InPlaceServices:
             notes=(),
         )
 
-    def plan_ltx_override(self, *args, **kwargs):
-        return self.plan_ltx_in_place(*args, **kwargs)
+    def generate_patch(self, plan):
+        return GeneratedPatch(
+            plan=plan,
+            files=(),
+            text="generated",
+            verification=VerificationResult(
+                ok=True,
+                checks=(VerificationCheck("ok", True),),
+            ),
+        )
 
 
 class NewFilePreviewTest(unittest.TestCase):
@@ -137,7 +155,7 @@ class NewFilePreviewTest(unittest.TestCase):
         self.service.save_draft(first, "[one]\n")
         self.service.save_draft(second, "<string_table></string_table>\n")
 
-        for mode in ("root", "in_place", "override"):
+        for mode in ("root", "on_file", "override"):
             self.service.set_patch_mode(mode)
             preview = self.service.build_preview(object(), self.forest)
 
@@ -235,9 +253,9 @@ class PreviewCacheTest(unittest.TestCase):
             forest.roots = [source]
 
             service = ProjectService(Path(d) / "projects")
-            service.create("Proj", save_mode="in_place")
+            service.create("Proj", save_mode="on_file")
             service.update_draft(source, "[a]\nx = 2\n")
-            planner = _InPlaceServices()
+            planner = _CountingServices()
 
             first = service.build_preview(planner, forest)
             second = service.build_preview(planner, forest)
@@ -264,9 +282,9 @@ class PreviewCacheTest(unittest.TestCase):
             forest.roots = [source]
 
             service = ProjectService(Path(d) / "projects")
-            service.create("Proj", save_mode="in_place")
+            service.create("Proj", save_mode="on_file")
             service.update_draft(source, "[a]\nx = 2\n")
-            planner = _InPlaceServices()
+            planner = _CountingServices()
 
             service.build_preview(planner, forest)
             service.set_patch_mode("override")
