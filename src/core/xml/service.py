@@ -74,20 +74,26 @@ class XmlResolveService:
     def clear(self):
         self._resolved_cache.clear()
 
-    def cache_key(self, path, config_dir, dxml=True):
+    def cache_key(self, path, config_dir, dxml=True, overlay=None):
         resolver = self._resolver(config_dir, dxml)
-        return resolver.cache_key(path, dxml=dxml)
+        return resolver.cache_key(path, dxml=dxml, overlay=overlay)
 
-    def has_resolved(self, path, config_dir, dxml=True):
-        key = self.cache_key(path, config_dir, dxml)
+    def has_resolved(self, path, config_dir, dxml=True, overlay=None):
+        key = self.cache_key(path, config_dir, dxml, overlay=overlay)
         return self._resolved_cache.has(key)
 
     def has_resolved_by_key(self, key):
         return self._resolved_cache.has(key)
 
-    def store_output(self, path, config_dir, value, dxml=True, key=None):
+    def store_output(self, path, config_dir, value, dxml=True, key=None,
+                     overlay=None):
         if key is None:
-            key = self.cache_key(path, config_dir, dxml)
+            key = self.cache_key(
+                path,
+                config_dir,
+                dxml,
+                overlay=overlay,
+            )
         self._resolved_cache.set(key, value)
         return key
 
@@ -96,11 +102,11 @@ class XmlResolveService:
 
     # -------------------------------------------------- резолв
     def resolve_output(self, path, config_dir, log=None, dxml=True,
-                       key=None):
+                       key=None, overlay=None):
         resolver = self._resolver(config_dir, dxml)
         if key is None:
             started = time.perf_counter()
-            key = resolver.cache_key(path, dxml=dxml)
+            key = resolver.cache_key(path, dxml=dxml, overlay=overlay)
             key_elapsed = time.perf_counter() - started
             if key_elapsed >= _SLOW_XML_SECONDS:
                 logger.warning(
@@ -143,7 +149,11 @@ class XmlResolveService:
                         log("xml cache: hit %s" % name)
                     return cached
 
-                value = resolver.resolve_output(path, dxml=dxml)
+                value = resolver.resolve_output(
+                    path,
+                    dxml=dxml,
+                    overlay=overlay,
+                )
                 self._resolved_cache.set(key, value)
                 if log:
                     log(
@@ -158,6 +168,7 @@ class XmlResolveService:
                                     "config",
                                     "path",
                                     "include/deps",
+                                    "overlay",
                                     "scripts",
                                     "dxml",
                                 ),

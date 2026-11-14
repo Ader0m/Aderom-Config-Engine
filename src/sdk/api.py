@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Callable, Optional, Protocol, Sequence
 
 
@@ -46,8 +47,40 @@ class ProjectOverlay:
     resolved_edits: dict = field(default_factory=dict)
     new_files: frozenset = field(default_factory=frozenset)
 
-    @property
-    def revision(self) -> str:
+    def __post_init__(self):
+        # Слой правок — снимок. После создания его нельзя менять:
+        # иначе ключ кэша, уже посчитанный по revision, разойдётся с
+        # данными, а один модуль сможет испортить overlay другому.
+        object.__setattr__(
+            self,
+            "source_files",
+            MappingProxyType(dict(self.source_files or {})),
+        )
+        object.__setattr__(
+            self,
+            "resolved_edits",
+            MappingProxyType(dict(self.resolved_edits or {})),
+        )
+        object.__setattr__(
+            self,
+            "new_files",
+            frozenset(self.new_files or ()),
+        )
+        object.__setattr__(self, "_revision", None)
+
+    def __reduce__(self):
+        # MappingProxyType не picklable, а overlay передаётся в
+        # процессы предсборки. Восстанавливаем его из обычных словарей.
+        return (
+            self.__class__,
+            (
+                dict(self.source_files),
+                dict(self.resolved_edits),
+                frozenset(self.new_files),
+            ),
+        )
+
+    def _compute_revision(self) -> str:
         digest = hashlib.sha1()
 
         for path, text in sorted(
@@ -80,9 +113,35 @@ class ProjectOverlay:
                     str(value[1]).encode("utf-8", "replace")
                 ).digest()
             )
+            # Длина карты источников — дешёвый признак того, что она
+            # изменилась. Полный хеш миллиона строк стоил бы дороже,
+            # чем сам резолв, и обесценил бы кэш ключа.
+            digest.update(b"\3")
+            sources = value[2] if len(value) > 2 else ()
+            digest.update(
+                str(len(sources or ())).encode("ascii")
+            )
             digest.update(b"\1")
 
+        for path in sorted(
+            (self.new_files or ()),
+            key=lambda item: str(item).lower(),
+        ):
+            digest.update(str(path).lower().encode("utf-8", "replace"))
+            digest.update(b"\4")
+
         return digest.hexdigest()
+
+    @property
+    def revision(self) -> str:
+        """Подпись снимка. Считается лениво и один раз на overlay."""
+        if self._revision is None:
+            object.__setattr__(
+                self,
+                "_revision",
+                self._compute_revision(),
+            )
+        return self._revision
 
     def source_map(self) -> dict:
         return dict(self.source_files)
@@ -506,13 +565,20 @@ class FileOpenFailed:
 class SavedDraft:
     """Сохранённый черновик проекта (payload ``PROJECT_SAVED``).
 
-    ``kind``: ``file`` | ``resolved`` | ``asset``.
+    ``kind``: ``file`` | ``resolved`` | ``asset``. Содержимое в событии
+    намеренно не передаётся: ``text`` оставлен для совместимости и
+    обычно пуст, а ``revision``/``size`` позволяют отличить снимок.
     """
 
     kind: str
     key: str
     path: Path
+    # Текст больше не кладётся в событие: для system.ltx это десятки
+    # мегабайт на каждое автосохранение. Подписчику достаточно kind/key,
+    # а редактору — revision/size для сверки актуальности.
     text: str = ""
+    revision: int = 0
+    size: int = 0
 
 
 # ---------------------------------------------------------------- контракты
@@ -665,8 +731,12 @@ class CoreApi(Protocol):
         config_dir: Path,
         log: Optional[Callable[[str], None]] = None,
         dxml: bool = True,
+        overlay: Optional[ProjectOverlay] = None,
     ) -> XmlResolveResult:
-        """Разрешить XML: #include-сборка + DXML-патчи."""
+        """Разрешить XML: #include-сборка + DXML-патчи.
+
+        ``overlay`` учитывает XML-черновики проекта так же, как LTX-резолв.
+        """
 
     def resolve_xml_to_file(
         self,
@@ -674,6 +744,7 @@ class CoreApi(Protocol):
         config_dir: Path,
         log: Optional[Callable[[str], None]] = None,
         dxml: bool = True,
+        overlay: Optional[ProjectOverlay] = None,
     ) -> Path:
         """Разрешить XML и сохранить результат в generated/xml/."""
 

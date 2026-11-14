@@ -4,6 +4,7 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Optional, Set
+import uuid
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,11 @@ class LtxForest:
     # в include-связях, DLTX-патчах и проходе резолвера.
     xml_files: list = field(default_factory=list)
     total_xml_files: int = 0
+
+    # Стабильная идентичность экземпляра леса. ``id()`` нельзя
+    # использовать в ключах кэша: адрес объекта может переиспользоваться
+    # после сборки нового леса.
+    cache_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     @property
     def all_files(self) -> list:

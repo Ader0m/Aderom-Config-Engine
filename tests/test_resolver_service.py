@@ -199,6 +199,36 @@ class ResolverServiceTest(unittest.TestCase):
         self.assertEqual(calls, [self.path, self.path])
         self.assertEqual(self.adapter.calls, 2)
 
+    def test_adapter_is_recreated_when_resolver_script_changes(self):
+        with tempfile.TemporaryDirectory() as d:
+            first = Path(d) / "vfs1" / "configs"
+            second = Path(d) / "vfs2" / "configs"
+            first.mkdir(parents=True)
+            second.mkdir(parents=True)
+            (first / "Resolver4.py").write_text(
+                "class LtxResolver:\n    pass\n",
+                encoding="utf-8",
+            )
+            (second / "Resolver4.py").write_text(
+                "# other resolver\nclass LtxResolver:\n    pass\n",
+                encoding="utf-8",
+            )
+
+            class Forest:
+                def __init__(self, scan_dir):
+                    self.scan_dir = scan_dir
+
+            service = ResolverService(
+                cache=FileCacheSystem(),
+                resolved_cache=ResolvedCache(),
+            )
+            adapter1 = service.ensure_adapter(Forest(first), first)
+            adapter2 = service.ensure_adapter(Forest(second), second)
+
+            self.assertIsNotNone(adapter1)
+            self.assertIsNotNone(adapter2)
+            self.assertIsNot(adapter1, adapter2)
+
     def test_store_resolved(self):
         value = ("stored", [LineSource(kind="original")])
         self.service.store_resolved(

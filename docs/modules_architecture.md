@@ -42,9 +42,11 @@ core/patching/   общие модели/цели/писатель
 предметов, объявляет зависимость `requires=("base",)`.
 
 В дерево попадают и `.xml`-файлы VFS. По умолчанию XML открывается
-через `XmlResolver` (include-сборка + DXML). Исходный текст доступен
-отдельно — «Открыть исходный XML» в редакторе приложения или
-«Открыть XML в Notepad++». Резолв-путь `.ltx` при этом не меняется.
+через `XmlResolver` (include-сборка + DXML). Проектный `ProjectOverlay`
+учитывается и здесь: XML-черновики проекта подменяют содержимое
+include-файлов, а новые XML-файлы участвуют в масках `*.xml`. Исходный
+текст доступен отдельно — «Открыть исходный XML» в редакторе приложения
+или «Открыть XML в Notepad++». Резолв-путь `.ltx` при этом не меняется.
 
 Для XML также доступен `XmlResolver` (`core/xml/resolver.py`) —
 Python-порт логики движка `themrdemonized/xray-monolith`:
@@ -541,8 +543,8 @@ sub.unsubscribe()
 События платформы:
 
 ```text
-file_opened              (path)            publish
-file_open_failed         (path)            publish
+file_opened              (FileOpened)      publish
+file_open_failed         (FileOpenFailed)  publish
 project_saved            (SavedDraft)      publish
 project_changed          (Project|None)    publish
 ui.window.shown          (key)             publish
@@ -569,8 +571,9 @@ ui.mouse                 ({scope, button, modifiers, event}) dispatch
 `.ltx` вкладка создаётся заметно позже.
 
 `ui.window.requested`, `ui.tab.requested` и `ui.file.open_requested` —
-зарезервированные имена для запросов между модулями; платформа их
-автоматически не публикует.
+зарезервированные имена для запросов между модулями. Платформа
+рассылает их через `dispatch`, но модульных обработчиков по умолчанию
+нет: модуль сам подписывается, если умеет открывать окно/вкладку.
 
 Чтобы перехватить UI-действие, модуль регистрирует обработчик:
 
@@ -728,7 +731,9 @@ MODULE = MyModule()
 - `FILE_OPENED` payload — `sdk.FileOpened`; `FILE_OPEN_FAILED` —
   `sdk.FileOpenFailed`. Старые строковые payload не поддерживаются.
 - Старые resolved-черновики читаются, но при сохранении переводятся в
-  компактный формат v2: уникальные `LineSource` + сжатые индексы строк.
+  компактный формат v3: уникальные `LineSource`, сжатые индексы строк и
+  zlib-сжатие крупных текстовых полей. `original_text`/`saved_text` не
+  дублируются, если совпадают с `current_text`.
 - LTX-разбор для навигации/правок один: `core.patching.ltx.document`.
   Resolver4 остаётся сборщиком итогового текста, а не заменой парсеру.
 - Прикладной слой проекта и документов — `app.projects`, `app.documents`,

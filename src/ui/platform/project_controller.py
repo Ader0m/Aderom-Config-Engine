@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from core import read_text_safe, read_xml_text
 from sdk.events import Events
-from sdk.api import AssetDraftInfo, ProjectOverlay, SavedDraft
+from sdk.api import AssetDraftInfo, SavedDraft
 
 from app.projects import (
     ProjectAssetTypeError,
@@ -54,30 +54,7 @@ class ProjectControllerMixin:
 
     def project_overlay(self):
         """Единый слой правок активного проекта для VFS."""
-        if not self.project.is_active:
-            return ProjectOverlay()
-
-        source_files = {}
-        new_files = set()
-        for draft in self.project.active.drafts.values():
-            path = Path(draft.path)
-            source_files[path] = str(draft.current_text or "")
-            if draft.is_new:
-                new_files.add(path)
-
-        resolved_edits = {}
-        for draft in self.project.active.resolved_drafts.values():
-            resolved_edits[Path(draft.root_path)] = (
-                str(draft.original_text or ""),
-                str(draft.current_text or ""),
-                tuple(draft.line_sources or ()),
-            )
-
-        return ProjectOverlay(
-            source_files=source_files,
-            resolved_edits=resolved_edits,
-            new_files=frozenset(new_files),
-        )
+        return self.project.project_overlay()
 
     def refresh_workspace(self):
         """Обновить виртуальные файлы проекта и вернуть (added, removed)."""
@@ -609,6 +586,20 @@ class ProjectControllerMixin:
         if callable(setter):
             setter(str(tab_id or ""), bool(busy))
 
+    def _flush_editor_pending(self):
+        """Перенести отложенный текст вкладок в проектные черновики."""
+        if self.window is None:
+            return
+        editor = getattr(self.window, "editor", None)
+        flush = getattr(editor, "flush_pending", None)
+        if callable(flush):
+            try:
+                flush()
+            except Exception:
+                logger.exception(
+                    "Не удалось зафиксировать отложенный текст вкладок"
+                )
+
     def save_project_now(self):
         if not self.project.is_active:
             self.set_status(
@@ -617,6 +608,7 @@ class ProjectControllerMixin:
             )
             return 0
 
+        self._flush_editor_pending()
         try:
             saved = self.project.flush()
         except Exception as exc:
@@ -626,7 +618,9 @@ class ProjectControllerMixin:
         if self.window is not None:
             for event in saved:
                 if event.kind == "file":
-                    self.window.editor.mark_clean(event.path, event.text)
+                    # Текст в событии больше не передаётся: перед
+                    # автосохранением вкладки уже синхронизированы.
+                    self.window.editor.mark_clean(event.path)
                 elif event.kind == "resolved":
                     self.window.editor.mark_tab_clean(event.key)
                     document = self._resolved_documents.get(str(event.key))
@@ -858,6 +852,9 @@ class ProjectControllerMixin:
                 pass
 
     def _begin_project_activation(self):
+        # Правка, ещё не доехавшая из редактора, относится к старому
+        # проекту: фиксируем её до close()/load().
+        self._flush_editor_pending()
         self._set_project_loading(True)
 
     def _end_project_activation(self):
@@ -1044,6 +1041,7 @@ class ProjectControllerMixin:
     def _reload_open_documents(self):
         if self.window is None:
             return
+        self._flush_editor_pending()
         editor = getattr(self.window, "editor", None)
         if editor is None:
             return
@@ -1154,6 +1152,7 @@ class ProjectControllerMixin:
         if not self.project.is_active:
             return
 
+        self._flush_editor_pending()
         try:
             saved = self.project.autosave()
         except Exception as exc:
@@ -1166,7 +1165,9 @@ class ProjectControllerMixin:
         if self.window is not None:
             for event in saved:
                 if event.kind == "file":
-                    self.window.editor.mark_clean(event.path, event.text)
+                    # Текст в событии больше не передаётся: перед
+                    # автосохранением вкладки уже синхронизированы.
+                    self.window.editor.mark_clean(event.path)
                 elif event.kind == "resolved":
                     self.window.editor.mark_tab_clean(event.key)
                     document = self._resolved_documents.get(str(event.key))
@@ -1195,6 +1196,7 @@ class ProjectControllerMixin:
     def on_app_close(self):
         if not self.project.is_active:
             return
+        self._flush_editor_pending()
         try:
             self.project.flush()
         except Exception as exc:
@@ -1255,6 +1257,13 @@ class ProjectControllerMixin:
         if preview is None:
             return
 
+        if preview.project is not self.project.active:
+            self.set_status("Проект изменён: предпросмотр устарел", 6000)
+            self.log(
+                "Проект: предпросмотр отменён — активный проект изменился"
+            )
+            return
+
         self.set_status(
             "Патч подготовлен: %d файл(ов)" % len(preview.items),
             5000,
@@ -1270,6 +1279,11 @@ class ProjectControllerMixin:
     def write_preview(self, preview):
         if self._forest is None:
             self.show_error("Нет построенного дерева.")
+            return False
+        if preview.project is not self.project.active:
+            self.show_error(
+                "Активный проект изменился: патч не записан."
+            )
             return False
 
         directory = QFileDialog.getExistingDirectory(

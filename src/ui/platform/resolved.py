@@ -109,7 +109,12 @@ class ResolvedDocumentMixin:
 
         def work(log):
             if is_xml:
-                result = resolve_xml(path, config_dir, log=log)
+                result = resolve_xml(
+                    path,
+                    config_dir,
+                    log=log,
+                    overlay=overlay,
+                )
                 return (
                     result.text,
                     tuple(result.line_sources or ()),
@@ -457,6 +462,23 @@ class ResolvedDocumentMixin:
             self._resolved_documents.pop(tab_id, None)
         return True
 
+    def _flush_resolved_view(self, tab_id):
+        """Зафиксировать отложенный текст вкладки перед внешней правкой."""
+        if self.window is None:
+            return
+        editor = getattr(self.window, "editor", None)
+        getter = getattr(editor, "get_tab", None)
+        view = getter(str(tab_id or "")) if callable(getter) else None
+        flush = getattr(view, "flush_pending", None)
+        if callable(flush):
+            try:
+                flush()
+            except Exception:
+                logger.exception(
+                    "Не удалось зафиксировать resolved-вкладку %s",
+                    tab_id,
+                )
+
     def apply_resolved_line_edit(
         self,
         tab_id,
@@ -465,6 +487,7 @@ class ResolvedDocumentMixin:
         text="",
     ):
         """Единственная точка правки resolved-документа из модуля."""
+        self._flush_resolved_view(tab_id)
         document = self._get_or_restore_document(tab_id)
         if document is None:
             return False
@@ -477,6 +500,7 @@ class ResolvedDocumentMixin:
         return ok
 
     def apply_resolved_field_edit(self, tab_id, section, key, value):
+        self._flush_resolved_view(tab_id)
         document = self._get_or_restore_document(tab_id)
         if document is None:
             return False
@@ -496,6 +520,7 @@ class ResolvedDocumentMixin:
         new_key,
         value,
     ):
+        self._flush_resolved_view(tab_id)
         document = self._get_or_restore_document(tab_id)
         if document is None:
             return False

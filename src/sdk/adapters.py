@@ -374,12 +374,14 @@ class CoreApiAdapter:
 
     # --- XML-резолв -------------------------------------------------------
 
-    def resolve_xml(self, path, config_dir, log=None, dxml=True):
+    def resolve_xml(self, path, config_dir, log=None, dxml=True,
+                    overlay=None):
         raw = self._provider.resolve_xml(
             path,
             config_dir,
             log=log,
             dxml=dxml,
+            overlay=overlay,
         )
         return XmlResolveResult(
             text=raw.text,
@@ -389,12 +391,14 @@ class CoreApiAdapter:
             line_sources=tuple(getattr(raw, "line_sources", ()) or ()),
         )
 
-    def resolve_xml_to_file(self, path, config_dir, log=None, dxml=True):
+    def resolve_xml_to_file(self, path, config_dir, log=None, dxml=True,
+                            overlay=None):
         return self._provider.resolve_xml_to_file(
             path,
             config_dir,
             log=log,
             dxml=dxml,
+            overlay=overlay,
         )
 
     # --- предметы и иконки -----------------------------------------------

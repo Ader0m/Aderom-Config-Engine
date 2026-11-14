@@ -93,13 +93,20 @@ class CoreServices:
         # Кэш каталога и иконок переживает перезапуск приложения:
         # ключи включают снимок LTX-поддерева и подписи DDS-атласов.
         item_cache_dir = self.generated_dir / "item_cache"
-        self.localization = LocalizationService(cache_dir=item_cache_dir)
+        self.localization = LocalizationService(
+            cache_dir=item_cache_dir,
+            max_disk_bytes=256_000_000,
+        )
         self.items = ItemCatalogService(
             resolver_service,
             cache_dir=item_cache_dir,
             localization_service=self.localization,
+            max_disk_bytes=256_000_000,
         )
-        self.item_icons = ItemIconService(cache_dir=item_cache_dir)
+        self.item_icons = ItemIconService(
+            cache_dir=item_cache_dir,
+            max_disk_bytes=256_000_000,
+        )
 
         # Патч-конвейер: планирование, генерация, проверка и запись.
         # Запись по умолчанию требует успешной проверки.
@@ -518,6 +525,7 @@ class CoreServices:
                     xml_path,
                     config_dir,
                     log=None,
+                    overlay=overlay,
                 )
                 return result.text, result.line_sources
             except Exception as exc:
@@ -595,18 +603,27 @@ class CoreServices:
 
     # -------------------------------------------------- XML-резолв
 
-    def resolve_xml(self, path, config_dir, log=None, dxml=True):
+    def resolve_xml(self, path, config_dir, log=None, dxml=True,
+                    overlay=None):
         """Разрешить XML: include-сборка + DXML (XmlResolveOutput)."""
         return self.xml.resolve_output(
             path,
             config_dir,
             log=log,
             dxml=dxml,
+            overlay=overlay,
         )
 
-    def resolve_xml_to_file(self, path, config_dir, log=None, dxml=True):
+    def resolve_xml_to_file(self, path, config_dir, log=None, dxml=True,
+                            overlay=None):
         """Разрешить XML и сохранить результат в generated/xml/."""
-        result = self.resolve_xml(path, config_dir, log=log, dxml=dxml)
+        result = self.resolve_xml(
+            path,
+            config_dir,
+            log=log,
+            dxml=dxml,
+            overlay=overlay,
+        )
         out = self.assembly.write_generated_xml(path, result.text)
         return out
 

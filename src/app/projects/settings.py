@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Dict, Iterable, Optional, Tuple
 
 from sdk.api import ProjectSetting, ProjectSettingChoice
@@ -35,11 +36,20 @@ class ProjectSettingsRegistry:
 
     def __init__(self, settings: Iterable[ProjectSetting] = ()):
         self._settings: Dict[str, ProjectSetting] = {}
+        self._lock = threading.RLock()
         for setting in settings:
             self.register(setting)
 
     # ------------------------------------------------------------ регистрация
     def register(
+        self,
+        setting: ProjectSetting,
+        replace: bool = False,
+    ) -> ProjectSetting:
+        with self._lock:
+            return self._register_locked(setting, replace)
+
+    def _register_locked(
         self,
         setting: ProjectSetting,
         replace: bool = False,
@@ -111,19 +121,25 @@ class ProjectSettingsRegistry:
         return normalized
 
     def unregister(self, key: str) -> bool:
-        return self._settings.pop(str(key or "").strip(), None) is not None
+        with self._lock:
+            return self._settings.pop(
+                str(key or "").strip(),
+                None,
+            ) is not None
 
     # ------------------------------------------------------------ чтение
     def settings(self) -> Tuple[ProjectSetting, ...]:
-        return tuple(
-            sorted(
-                self._settings.values(),
-                key=lambda item: (item.label.lower(), item.key.lower()),
+        with self._lock:
+            return tuple(
+                sorted(
+                    self._settings.values(),
+                    key=lambda item: (item.label.lower(), item.key.lower()),
+                )
             )
-        )
 
     def get(self, key: str) -> Optional[ProjectSetting]:
-        return self._settings.get(str(key or "").strip())
+        with self._lock:
+            return self._settings.get(str(key or "").strip())
 
     def default(self, key: str, fallback=None):
         setting = self.get(key)

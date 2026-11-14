@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple
 
@@ -28,11 +29,20 @@ class ProjectAssetRegistry:
 
     def __init__(self, types: Iterable[ProjectAssetType] = ()):
         self._types: Dict[str, ProjectAssetType] = {}
+        self._lock = threading.RLock()
         for asset_type in types:
             self.register(asset_type)
 
     # ------------------------------------------------------------ регистрация
     def register(
+        self,
+        asset_type: ProjectAssetType,
+        replace: bool = False,
+    ) -> ProjectAssetType:
+        with self._lock:
+            return self._register_locked(asset_type, replace)
+
+    def _register_locked(
         self,
         asset_type: ProjectAssetType,
         replace: bool = False,
@@ -112,15 +122,21 @@ class ProjectAssetRegistry:
         return normalized
 
     def unregister(self, key: str) -> bool:
-        return self._types.pop(str(key or "").strip(), None) is not None
+        with self._lock:
+            return self._types.pop(str(key or "").strip(), None) is not None
 
     def types(self) -> Tuple[ProjectAssetType, ...]:
-        return tuple(
-            sorted(self._types.values(), key=lambda item: item.key.lower())
-        )
+        with self._lock:
+            return tuple(
+                sorted(
+                    self._types.values(),
+                    key=lambda item: item.key.lower(),
+                )
+            )
 
     def __len__(self) -> int:
-        return len(self._types)
+        with self._lock:
+            return len(self._types)
 
     # ------------------------------------------------------------ применение
     def find(self, relative_path) -> Optional[ProjectAssetType]:
@@ -132,12 +148,13 @@ class ProjectAssetRegistry:
 
         root = str(parts[0]).lower()
         suffix = relative.suffix.lower()
-        for asset_type in self._types.values():
-            if (
-                asset_type.vfs_root.lower() == root
-                and suffix in asset_type.extensions
-            ):
-                return asset_type
+        with self._lock:
+            for asset_type in self._types.values():
+                if (
+                    asset_type.vfs_root.lower() == root
+                    and suffix in asset_type.extensions
+                ):
+                    return asset_type
         return None
 
     def relative_for_path(
@@ -174,10 +191,11 @@ class ProjectAssetRegistry:
     def patch_rules(self) -> Dict[str, Tuple[str, ...]]:
         """Правила для core: ``{vfs_root: (расширения, ...)}``."""
         rules: Dict[str, set] = {}
-        for asset_type in self._types.values():
-            rules.setdefault(asset_type.vfs_root, set()).update(
-                asset_type.extensions
-            )
+        with self._lock:
+            for asset_type in self._types.values():
+                rules.setdefault(asset_type.vfs_root, set()).update(
+                    asset_type.extensions
+                )
         return {
             root: tuple(sorted(suffixes))
             for root, suffixes in rules.items()

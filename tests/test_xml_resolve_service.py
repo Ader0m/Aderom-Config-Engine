@@ -8,6 +8,7 @@ from tests.support import SRC  # noqa: F401
 
 from core.tools.cache import ResolvedCache
 from core.xml.service import XmlResolveService
+from sdk.api import ProjectOverlay
 
 
 class XmlResolveServiceTest(unittest.TestCase):
@@ -65,6 +66,36 @@ class XmlResolveServiceTest(unittest.TestCase):
 
         self.assertEqual(first, second)
         self.assertEqual(service.cache_stats()["misses"], 1)
+
+    def test_project_overlay_is_used_for_xml_resolve(self):
+        service = XmlResolveService(
+            resolved_cache=ResolvedCache(),
+            scripts_dir=self.scripts,
+        )
+        include = self.cfg / "ui" / "parts" / "a.xml"
+        overlay = ProjectOverlay(
+            source_files={
+                include: '<a x="2"/>\n',
+                self.cfg / "ui" / "parts" / "b.xml": '<b y="3"/>\n',
+            },
+            new_files=frozenset(
+                {self.cfg / "ui" / "parts" / "b.xml"}
+            ),
+        )
+
+        result = service.resolve_output(
+            self.main,
+            self.cfg,
+            overlay=overlay,
+        )
+        self.assertIn('<a x="2"/>', result.text)
+        self.assertIn('<b y="3"/>', result.text)
+        self.assertEqual(service.cache_stats()["misses"], 1)
+
+        disk = service.resolve_output(self.main, self.cfg)
+        self.assertIn('<a x="1"/>', disk.text)
+        self.assertNotIn('<b y="3"/>', disk.text)
+        self.assertEqual(service.cache_stats()["misses"], 2)
 
     def test_include_edit_invalidates_cache(self):
         service = XmlResolveService(

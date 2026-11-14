@@ -63,7 +63,12 @@ def _worker_decode_icon(job):
 class ItemIconService:
     """Декодирует иконки предметов с кэшем и пулом процессов."""
 
-    def __init__(self, cache_dir=None, workers=None):
+    def __init__(
+        self,
+        cache_dir=None,
+        workers=None,
+        max_disk_bytes=None,
+    ):
         self._workers = workers
         self._memory = ObjectCache(
             max_entries=_MEMORY_ENTRIES,
@@ -73,6 +78,7 @@ class ItemIconService:
         self._bundles = ObjectCache(
             cache_dir=cache_dir,
             max_entries=2,
+            max_disk_bytes=max_disk_bytes,
         )
 
     # -------------------------------------------------- одиночная иконка

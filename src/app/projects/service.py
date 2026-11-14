@@ -46,7 +46,7 @@ from core import (
     read_xml_text,
 )
 
-from sdk.api import SavedDraft
+from sdk.api import ProjectOverlay, SavedDraft
 
 from app.documents import collapse_duplicated_text
 
@@ -74,6 +74,43 @@ from .models import (
     resolved_key,
 )
 
+log = logging.getLogger(__name__)
+
+# Крупные тексты храним в JSON сжатыми: system.ltx — это десятки
+# мегабайт, а plain JSON раздувает его и диск, и время автосохранения.
+_TEXT_COMPRESSION_THRESHOLD = 16 * 1024
+
+
+def _pack_text(value) -> object:
+    """Упаковать текст для JSON: маленькие строки остаются как есть."""
+    text = str(value or "")
+    raw = text.encode("utf-8", "replace")
+    if len(raw) < _TEXT_COMPRESSION_THRESHOLD:
+        return text
+    return {
+        "encoding": "zlib+base64",
+        "data": base64.b64encode(zlib.compress(raw, 1)).decode("ascii"),
+    }
+
+
+def _unpack_text(value, default="") -> str:
+    """Прочитать текстовое поле нового или старого формата."""
+    if isinstance(value, dict):
+        if value.get("encoding") != "zlib+base64":
+            return str(default or "")
+        try:
+            raw = zlib.decompress(
+                base64.b64decode(value.get("data") or "")
+            )
+            return raw.decode("utf-8", "replace")
+        except Exception:
+            log.warning("Проект: повреждено сжатое текстовое поле")
+            return str(default or "")
+    if value is None:
+        return str(default or "")
+    return str(value)
+
+
 class ProjectService(ProjectPreviewMixin):
     """Хранилище проектов и черновиков."""
 
@@ -84,11 +121,15 @@ class ProjectService(ProjectPreviewMixin):
     ROOTS_NAME = "project_roots.json"
 
     PREVIEW_CACHE_SIZE = 128
+    # Кэш предпросмотра ограничен и по объёму: GeneratedPatch хранит
+    # полные тексты файлов, а не только план.
+    PREVIEW_CACHE_MAX_CHARS = 32_000_000
 
     # Версия формата resolved-черновика. Старые файлы читаются как есть,
     # но при следующем сохранении переписываются в компактный формат:
-    # уникальные LineSource + сжатый массив индексов на строку.
-    RESOLVED_DRAFT_VERSION = 2
+    # уникальные LineSource + сжатый массив индексов на строку и
+    # zlib-сжатие крупных текстовых полей.
+    RESOLVED_DRAFT_VERSION = 3
     LINE_SOURCE_IDS_VERSION = 2
 
     def __init__(
@@ -115,9 +156,17 @@ class ProjectService(ProjectPreviewMixin):
             else ProjectFileReaderRegistry()
         )
         self._preview_cache = OrderedDict()
+        self._preview_cache_sizes = {}
+        self._preview_cache_chars = 0
+        self._preview_lock = threading.RLock()
         # Сериализует запись файлов черновиков: фоновая запись текста и
         # автосохранение не должны одновременно писать один файл.
         self._write_lock = threading.RLock()
+        # Защищает словари проекта и кэш overlay от чтения во время
+        # фонового предпросмотра/автосохранения.
+        self._state_lock = threading.RLock()
+        self._overlay_cache = None
+        self._overlay_cache_key = None
         # Путь фактического JSON-файла resolved-черновика. Нужен для
         # миграции старых имён файлов: при сохранении перезаписываем
         # именно исходный файл, а не создаём рядом второй.
@@ -127,6 +176,77 @@ class ProjectService(ProjectPreviewMixin):
     @property
     def is_active(self) -> bool:
         return self.active is not None
+
+    def _clear_overlay_cache(self):
+        with self._state_lock:
+            self._overlay_cache = None
+            self._overlay_cache_key = None
+
+    def _overlay_state_key(self):
+        project = self.active
+        if project is None:
+            return None
+        return (
+            id(project),
+            tuple(
+                (
+                    self.path_key(draft.path),
+                    int(draft.revision),
+                    bool(draft.is_new),
+                )
+                for draft in sorted(
+                    project.drafts.values(),
+                    key=lambda item: str(item.path).lower(),
+                )
+            ),
+            tuple(
+                (
+                    self.path_key(draft.root_path),
+                    str(draft.tab_id),
+                    int(draft.revision),
+                )
+                for draft in sorted(
+                    project.resolved_drafts.values(),
+                    key=lambda item: str(item.root_path).lower(),
+                )
+            ),
+        )
+
+    def project_overlay(self) -> ProjectOverlay:
+        """Снимок правок проекта. Собирается один раз на состояние."""
+        with self._state_lock:
+            project = self.active
+            if project is None:
+                return ProjectOverlay()
+
+            key = self._overlay_state_key()
+            if self._overlay_cache is not None and key == self._overlay_cache_key:
+                return self._overlay_cache
+
+            source_files = {}
+            new_files = set()
+            for draft in project.drafts.values():
+                path = Path(draft.path)
+                source_files[path] = str(draft.current_text or "")
+                if draft.is_new:
+                    new_files.add(path)
+
+            resolved_edits = {}
+            for draft in project.resolved_drafts.values():
+                resolved_edits[Path(draft.root_path)] = (
+                    str(draft.original_text or ""),
+                    str(draft.current_text or ""),
+                    tuple(draft.line_sources or ()),
+                )
+
+            overlay = ProjectOverlay(
+                source_files=source_files,
+                resolved_edits=resolved_edits,
+                new_files=frozenset(new_files),
+            )
+            self._overlay_cache = overlay
+            self._overlay_cache_key = key
+            return overlay
 
     def patch_mode(self) -> str:
         if self.active is None:
@@ -226,8 +346,9 @@ class ProjectService(ProjectPreviewMixin):
         if self.active is not None:
             self.close()
 
-        self._preview_cache.clear()
+        self.invalidate_preview_cache()
         self._resolved_draft_files.clear()
+        self._clear_overlay_cache()
         if project_dir:
             root_dir = Path(project_dir).expanduser()
             if not root_dir.is_absolute():
@@ -293,8 +414,9 @@ class ProjectService(ProjectPreviewMixin):
         if self.active is not None:
             self.close()
 
-        self._preview_cache.clear()
+        self.invalidate_preview_cache()
         self._resolved_draft_files.clear()
+        self._clear_overlay_cache()
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except Exception as exc:
@@ -405,17 +527,24 @@ class ProjectService(ProjectPreviewMixin):
                 draft_count += len(list(assets_dir.glob("*.json")))
 
             try:
+                project_id = str(meta["id"])
+                project_name = str(meta["name"])
                 save_mode = normalize_save_mode(meta["save_mode"])
                 xml_patch_mode = str(meta["xml_patch_mode"]).lower()
                 if xml_patch_mode not in ("dxml_lua", "xml", "xml_override"):
                     continue
-            except (KeyError, TypeError, ProjectError):
+            except (KeyError, TypeError, ProjectError) as exc:
+                log.warning(
+                    "Проект: пропущен %s: %s",
+                    meta_path,
+                    exc,
+                )
                 continue
 
             result.append(
                 ProjectInfo(
-                    id=str(meta["id"]),
-                    name=str(meta["name"]),
+                    id=project_id,
+                    name=project_name,
                     root_dir=entry,
                     created_at=str(meta.get("created_at") or ""),
                     draft_count=draft_count,
@@ -427,12 +556,22 @@ class ProjectService(ProjectPreviewMixin):
         return result
 
     def close(self) -> None:
-        self._preview_cache.clear()
         if self.active is None:
+            self.invalidate_preview_cache()
+            self._clear_overlay_cache()
             return
-        self.flush()
+        try:
+            self.flush()
+        except Exception as exc:
+            # Не теряем проект молча: вызывающая сторона должна показать
+            # ошибку и оставить текущий проект активным.
+            raise ProjectError(
+                "Не удалось сохранить проект перед закрытием: %s" % exc
+            ) from exc
+        self.invalidate_preview_cache()
         self.active = None
         self._resolved_draft_files.clear()
+        self._clear_overlay_cache()
 
     def set_patch_mode(self, mode: str) -> Project:
         """Переключить режим формирования патча у активного проекта."""
@@ -440,7 +579,7 @@ class ProjectService(ProjectPreviewMixin):
         mode = normalize_save_mode(mode)
 
         project.save_mode = mode
-        self._preview_cache.clear()
+        self.invalidate_preview_cache()
         self._write_meta(project)
         return project
 
@@ -452,7 +591,7 @@ class ProjectService(ProjectPreviewMixin):
             raise ProjectError("Неизвестный режим XML-патча: %s" % mode)
 
         project.xml_patch_mode = mode
-        self._preview_cache.clear()
+        self.invalidate_preview_cache()
         self._write_meta(project)
         return project
 
@@ -476,7 +615,7 @@ class ProjectService(ProjectPreviewMixin):
             raise ProjectError("Ключ настройки проекта не может быть пустым")
 
         project.module_settings[key] = value
-        self._preview_cache.clear()
+        self.invalidate_preview_cache()
         self._write_meta(project)
         return value
 
@@ -514,7 +653,8 @@ class ProjectService(ProjectPreviewMixin):
                 "каталогов проектов"
             )
 
-        self._preview_cache.clear()
+        self.invalidate_preview_cache()
+        self._clear_overlay_cache()
 
         if not target.exists():
             self.active = None
@@ -537,10 +677,10 @@ class ProjectService(ProjectPreviewMixin):
         text: str,
         original_text=None,
     ) -> ProjectDraft:
-        # Правка и запись одного черновика сериализуются одним замком:
-        # фоновое сохранение не должно записать устаревший снимок после
-        # более новой правки.
-        with self._write_lock:
+        # Правка меняет только словари проекта; файловый ввод-вывод
+        # сериализуется отдельным замком, чтобы не блокировать UI на
+        # время записи многомегабайтного черновика.
+        with self._state_lock:
             return self._update_draft_locked(
                 path,
                 text,
@@ -592,11 +732,47 @@ class ProjectService(ProjectPreviewMixin):
 
     def save_draft(self, path, text: Optional[str] = None) -> ProjectDraft:
         project = self._require_active()
-        draft = self.update_draft(path, text if text is not None else self.get_text(path) or "")
-        draft.saved_text = draft.current_text
-        draft.saved_at = time.time()
-        self._write_draft(project, draft)
+        draft = self.update_draft(
+            path,
+            text if text is not None else self.get_text(path) or "",
+        )
+        saved_at = time.time()
+        target = (
+            project.root_dir
+            / self.DRAFTS_DIR
+            / self._draft_filename(draft.path)
+        )
+        payload = self._draft_payload(
+            draft,
+            saved_text=draft.current_text,
+            saved_at=saved_at,
+        )
+        with self._write_lock:
+            self._write_payload_locked(target, payload)
+        with self._state_lock:
+            draft.saved_text = draft.current_text
+            draft.saved_at = saved_at
         return draft
+
+    def _draft_payload(self, draft, saved_text=None, saved_at=None):
+        current = str(draft.current_text or "")
+        original = str(draft.original_text or "")
+        saved = current if saved_text is None else str(saved_text)
+        payload = {
+            "path": str(draft.path),
+            "current_text": _pack_text(current),
+            "is_new": bool(draft.is_new),
+            "revision": int(draft.revision),
+            "updated_at": draft.updated_at,
+            "saved_at": (
+                draft.saved_at if saved_at is None else float(saved_at)
+            ),
+        }
+        if original != current:
+            payload["original_text"] = _pack_text(original)
+        if saved != current:
+            payload["saved_text"] = _pack_text(saved)
+        return payload
 
     def stage_text_draft(
         self,
@@ -610,7 +786,7 @@ class ProjectService(ProjectPreviewMixin):
         в памяти применяются сразу, а тяжёлая сериализация и запись
         выполняются в отдельном потоке через :meth:`write_draft_payload`.
         """
-        with self._write_lock:
+        with self._state_lock:
             project = self._require_active()
             draft = self._update_draft_locked(
                 path,
@@ -618,16 +794,11 @@ class ProjectService(ProjectPreviewMixin):
                 original_text=original_text,
             )
             saved_at = time.time()
-            payload = {
-                "path": str(draft.path),
-                "original_text": draft.original_text,
-                "current_text": draft.current_text,
-                "saved_text": draft.current_text,
-                "is_new": bool(draft.is_new),
-                "revision": int(draft.revision),
-                "updated_at": draft.updated_at,
-                "saved_at": saved_at,
-            }
+            payload = self._draft_payload(
+                draft,
+                saved_text=draft.current_text,
+                saved_at=saved_at,
+            )
             target = (
                 project.root_dir
                 / self.DRAFTS_DIR
@@ -648,14 +819,15 @@ class ProjectService(ProjectPreviewMixin):
         поверх свежего.
         """
         with self._write_lock:
-            draft = self.get_draft(path)
-            if (
-                draft is not None
-                and int(draft.revision) != int(revision)
-            ):
-                return False
-            self._write_payload_locked(target, payload)
-            return True
+            with self._state_lock:
+                draft = self.get_draft(path)
+                if (
+                    draft is not None
+                    and int(draft.revision) != int(revision)
+                ):
+                    return False
+                self._write_payload_locked(target, payload)
+                return True
 
     def _write_payload_locked(self, target, payload) -> None:
         target = Path(target)
@@ -704,48 +876,95 @@ class ProjectService(ProjectPreviewMixin):
         project = self._require_active()
         saved: List[SavedDraft] = []
 
-        for draft in project.drafts.values():
-            if not draft.is_dirty:
-                continue
-            draft.saved_text = draft.current_text
-            draft.saved_at = time.time()
-            self._write_draft(project, draft)
+        # Снимок списков — под state-lock. Сама запись идёт под
+        # write-lock, чтобы не держать блокировку состояния на время
+        # сериализации десятков мегабайт (иначе UI встанет).
+        with self._state_lock:
+            drafts = [
+                draft for draft in project.drafts.values()
+                if draft.is_dirty
+            ]
+            assets = [
+                draft for draft in project.assets.values()
+                if draft.is_dirty
+            ]
+            resolved = [
+                draft for draft in project.resolved_drafts.values()
+                if draft.is_dirty
+            ]
+
+        for draft in drafts:
+            text = str(draft.current_text or "")
+            saved_at = time.time()
+            target = (
+                project.root_dir
+                / self.DRAFTS_DIR
+                / self._draft_filename(draft.path)
+            )
+            payload = self._draft_payload(
+                draft,
+                saved_text=text,
+                saved_at=saved_at,
+            )
+            with self._write_lock:
+                self._write_payload_locked(target, payload)
+            with self._state_lock:
+                if draft.current_text == text:
+                    draft.saved_text = text
+                    draft.saved_at = saved_at
             saved.append(
                 SavedDraft(
                     kind="file",
                     key=self.path_key(draft.path),
                     path=draft.path,
-                    text=draft.current_text,
+                    revision=int(draft.revision),
+                    size=len(text),
                 )
             )
 
-        for draft in project.assets.values():
-            if not draft.is_dirty:
-                continue
-            draft.saved_bytes = draft.current_bytes
-            draft.saved_at = time.time()
-            self._write_asset_draft(project, draft)
+        for draft in assets:
+            data = bytes(draft.current_bytes)
+            saved_at = time.time()
+            self._write_asset_draft(
+                project,
+                draft,
+                saved_bytes=data,
+                saved_at=saved_at,
+            )
+            with self._state_lock:
+                if draft.current_bytes == data:
+                    draft.saved_bytes = data
+                    draft.saved_at = saved_at
             saved.append(
                 SavedDraft(
                     kind="asset",
                     key=self.path_key(draft.path),
                     path=draft.path,
-                    text="",
+                    revision=int(draft.revision),
+                    size=len(data),
                 )
             )
 
-        for draft in project.resolved_drafts.values():
-            if not draft.is_dirty:
-                continue
-            draft.saved_text = draft.current_text
-            draft.saved_at = time.time()
-            self._write_resolved_draft(project, draft)
+        for draft in resolved:
+            text = str(draft.current_text or "")
+            saved_at = time.time()
+            self._write_resolved_draft(
+                project,
+                draft,
+                saved_text=text,
+                saved_at=saved_at,
+            )
+            with self._state_lock:
+                if draft.current_text == text:
+                    draft.saved_text = text
+                    draft.saved_at = saved_at
             saved.append(
                 SavedDraft(
                     kind="resolved",
                     key=self.resolved_key(draft.tab_id, draft.root_path),
                     path=draft.root_path,
-                    text=draft.current_text,
+                    revision=int(draft.revision),
+                    size=len(text),
                 )
             )
 
@@ -757,15 +976,17 @@ class ProjectService(ProjectPreviewMixin):
         return self.autosave()
 
     def get_text(self, path) -> Optional[str]:
-        if self.active is None:
-            return None
-        draft = self.active.draft(path)
-        return draft.current_text if draft is not None else None
+        with self._state_lock:
+            if self.active is None:
+                return None
+            draft = self.active.draft(path)
+            return draft.current_text if draft is not None else None
 
     def get_draft(self, path) -> Optional[ProjectDraft]:
-        if self.active is None:
-            return None
-        return self.active.draft(path)
+        with self._state_lock:
+            if self.active is None:
+                return None
+            return self.active.draft(path)
 
     def remove_draft(self, path) -> bool:
         project = self._require_active()
@@ -793,22 +1014,24 @@ class ProjectService(ProjectPreviewMixin):
         return paths
 
     def changed_drafts(self) -> List[ProjectDraft]:
-        if self.active is None:
-            return []
-        return [
-            draft
-            for draft in self.active.drafts.values()
-            if draft.has_changes
-        ]
+        with self._state_lock:
+            if self.active is None:
+                return []
+            return [
+                draft
+                for draft in self.active.drafts.values()
+                if draft.has_changes
+            ]
 
     def dirty_drafts(self) -> List[ProjectDraft]:
-        if self.active is None:
-            return []
-        return [
-            draft
-            for draft in self.active.drafts.values()
-            if draft.is_dirty
-        ]
+        with self._state_lock:
+            if self.active is None:
+                return []
+            return [
+                draft
+                for draft in self.active.drafts.values()
+                if draft.is_dirty
+            ]
 
     # -------------------------------------------------- двоичные черновики
     @staticmethod
@@ -825,6 +1048,10 @@ class ProjectService(ProjectPreviewMixin):
         is_new: Optional[bool] = None,
     ) -> ProjectAssetDraft:
         """Обновить двоичный черновик в памяти (без записи в проект)."""
+        with self._state_lock:
+            return self._update_asset_draft_locked(path, data, is_new)
+
+    def _update_asset_draft_locked(self, path, data, is_new=None):
         project = self._require_active()
         path = Path(path)
         key = self.path_key(path)
@@ -875,7 +1102,8 @@ class ProjectService(ProjectPreviewMixin):
         data: Optional[bytes] = None,
     ) -> ProjectAssetDraft:
         project = self._require_active()
-        draft = project.assets.get(self.path_key(path))
+        with self._state_lock:
+            draft = project.assets.get(self.path_key(path))
         if draft is None:
             if data is None:
                 raise ProjectError("Двоичный черновик не найден: %s" % path)
@@ -883,15 +1111,25 @@ class ProjectService(ProjectPreviewMixin):
         elif data is not None:
             draft = self.update_asset_draft(path, data)
 
-        draft.saved_bytes = draft.current_bytes
-        draft.saved_at = time.time()
-        self._write_asset_draft(project, draft)
+        saved = bytes(draft.current_bytes)
+        saved_at = time.time()
+        self._write_asset_draft(
+            project,
+            draft,
+            saved_bytes=saved,
+            saved_at=saved_at,
+        )
+        with self._state_lock:
+            if draft.current_bytes == saved:
+                draft.saved_bytes = saved
+                draft.saved_at = saved_at
         return draft
 
     def get_asset_draft(self, path) -> Optional[ProjectAssetDraft]:
-        if self.active is None:
-            return None
-        return self.active.assets.get(self.path_key(path))
+        with self._state_lock:
+            if self.active is None:
+                return None
+            return self.active.assets.get(self.path_key(path))
 
     def get_asset_bytes(self, path) -> Optional[bytes]:
         draft = self.get_asset_draft(path)
@@ -900,7 +1138,8 @@ class ProjectService(ProjectPreviewMixin):
     def remove_asset_draft(self, path) -> bool:
         project = self._require_active()
         key = self.path_key(path)
-        draft = project.assets.pop(key, None)
+        with self._state_lock:
+            draft = project.assets.pop(key, None)
         if draft is None:
             return False
 
@@ -918,22 +1157,24 @@ class ProjectService(ProjectPreviewMixin):
         return True
 
     def changed_asset_drafts(self) -> List[ProjectAssetDraft]:
-        if self.active is None:
-            return []
-        return [
-            draft
-            for draft in self.active.assets.values()
-            if draft.has_changes
-        ]
+        with self._state_lock:
+            if self.active is None:
+                return []
+            return [
+                draft
+                for draft in self.active.assets.values()
+                if draft.has_changes
+            ]
 
     def dirty_asset_drafts(self) -> List[ProjectAssetDraft]:
-        if self.active is None:
-            return []
-        return [
-            draft
-            for draft in self.active.assets.values()
-            if draft.is_dirty
-        ]
+        with self._state_lock:
+            if self.active is None:
+                return []
+            return [
+                draft
+                for draft in self.active.assets.values()
+                if draft.is_dirty
+            ]
 
     # -------------------------------------------------- resolved-черновики
     @staticmethod
@@ -951,7 +1192,6 @@ class ProjectService(ProjectPreviewMixin):
     ) -> ProjectResolvedDraft:
         project = self._require_active()
         key = self.resolved_key(tab_id, root_path)
-        draft = project.resolved_drafts.get(key)
         original_text = str(original_text or "")
         raw_current = str(current_text or "")
         current_text = self._collapse_duplicated_text(
@@ -966,25 +1206,30 @@ class ProjectService(ProjectPreviewMixin):
                 "".join(traceback.format_stack(limit=12)),
             )
 
-        if draft is None:
-            draft = ProjectResolvedDraft(
-                root_path=Path(root_path),
-                title=str(title or ""),
-                original_text=original_text,
-                current_text=current_text,
-                saved_text=original_text,
-                tab_id=str(tab_id or ""),
-                line_sources=tuple(line_sources or ()),
-                updated_at=time.time(),
-            )
-            project.resolved_drafts[key] = draft
-        else:
-            draft.current_text = current_text
-            draft.title = str(title or draft.title)
-            draft.updated_at = time.time()
-            if line_sources is not None:
-                draft.line_sources = tuple(line_sources)
+        with self._state_lock:
+            draft = project.resolved_drafts.get(key)
+            if draft is None:
+                draft = ProjectResolvedDraft(
+                    root_path=Path(root_path),
+                    title=str(title or ""),
+                    original_text=original_text,
+                    current_text=current_text,
+                    saved_text=original_text,
+                    tab_id=str(tab_id or ""),
+                    line_sources=tuple(line_sources or ()),
+                    revision=1,
+                    updated_at=time.time(),
+                )
+                project.resolved_drafts[key] = draft
+            else:
+                draft.current_text = current_text
+                draft.title = str(title or draft.title)
+                draft.revision += 1
+                draft.updated_at = time.time()
+                if line_sources is not None:
+                    draft.line_sources = tuple(line_sources)
 
+        self._invalidate_preview_cache(Path(root_path))
         return draft
 
     def save_resolved_draft(
@@ -994,20 +1239,30 @@ class ProjectService(ProjectPreviewMixin):
     ) -> ProjectResolvedDraft:
         project = self._require_active()
         key = self.resolved_key(tab_id, "")
-        draft = project.resolved_drafts.get(key)
-
-        if draft is None:
-            raise ProjectError("Resolved-черновик не найден: %s" % tab_id)
-
-        if text is not None:
-            draft.current_text = self._collapse_duplicated_text(
-                str(text),
-                draft.original_text,
-            )
-
-        draft.saved_text = draft.current_text
-        draft.saved_at = time.time()
-        self._write_resolved_draft(project, draft)
+        with self._state_lock:
+            draft = project.resolved_drafts.get(key)
+            if draft is None:
+                raise ProjectError(
+                    "Resolved-черновик не найден: %s" % tab_id
+                )
+            if text is not None:
+                draft.current_text = self._collapse_duplicated_text(
+                    str(text),
+                    draft.original_text,
+                )
+                draft.revision += 1
+            saved_text = draft.current_text
+        saved_at = time.time()
+        self._write_resolved_draft(
+            project,
+            draft,
+            saved_text=saved_text,
+            saved_at=saved_at,
+        )
+        with self._state_lock:
+            if draft.current_text == saved_text:
+                draft.saved_text = saved_text
+                draft.saved_at = saved_at
         return draft
 
     def get_resolved_text(self, tab_id) -> Optional[str]:
@@ -1015,14 +1270,22 @@ class ProjectService(ProjectPreviewMixin):
         return draft.current_text if draft is not None else None
 
     def get_resolved_draft(self, tab_id) -> Optional[ProjectResolvedDraft]:
-        if self.active is None:
-            return None
-        return self.active.resolved_drafts.get(str(tab_id))
+        with self._state_lock:
+            if self.active is None:
+                return None
+            key = str(tab_id)
+            draft = self.active.resolved_drafts.get(key)
+            if draft is None:
+                draft = self.active.resolved_drafts.get(
+                    self.resolved_key(tab_id, "")
+                )
+            return draft
 
     def remove_resolved_draft(self, tab_id) -> bool:
         project = self._require_active()
         key = str(tab_id)
-        draft = project.resolved_drafts.pop(key, None)
+        with self._state_lock:
+            draft = project.resolved_drafts.pop(key, None)
         if draft is None:
             return False
 
@@ -1041,22 +1304,24 @@ class ProjectService(ProjectPreviewMixin):
         return True
 
     def changed_resolved_drafts(self) -> List[ProjectResolvedDraft]:
-        if self.active is None:
-            return []
-        return [
-            draft
-            for draft in self.active.resolved_drafts.values()
-            if draft.has_changes
-        ]
+        with self._state_lock:
+            if self.active is None:
+                return []
+            return [
+                draft
+                for draft in self.active.resolved_drafts.values()
+                if draft.has_changes
+            ]
 
     def dirty_resolved_drafts(self) -> List[ProjectResolvedDraft]:
-        if self.active is None:
-            return []
-        return [
-            draft
-            for draft in self.active.resolved_drafts.values()
-            if draft.is_dirty
-        ]
+        with self._state_lock:
+            if self.active is None:
+                return []
+            return [
+                draft
+                for draft in self.active.resolved_drafts.values()
+                if draft.is_dirty
+            ]
 
     # -------------------------------------------------- статус
     def has_changes(self) -> bool:
@@ -1118,58 +1383,59 @@ class ProjectService(ProjectPreviewMixin):
             "xml_patch_mode": project.xml_patch_mode,
             "module_settings": dict(project.module_settings),
         }
-        (project.root_dir / self.META_NAME).write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        with self._write_lock:
+            self._write_json_atomic(
+                project.root_dir / self.META_NAME,
+                data,
+            )
 
     def _write_draft(self, project: Project, draft: ProjectDraft) -> None:
-        drafts_dir = project.root_dir / self.DRAFTS_DIR
-        drafts_dir.mkdir(parents=True, exist_ok=True)
-
-        data = {
-            "path": str(draft.path),
-            "original_text": draft.original_text,
-            "current_text": draft.current_text,
-            "saved_text": draft.saved_text,
-            "is_new": bool(draft.is_new),
-            "revision": int(draft.revision),
-            "updated_at": draft.updated_at,
-            "saved_at": draft.saved_at,
-        }
-        target = drafts_dir / self._draft_filename(draft.path)
+        target = (
+            project.root_dir
+            / self.DRAFTS_DIR
+            / self._draft_filename(draft.path)
+        )
+        payload = self._draft_payload(
+            draft,
+            saved_text=draft.saved_text,
+            saved_at=draft.saved_at,
+        )
         with self._write_lock:
-            target.write_text(
-                json.dumps(data, ensure_ascii=False),
-                encoding="utf-8",
-            )
+            self._write_payload_locked(target, payload)
 
     def _write_asset_draft(
         self,
         project: Project,
         draft: ProjectAssetDraft,
+        saved_bytes=None,
+        saved_at=None,
     ) -> None:
         assets_dir = project.root_dir / self.ASSETS_DIR
         assets_dir.mkdir(parents=True, exist_ok=True)
 
+        saved = (
+            draft.saved_bytes if saved_bytes is None else bytes(saved_bytes)
+        )
         data = {
             "path": str(draft.path),
             "original_sha1": draft.original_sha1,
             "current_b64": base64.b64encode(draft.current_bytes).decode(
                 "ascii"
             ),
-            "saved_b64": base64.b64encode(draft.saved_bytes).decode("ascii"),
             "is_new": bool(draft.is_new),
             "revision": int(draft.revision),
             "updated_at": draft.updated_at,
-            "saved_at": draft.saved_at,
+            "saved_at": (
+                draft.saved_at if saved_at is None else float(saved_at)
+            ),
         }
+        # saved == current после обычного сохранения: не пишем вторую
+        # копию бинарника.
+        if saved != draft.current_bytes:
+            data["saved_b64"] = base64.b64encode(saved).decode("ascii")
         target = assets_dir / self._asset_draft_filename(draft.path)
         with self._write_lock:
-            target.write_text(
-                json.dumps(data, ensure_ascii=False),
-                encoding="utf-8",
-            )
+            self._write_json_atomic(target, data)
 
     def _read_asset_draft(
         self,
@@ -1177,21 +1443,28 @@ class ProjectService(ProjectPreviewMixin):
     ) -> Optional[ProjectAssetDraft]:
         try:
             data = json.loads(draft_path.read_text(encoding="utf-8"))
+            current = base64.b64decode(data.get("current_b64") or "")
+            saved = (
+                base64.b64decode(data["saved_b64"])
+                if "saved_b64" in data
+                else current
+            )
             return ProjectAssetDraft(
                 path=Path(data["path"]),
                 original_sha1=str(data.get("original_sha1") or ""),
-                current_bytes=base64.b64decode(
-                    data.get("current_b64") or ""
-                ),
-                saved_bytes=base64.b64decode(
-                    data.get("saved_b64") or ""
-                ),
+                current_bytes=current,
+                saved_bytes=saved,
                 is_new=bool(data.get("is_new")),
                 revision=int(data.get("revision") or 0),
                 updated_at=float(data.get("updated_at") or 0.0),
                 saved_at=float(data.get("saved_at") or 0.0),
             )
-        except Exception:
+        except Exception as exc:
+            log.warning(
+                "Проект: не удалось прочитать двоичный черновик %s: %s",
+                draft_path,
+                exc,
+            )
             return None
 
     def _resolved_draft_filename(self, draft: ProjectResolvedDraft) -> str:
@@ -1207,44 +1480,59 @@ class ProjectService(ProjectPreviewMixin):
         self,
         project: Project,
         draft: ProjectResolvedDraft,
+        saved_text=None,
+        saved_at=None,
     ) -> None:
         resolved_dir = project.root_dir / self.RESOLVED_DIR
         resolved_dir.mkdir(parents=True, exist_ok=True)
 
-        # Не даём записать уже испорченный «двойной» текст.
-        compact = self._collapse_duplicated_text(
-            draft.current_text,
-            draft.original_text,
-        )
-        if compact != draft.current_text:
-            draft.current_text = compact
-            if draft.saved_text == compact + compact:
-                draft.saved_text = compact
+        with self._state_lock:
+            # Не даём записать уже испорченный «двойной» текст.
+            compact = self._collapse_duplicated_text(
+                draft.current_text,
+                draft.original_text,
+            )
+            if compact != draft.current_text:
+                draft.current_text = compact
+            current = compact
+            original = str(draft.original_text or "")
+            saved = current if saved_text is None else str(saved_text)
+            if saved == compact + compact:
+                saved = compact
 
-        data = {
-            "version": self.RESOLVED_DRAFT_VERSION,
-            "tab_id": draft.tab_id,
-            "root_path": str(draft.root_path),
-            "title": draft.title,
-            "original_text": draft.original_text,
-            "current_text": draft.current_text,
-            "line_sources": self._serialize_line_sources(
-                draft.line_sources
-            ),
-            "updated_at": draft.updated_at,
-            "saved_at": draft.saved_at,
-        }
-        # Обычный случай после автосохранения: saved == current. Не храним
-        # вторую 40-МБ копию текста; при чтении восстановим её из current.
-        if draft.saved_text != draft.current_text:
-            data["saved_text"] = draft.saved_text
+            data = {
+                "version": self.RESOLVED_DRAFT_VERSION,
+                "tab_id": draft.tab_id,
+                "root_path": str(draft.root_path),
+                "title": draft.title,
+                "current_text": _pack_text(current),
+                "line_sources": self._serialize_line_sources(
+                    draft.line_sources
+                ),
+                "revision": int(draft.revision),
+                "updated_at": draft.updated_at,
+                "saved_at": (
+                    draft.saved_at
+                    if saved_at is None
+                    else float(saved_at)
+                ),
+            }
+            # Обычный случай после автосохранения: original == current.
+            # Не храним вторую копию; при чтении восстановим её.
+            if original != current:
+                data["original_text"] = _pack_text(original)
+            if saved != current:
+                data["saved_text"] = _pack_text(saved)
 
-        key = self.resolved_key(draft.tab_id, draft.root_path)
-        target = self._resolved_draft_files.get(key)
-        if target is None:
-            target = resolved_dir / self._resolved_draft_filename(draft)
-        self._write_json_atomic(target, data)
-        self._resolved_draft_files[key] = target
+            key = self.resolved_key(draft.tab_id, draft.root_path)
+            target = self._resolved_draft_files.get(key)
+            if target is None:
+                target = resolved_dir / self._resolved_draft_filename(draft)
+
+        with self._write_lock:
+            self._write_json_atomic(target, data)
+        with self._state_lock:
+            self._resolved_draft_files[key] = target
 
     def _read_resolved_draft(
         self,
@@ -1252,8 +1540,12 @@ class ProjectService(ProjectPreviewMixin):
     ) -> Optional[ProjectResolvedDraft]:
         try:
             data = json.loads(draft_path.read_text(encoding="utf-8"))
-            original_text = self._read_text_field(data, "original_text")
             raw_current = self._read_text_field(data, "current_text")
+            original_text = self._read_text_field(
+                data,
+                "original_text",
+                default=raw_current,
+            )
             current_text = self._collapse_duplicated_text(
                 raw_current,
                 original_text,
@@ -1280,24 +1572,24 @@ class ProjectService(ProjectPreviewMixin):
                 line_sources=self._deserialize_line_sources(
                     data.get("line_sources")
                 ),
+                revision=int(data.get("revision") or 0),
                 updated_at=float(data.get("updated_at") or 0.0),
                 saved_at=float(data.get("saved_at") or 0.0),
             )
-        except Exception:
+        except Exception as exc:
+            log.warning(
+                "Проект: не удалось прочитать resolved-черновик %s: %s",
+                draft_path,
+                exc,
+            )
             return None
 
     @staticmethod
     def _read_text_field(data, key, default=""):
-        """Прочитать текстовое поле старого или нового формата.
-
-        Пока поддерживается только plain text. Отдельный helper оставлен,
-        чтобы позже можно было добавить сжатие без размазывания условия
-        по всем местам чтения.
-        """
+        """Прочитать текстовое поле старого (plain) или нового формата."""
         if key not in data:
             return default
-        value = data.get(key)
-        return str(value if value is not None else "")
+        return _unpack_text(data.get(key), default=default)
 
     @staticmethod
     def _collapse_duplicated_text(text, original=""):
@@ -1433,7 +1725,8 @@ class ProjectService(ProjectPreviewMixin):
         """Записать JSON через временный файл и os.replace."""
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_name(
-            target.name + ".tmp.%d" % os.getpid()
+            target.name
+            + ".tmp.%d.%d" % (os.getpid(), threading.get_ident())
         )
         try:
             tmp.write_text(
@@ -1453,17 +1746,33 @@ class ProjectService(ProjectPreviewMixin):
         try:
             data = json.loads(draft_path.read_text(encoding="utf-8"))
             path = Path(data["path"])
+            current = self._read_text_field(data, "current_text")
+            original = self._read_text_field(
+                data,
+                "original_text",
+                default=current,
+            )
+            saved = self._read_text_field(
+                data,
+                "saved_text",
+                default=current,
+            )
             return ProjectDraft(
                 path=path,
-                original_text=str(data["original_text"]),
-                current_text=str(data["current_text"]),
-                saved_text=str(data["saved_text"]),
+                original_text=original,
+                current_text=current,
+                saved_text=saved,
                 is_new=bool(data["is_new"]),
-                revision=int(data["revision"]),
+                revision=int(data.get("revision") or 0),
                 updated_at=float(data.get("updated_at") or 0.0),
                 saved_at=float(data.get("saved_at") or 0.0),
             )
-        except Exception:
+        except Exception as exc:
+            log.warning(
+                "Проект: не удалось прочитать черновик %s: %s",
+                draft_path,
+                exc,
+            )
             return None
 
     def _make_project_id(self, name: str) -> str:

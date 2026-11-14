@@ -56,9 +56,12 @@ class ResolvedDraftStorageTest(unittest.TestCase):
 
             target = self._draft_file(project)
             payload = json.loads(target.read_text(encoding="utf-8"))
-            self.assertEqual(payload["version"], 2)
+            self.assertEqual(payload["version"], 3)
             self.assertEqual(len(payload["line_sources"]["sources"]), 2)
             self.assertNotIsInstance(payload["line_sources"], list)
+            # Крупный текст сжат, а original == current не дублируется.
+            self.assertIsInstance(payload["current_text"], dict)
+            self.assertNotIn("original_text", payload)
             # Старый формат для этого текста весил бы несколько мегабайт.
             self.assertLess(target.stat().st_size, 250_000)
 
@@ -142,7 +145,7 @@ class ResolvedDraftStorageTest(unittest.TestCase):
             self.assertIsNone(draft.line_sources[0])
             self.assertIs(draft.line_sources[1], draft.line_sources[2])
 
-            # При следующем сохранении старый формат мигрирует в v2.
+            # При следующем сохранении старый формат мигрирует в v3.
             service.save_resolved_draft("resolved:legacy")
             payload = json.loads(
                 (project.root_dir / "resolved" / "legacy.json").read_text(
@@ -150,7 +153,7 @@ class ResolvedDraftStorageTest(unittest.TestCase):
                 )
             )
             self.assertNotIsInstance(payload["line_sources"], list)
-            self.assertEqual(payload["version"], 2)
+            self.assertEqual(payload["version"], 3)
 
 
 class CorruptedResolvedDraftTest(unittest.TestCase):

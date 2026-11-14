@@ -50,12 +50,15 @@ class XmlFileOpener:
         self.ctx.ui.log("XML-резолв: %s" % path.name)
 
         config_dir = self.session.config_dir
+        overlay_fn = getattr(self.ctx.ui, "project_overlay", None)
+        overlay = overlay_fn() if callable(overlay_fn) else None
 
         def work(log):
             return self.ctx.services.resolve_xml(
                 path,
                 config_dir,
                 log=log,
+                overlay=overlay,
             )
 
         try:
@@ -85,12 +88,15 @@ class XmlFileOpener:
         self.ctx.ui.set_status("XML-резолв: %s…" % path.name)
         self.ctx.ui.log("XML-резолв: %s" % path.name)
         config_dir = self.session.config_dir
+        overlay_fn = getattr(self.ctx.ui, "project_overlay", None)
+        overlay = overlay_fn() if callable(overlay_fn) else None
 
         def work(log):
             out = self.ctx.services.resolve_xml_to_file(
                 path,
                 config_dir,
                 log=log,
+                overlay=overlay,
             )
             ok, message = self.ctx.services.open_external_editor(out)
             if not ok:

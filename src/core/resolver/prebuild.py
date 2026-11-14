@@ -83,18 +83,35 @@ def _worker_resolve(job):
         return root_path, key, None, str(exc)
 
 
-def _init_xml_worker(config_dir):
+def _xml_overlay(overlay):
+    """Оставить в overlay только XML-черновики проекта."""
+    source_files = getattr(overlay, "source_files", None)
+    if source_files is None:
+        return overlay if isinstance(overlay, dict) and overlay else None
+    filtered = {
+        Path(path): str(text or "")
+        for path, text in source_files.items()
+        if Path(path).suffix.lower() == ".xml"
+    }
+    return filtered or None
+
+
+def _init_xml_worker(config_dir, overlay=None):
     """Инициализация XML-резолвера в процессе-воркере."""
     from core.xml.resolver import XmlResolver
 
     _WORKER_STATE["xml"] = XmlResolver(config_dir=config_dir)
+    _WORKER_STATE["xml_overlay"] = overlay
 
 
 def _worker_resolve_xml(job):
     """Резолв одного XML-файла в дочернем процессе."""
     path, key = job
     try:
-        value = _WORKER_STATE["xml"].resolve_output(path)
+        value = _WORKER_STATE["xml"].resolve_output(
+            path,
+            overlay=_WORKER_STATE.get("xml_overlay"),
+        )
         return path, key, value, None
     except Exception as exc:
         return path, key, None, str(exc)
@@ -271,7 +288,12 @@ class PrebuildService:
                 overlay=overlay,
             )
             if not stop_event.is_set():
-                self._run_xml(config_dir, xml_targets, stop_event)
+                self._run_xml(
+                    config_dir,
+                    xml_targets,
+                    stop_event,
+                    overlay=overlay,
+                )
         except Exception as exc:
             with self._lock:
                 if self._stop is stop_event:
@@ -400,15 +422,20 @@ class PrebuildService:
                 break_on_missing_resolver=True,
             )
 
-    def _run_xml(self, config_dir, targets, stop_event):
+    def _run_xml(self, config_dir, targets, stop_event, overlay=None):
         if self._xml_resolver is None or not targets:
             return
 
+        overlay = _xml_overlay(overlay)
         missing = []
         for path in targets:
             if stop_event.is_set():
                 break
-            key = self._xml_resolver.cache_key(path, config_dir)
+            key = self._xml_resolver.cache_key(
+                path,
+                config_dir,
+                overlay=overlay,
+            )
             if self._xml_resolver.has_resolved_by_key(key):
                 self._advance(stop_event)
             else:
@@ -426,6 +453,7 @@ class PrebuildService:
                 config_dir,
                 log=None,
                 key=key,
+                overlay=overlay,
             )
 
         if workers > 1:
@@ -440,7 +468,7 @@ class PrebuildService:
                 stop_event,
                 workers,
                 initializer=_init_xml_worker,
-                initargs=(str(canonical),),
+                initargs=(str(canonical), overlay),
                 worker=_worker_resolve_xml,
                 store=lambda path, key, value: (
                     self._xml_resolver.store_output_by_key(key, value)

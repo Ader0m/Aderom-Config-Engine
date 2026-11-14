@@ -43,58 +43,42 @@ from .readers import FileReaderError
 class ProjectPreviewMixin:
     """Preview-часть ProjectService. Наследуется сервисом проекта."""
 
-    @staticmethod
-    def _digest(text) -> str:
-        return hashlib.sha1(
-            str(text or "").encode("utf-8", "replace")
-        ).hexdigest()
-
-    @staticmethod
-    def _line_sources_signature(line_sources) -> str:
-        digest = hashlib.sha1()
-        for source in line_sources or ():
-            digest.update(str(getattr(source, "kind", "")).encode("utf-8"))
-            digest.update(b"\0")
-            digest.update(str(getattr(source, "path", "")).encode("utf-8"))
-            digest.update(b"\0")
-            digest.update(str(getattr(source, "line", 0)).encode("ascii"))
-            digest.update(b"\1")
-        return digest.hexdigest()
-
-    def _preview_project_key(self, forest):
-        project = self._require_active()
+    def _preview_project_key(self, forest, project=None):
+        project = project or self._require_active()
+        with self._state_lock:
+            settings = tuple(
+                sorted(
+                    (str(key), repr(value))
+                    for key, value in project.module_settings.items()
+                )
+            )
         return (
             project.id,
-            id(forest),
+            str(getattr(forest, "cache_id", id(forest))),
             str(getattr(forest, "scan_dir", "")),
             len(getattr(forest, "files", ()) or ()),
             len(getattr(forest, "xml_files", ()) or ()),
             project.save_mode,
             project.xml_patch_mode,
             project.name,
-            tuple(
-                sorted(
-                    (str(key), repr(value))
-                    for key, value in project.module_settings.items()
-                )
-            ),
+            settings,
         )
 
-    def _draft_preview_key(self, draft, forest):
+    def _draft_preview_key(self, draft, forest, project=None):
         return (
             "draft",
-            self._preview_project_key(forest),
+            self._preview_project_key(forest, project),
             self.path_key(draft.path),
             bool(draft.is_new),
             int(draft.revision),
-            self._digest(draft.original_text),
-            self._digest(draft.current_text),
+            len(draft.original_text or ""),
+            len(draft.current_text or ""),
         )
 
-    def _asset_preview_key(self, draft, forest):
+    def _asset_preview_key(self, draft, forest, project=None):
         return (
             "asset",
-            self._preview_project_key(forest),
+            self._preview_project_key(forest, project),
             self.path_key(draft.path),
             bool(draft.is_new),
             int(draft.revision),
@@ -102,42 +86,117 @@ class ProjectPreviewMixin:
             draft.current_sha1,
         )
 
-    def _resolved_preview_key(self, draft, forest):
+    def _resolved_preview_key(self, draft, forest, project=None):
         return (
             "resolved",
-            self._preview_project_key(forest),
+            self._preview_project_key(forest, project),
             str(draft.tab_id),
             self.path_key(draft.root_path),
-            self._digest(draft.original_text),
-            self._digest(draft.current_text),
-            self._line_sources_signature(draft.line_sources),
+            int(draft.revision),
+            len(draft.original_text or ""),
+            len(draft.current_text or ""),
+            len(draft.line_sources or ()),
         )
 
     def invalidate_preview_cache(self):
         """Сбросить кэш предпросмотра (например, после смены типов)."""
-        self._preview_cache.clear()
+        with self._preview_lock:
+            self._preview_cache.clear()
+            self._preview_cache_sizes.clear()
+            self._preview_cache_chars = 0
 
     def _invalidate_preview_cache(self, path=None):
-        if path is None:
-            self._preview_cache.clear()
-            return
+        with self._preview_lock:
+            if path is None:
+                self._preview_cache.clear()
+                self._preview_cache_sizes.clear()
+                self._preview_cache_chars = 0
+                return
 
-        wanted = self.path_key(path)
-        for key in list(self._preview_cache):
-            if len(key) > 2 and key[2] == wanted:
-                self._preview_cache.pop(key, None)
+            wanted = self.path_key(path)
+            for key in list(self._preview_cache):
+                matches = (
+                    len(key) > 2
+                    and key[0] in ("draft", "asset")
+                    and key[2] == wanted
+                ) or (
+                    len(key) > 3
+                    and key[0] == "resolved"
+                    and key[3] == wanted
+                )
+                if matches:
+                    self._preview_cache.pop(key, None)
+                    self._preview_cache_chars -= self._preview_cache_sizes.pop(
+                        key,
+                        0,
+                    )
+            if self._preview_cache_chars < 0:
+                self._preview_cache_chars = 0
+
+    @staticmethod
+    def _preview_items_size(items):
+        total = 0
+        for item in items:
+            total += len(getattr(item, "text", "") or "")
+            for attr in ("draft", "resolved"):
+                draft = getattr(item, attr, None)
+                if draft is None:
+                    continue
+                for field in (
+                    "original_text",
+                    "current_text",
+                    "saved_text",
+                ):
+                    total += len(getattr(draft, field, "") or "")
+            generated = getattr(item, "generated", None)
+            if generated is None:
+                continue
+            total += len(getattr(generated, "text", "") or "")
+            for file in (getattr(generated, "files", ()) or ()):
+                total += len(getattr(file, "text", "") or "")
+                total += len(getattr(file, "data", b"") or b"")
+        return total
 
     def _cached_preview_items(self, key, factory):
-        cached = self._preview_cache.get(key)
-        if cached is not None:
-            self._preview_cache.move_to_end(key)
-            return list(cached)
+        with self._preview_lock:
+            cached = self._preview_cache.get(key)
+            if cached is not None:
+                self._preview_cache.move_to_end(key)
+                return list(cached)
 
         items = tuple(factory())
-        self._preview_cache[key] = items
-        self._preview_cache.move_to_end(key)
-        while len(self._preview_cache) > self.PREVIEW_CACHE_SIZE:
-            self._preview_cache.popitem(last=False)
+        size = self._preview_items_size(items)
+        if size > self.PREVIEW_CACHE_MAX_CHARS:
+            # Один такой предпросмотр не должен вытеснять весь кэш и
+            # занимать гигабайты; отдаём его без кэширования.
+            return list(items)
+
+        with self._preview_lock:
+            old = self._preview_cache.pop(key, None)
+            if old is not None:
+                self._preview_cache_chars -= self._preview_cache_sizes.pop(
+                    key,
+                    0,
+                )
+            self._preview_cache[key] = items
+            self._preview_cache_sizes[key] = size
+            self._preview_cache_chars += size
+            self._preview_cache.move_to_end(key)
+            while (
+                len(self._preview_cache) > self.PREVIEW_CACHE_SIZE
+                or (
+                    self._preview_cache_chars
+                    > self.PREVIEW_CACHE_MAX_CHARS
+                    and len(self._preview_cache) > 1
+                )
+            ):
+                evicted, _value = self._preview_cache.popitem(last=False)
+                self._preview_cache_chars -= self._preview_cache_sizes.pop(
+                    evicted,
+                    0,
+                )
+            if self._preview_cache_chars < 0:
+                self._preview_cache_chars = 0
         return list(items)
 
     # -------------------------------------------------- предпросмотр патча
@@ -389,59 +448,72 @@ class ProjectPreviewMixin:
     ) -> ProjectPatchPreview:
         project = self._require_active()
 
-        # Снимок черновиков: пользователь может продолжать печатать,
-        # пока фоновая задача готовит предпросмотр.
-        raw_drafts = [
-            ProjectDraft(
-                path=draft.path,
-                original_text=draft.original_text,
-                current_text=draft.current_text,
-                saved_text=draft.saved_text,
-                is_new=draft.is_new,
-                revision=draft.revision,
-                updated_at=draft.updated_at,
-                saved_at=draft.saved_at,
-            )
-            for draft in sorted(
-                self.changed_drafts(),
-                key=lambda item: str(item.path).lower(),
-            )
-        ]
+        # Атомарный снимок черновиков выбранного проекта: пользователь
+        # может продолжать печатать или переключить проект, пока
+        # фоновая задача готовит предпросмотр.
+        with self._state_lock:
+            raw_drafts = [
+                ProjectDraft(
+                    path=draft.path,
+                    original_text=draft.original_text,
+                    current_text=draft.current_text,
+                    saved_text=draft.saved_text,
+                    is_new=draft.is_new,
+                    revision=draft.revision,
+                    updated_at=draft.updated_at,
+                    saved_at=draft.saved_at,
+                )
+                for draft in sorted(
+                    (
+                        item for item in project.drafts.values()
+                        if item.has_changes
+                    ),
+                    key=lambda item: str(item.path).lower(),
+                )
+            ]
 
-        asset_drafts = [
-            ProjectAssetDraft(
-                path=draft.path,
-                original_sha1=draft.original_sha1,
-                current_bytes=draft.current_bytes,
-                saved_bytes=draft.saved_bytes,
-                is_new=draft.is_new,
-                revision=draft.revision,
-                updated_at=draft.updated_at,
-                saved_at=draft.saved_at,
-            )
-            for draft in sorted(
-                self.changed_asset_drafts(),
-                key=lambda item: str(item.path).lower(),
-            )
-        ]
+            asset_drafts = [
+                ProjectAssetDraft(
+                    path=draft.path,
+                    original_sha1=draft.original_sha1,
+                    current_bytes=draft.current_bytes,
+                    saved_bytes=draft.saved_bytes,
+                    is_new=draft.is_new,
+                    revision=draft.revision,
+                    updated_at=draft.updated_at,
+                    saved_at=draft.saved_at,
+                )
+                for draft in sorted(
+                    (
+                        item for item in project.assets.values()
+                        if item.has_changes
+                    ),
+                    key=lambda item: str(item.path).lower(),
+                )
+            ]
 
-        resolved_drafts = [
-            ProjectResolvedDraft(
-                root_path=draft.root_path,
-                title=draft.title,
-                original_text=draft.original_text,
-                current_text=draft.current_text,
-                saved_text=draft.saved_text,
-                tab_id=draft.tab_id,
-                line_sources=draft.line_sources,
-                updated_at=draft.updated_at,
-                saved_at=draft.saved_at,
-            )
-            for draft in sorted(
-                self.changed_resolved_drafts(),
-                key=lambda item: str(item.root_path).lower(),
-            )
-        ]
+            resolved_drafts = [
+                ProjectResolvedDraft(
+                    root_path=draft.root_path,
+                    title=draft.title,
+                    original_text=draft.original_text,
+                    current_text=draft.current_text,
+                    saved_text=draft.saved_text,
+                    tab_id=draft.tab_id,
+                    line_sources=draft.line_sources,
+                    revision=draft.revision,
+                    updated_at=draft.updated_at,
+                    saved_at=draft.saved_at,
+                )
+                for draft in sorted(
+                    (
+                        item
+                        for item in project.resolved_drafts.values()
+                        if item.has_changes
+                    ),
+                    key=lambda item: str(item.root_path).lower(),
+                )
+            ]
 
         items: List[PreviewItem] = []
         script_seen = set()
@@ -703,7 +775,7 @@ class ProjectPreviewMixin:
         index = 0
         for draft in raw_drafts:
             index += 1
-            key = self._draft_preview_key(draft, forest)
+            key = self._draft_preview_key(draft, forest, project)
             items.extend(
                 self._cached_preview_items(
                     key,
@@ -722,7 +794,7 @@ class ProjectPreviewMixin:
 
         for draft in asset_drafts:
             index += 1
-            key = self._asset_preview_key(draft, forest)
+            key = self._asset_preview_key(draft, forest, project)
             items.extend(
                 self._cached_preview_items(
                     key,
@@ -739,7 +811,7 @@ class ProjectPreviewMixin:
 
         for draft in resolved_drafts:
             index += 1
-            key = self._resolved_preview_key(draft, forest)
+            key = self._resolved_preview_key(draft, forest, project)
             title = draft.title or (
                 "%s (resolved)" % draft.root_path.name
             )

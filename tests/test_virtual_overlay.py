@@ -20,6 +20,24 @@ from core.tree.builder import (
 )
 
 
+class OverlaySnapshotTest(unittest.TestCase):
+    def test_overlay_is_immutable_and_revision_is_cached(self):
+        overlay = ProjectOverlay(
+            source_files={Path("a.ltx"): "[a]\nx = 1\n"},
+            new_files=frozenset({Path("b.ltx")}),
+        )
+        revision = overlay.revision
+        self.assertEqual(overlay.revision, revision)
+        with self.assertRaises(TypeError):
+            overlay.source_files[Path("a.ltx")] = "x"
+        self.assertEqual(overlay.revision, revision)
+
+        without_new = ProjectOverlay(
+            source_files={Path("a.ltx"): "[a]\nx = 1\n"},
+        )
+        self.assertNotEqual(without_new.revision, revision)
+
+
 class VirtualOverlayTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

@@ -165,12 +165,14 @@ class ItemCatalogService:
         cache_dir=None,
         max_entries=4,
         localization_service=None,
+        max_disk_bytes=None,
     ):
         self._resolver = resolver_service
         self._localization = localization_service
         self._cache = ObjectCache(
             cache_dir=cache_dir,
             max_entries=max_entries,
+            max_disk_bytes=max_disk_bytes,
         )
         # Черновик проекта меняется после каждой правки: его кэшируем
         # только в памяти, иначе на диске появятся сотни 40-МБ снимков.

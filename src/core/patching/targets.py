@@ -34,6 +34,27 @@ def forest_scan_dir(forest) -> Optional[Path]:
 
 
 _INDEX_ATTR = "_ace_patch_target_index"
+_XML_INDEX_ATTR = "_ace_xml_patch_target_index"
+
+_DERIVED_FOREST_ATTRS = (
+    _INDEX_ATTR,
+    _XML_INDEX_ATTR,
+    "_resolved_signature_memo",
+)
+
+
+def invalidate_forest_indexes(forest) -> None:
+    """Сбросить производные индексы, приклеенные к лесу.
+
+    Лес — разделяемый объект: после добавления/удаления виртуального
+    файла его ``files``/``include_parents``/``xml_files`` меняются, и
+    старый индекс целей патча уже не соответствует содержимому.
+    """
+    for attr in _DERIVED_FOREST_ATTRS:
+        try:
+            delattr(forest, attr)
+        except (AttributeError, TypeError):
+            pass
 
 
 def _forest_index(forest):
@@ -539,11 +560,8 @@ def _xml_include_targets(
     return []
 
 
-_XML_TARGET_INDEX_ATTR = "_ace_xml_patch_target_index"
-
-
 def _xml_target_index(forest):
-    cached = getattr(forest, _XML_TARGET_INDEX_ATTR, None)
+    cached = getattr(forest, _XML_INDEX_ATTR, None)
     if cached is not None:
         return cached
 
@@ -588,7 +606,7 @@ def _xml_target_index(forest):
 
     index = (frozenset(files), config_dir, parents)
     try:
-        setattr(forest, _XML_TARGET_INDEX_ATTR, index)
+        setattr(forest, _XML_INDEX_ATTR, index)
     except Exception:
         pass
     return index

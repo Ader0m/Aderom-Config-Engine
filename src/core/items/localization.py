@@ -126,9 +126,18 @@ class LocalizationService:
     тем XML, который будет сохранён, ещё до сборки патча.
     """
 
-    def __init__(self, cache_dir=None, preferred_language=PREFERRED_LANGUAGE):
+    def __init__(
+        self,
+        cache_dir=None,
+        preferred_language=PREFERRED_LANGUAGE,
+        max_disk_bytes=None,
+    ):
         self._preferred = str(preferred_language or PREFERRED_LANGUAGE).lower()
-        self._cache = ObjectCache(cache_dir=cache_dir, max_entries=4)
+        self._cache = ObjectCache(
+            cache_dir=cache_dir,
+            max_entries=4,
+            max_disk_bytes=max_disk_bytes,
+        )
         # Черновик проекта меняется после каждой правки: такие снимки
         # держим только в памяти, иначе получим поток 40-МБ файлов.
         self._memory_cache = ObjectCache(max_entries=8)

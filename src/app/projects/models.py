@@ -130,6 +130,7 @@ class ProjectResolvedDraft:
     saved_text: str
     tab_id: str = ""
     line_sources: tuple = ()
+    revision: int = 0
     updated_at: float = 0.0
     saved_at: float = 0.0
 

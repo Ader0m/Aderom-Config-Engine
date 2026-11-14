@@ -31,9 +31,15 @@ class ResolvedDocumentViewTest(unittest.TestCase):
         view.bind_document(document)
         return document, view
 
-    def test_typing_updates_document(self):
+    def test_typing_is_debounced_until_flush(self):
         document, view = self._make()
         view.editor.setText("[a]\nx = 3\n[b]\ny = 2\n")
+        self.assertEqual(
+            document.current_text,
+            "[a]\nx = 1\n[b]\ny = 2\n",
+        )
+        self.assertTrue(view.is_dirty)
+        view.flush_pending()
         self.assertEqual(document.current_text, "[a]\nx = 3\n[b]\ny = 2\n")
         self.assertTrue(document.is_dirty)
 

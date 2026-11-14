@@ -40,6 +40,11 @@ class WorkspaceService:
         return self._virtual_paths
 
     def set_forest(self, forest, config_dir=None):
+        if forest is not self._forest:
+            # Новый лес мог быть построен сразу с overlay. Набор
+            # виртуальных путей восстановится из ProjectOverlay.new_files
+            # при следующем apply_overlay().
+            self._virtual_paths.clear()
         self._forest = forest
         if config_dir is not None:
             self._config_dir = Path(config_dir)
@@ -141,6 +146,17 @@ class WorkspaceService:
             for path in source_files
             if Path(path).suffix.lower() in (".ltx", ".xml")
         }
+        new_files = {
+            Path(path)
+            for path in (getattr(overlay, "new_files", None) or ())
+            if Path(path).suffix.lower() in (".ltx", ".xml")
+        }
+        # Файлы, которые уже попали в лес из TreeBuilder(overlay=...),
+        # не добавлялись через этот сервис. Восстанавливаем их учёт,
+        # иначе при смене проекта они останутся висеть в дереве.
+        for path in wanted & new_files:
+            if path in forest.files or path in forest.xml_files:
+                self._virtual_paths.add(path)
         self.last_added_paths = set()
         self.last_removed_paths = set(self._virtual_paths - wanted)
         self.last_removed_roots = self.roots_for(self.last_removed_paths)

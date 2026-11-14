@@ -190,12 +190,16 @@ class DiskBackedLRUCache:
         max_entries=None,
         max_units=None,
         size_fn=None,
+        max_disk_files=None,
+        max_disk_bytes=None,
     ):
         self._data = OrderedDict()
         self._lock = threading.RLock()
         self._max_entries = max_entries
         self._max_units = max_units
         self._size_fn = size_fn
+        self._max_disk_files = max_disk_files
+        self._max_disk_bytes = max_disk_bytes
         self._units = 0
 
         self._cache_dir = Path(cache_dir) if cache_dir else None
@@ -226,6 +230,13 @@ class DiskBackedLRUCache:
                 payload = pickle.load(f)
             if payload.get("key") != key:
                 return None
+            # Отмечаем фактическое использование: иначе очистка
+            # удаляет полезные записи по времени создания, а не по
+            # последнему обращению.
+            try:
+                os.utime(str(path), None)
+            except OSError:
+                pass
             return payload.get("value")
         except Exception:
             try:
@@ -253,9 +264,75 @@ class DiskBackedLRUCache:
             os.replace(str(tmp), str(path))
             with self._lock:
                 self.disk_writes += 1
+                writes = self.disk_writes
+            # Не сканируем каталог на каждой записи: при тысячах файлов
+            # это дороже самого резолва.
+            if writes % 32 == 0:
+                self._prune_disk()
         except Exception:
             try:
                 tmp.unlink()
+            except OSError:
+                pass
+
+    def _prune_disk(self):
+        """Удалить давно не использованные файлы сверх лимитов.
+
+        Лимит по числу файлов опасен для резолвера: один файл — это
+        один корень/XML, и рабочий набор большой VFS сам по себе может
+        быть больше лимита. Основной предохранитель — объём в байтах;
+        лимит по числу оставлен опциональным.
+        """
+        if self._cache_dir is None:
+            return
+        if self._max_disk_files is None and self._max_disk_bytes is None:
+            return
+        try:
+            files = list(self._cache_dir.glob("*.pkl.gz"))
+        except OSError:
+            return
+        stamped = []
+        total = 0
+        for path in files:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            total += stat.st_size
+            stamped.append((stat.st_mtime_ns, stat.st_size, path))
+
+        remove = []
+        if (
+            self._max_disk_files is not None
+            and len(stamped) > self._max_disk_files
+        ):
+            remove.extend(
+                stamped[: max(0, len(stamped) - self._max_disk_files)]
+            )
+
+        if (
+            self._max_disk_bytes is not None
+            and total > self._max_disk_bytes
+        ):
+            removed_paths = {item[2] for item in remove}
+            for item in stamped:
+                if item[2] in removed_paths:
+                    total -= item[1]
+
+            # Хотя бы одну, самую свежую запись оставляем, даже если
+            # она одна больше лимита.
+            candidates = [
+                item for item in stamped if item[2] not in removed_paths
+            ]
+            for item in candidates[:-1]:
+                if total <= self._max_disk_bytes:
+                    break
+                remove.append(item)
+                total -= item[1]
+
+        for _stamp, _size, path in remove:
+            try:
+                path.unlink()
             except OSError:
                 pass
 
@@ -382,12 +459,21 @@ class DiskBackedLRUCache:
 class ResolvedCache(DiskBackedLRUCache):
     """Потокобезопасный кэш результатов резолва (память + диск)."""
 
-    def __init__(self, max_entries=None, max_chars=None, cache_dir=None):
+    def __init__(
+        self,
+        max_entries=None,
+        max_chars=None,
+        cache_dir=None,
+        max_disk_files=None,
+        max_disk_bytes=None,
+    ):
         super().__init__(
             cache_dir=cache_dir,
             max_entries=max_entries,
             max_units=max_chars,
             size_fn=self._text_size,
+            max_disk_files=max_disk_files,
+            max_disk_bytes=max_disk_bytes,
         )
 
     @staticmethod
@@ -410,12 +496,16 @@ class ObjectCache(DiskBackedLRUCache):
         max_entries=None,
         max_bytes=None,
         size_fn=None,
+        max_disk_files=None,
+        max_disk_bytes=None,
     ):
         super().__init__(
             cache_dir=cache_dir,
             max_entries=max_entries,
             max_units=max_bytes,
             size_fn=size_fn,
+            max_disk_files=max_disk_files,
+            max_disk_bytes=max_disk_bytes,
         )
 
     def clear(self):
@@ -440,9 +530,10 @@ class FileCacheSystem:
     резолвера, граф связей и превью патчей.
     """
 
-    def __init__(self):
-        self._data = {}
+    def __init__(self, max_entries=64):
+        self._data = OrderedDict()
         self._snapshot_id = None
+        self._max_entries = max_entries
 
     def set_snapshot(self, snapshot_id):
         """Если снимок файловой системы изменился, кэш недействителен."""
@@ -451,10 +542,18 @@ class FileCacheSystem:
             self._snapshot_id = snapshot_id
 
     def get(self, key, default=None):
-        return self._data.get(key, default)
+        value = self._data.get(key)
+        if value is None:
+            return default
+        self._data.move_to_end(key)
+        return value
 
     def set(self, key, value):
         self._data[key] = value
+        self._data.move_to_end(key)
+        if self._max_entries is not None:
+            while len(self._data) > self._max_entries:
+                self._data.popitem(last=False)
 
     def invalidate(self, prefix=None):
         """Инвалидация ключей.

@@ -92,15 +92,20 @@ class FakeXmlResolver:
     def refresh(self):
         pass
 
-    def cache_key(self, path, config_dir, dxml=True):
+    def cache_key(self, path, config_dir, dxml=True, overlay=None):
         return "xml:" + str(path)
 
     def has_resolved_by_key(self, key):
         return key in self.cached
 
-    def resolve_output(self, path, config_dir, log=None, key=None):
+    def resolve_output(self, path, config_dir, log=None, key=None,
+                       overlay=None):
         self.calls.append(str(path))
-        key = key or self.cache_key(path, config_dir)
+        key = key or self.cache_key(
+            path,
+            config_dir,
+            overlay=overlay,
+        )
         self.cached.add(key)
         return ("xml-text:%s" % Path(path).name, ())
 

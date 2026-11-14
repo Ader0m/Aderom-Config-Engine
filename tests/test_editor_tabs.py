@@ -20,6 +20,19 @@ class Events:
         self.published.append((name, payload))
 
 
+class CodeEditorDebounceTest(unittest.TestCase):
+    def test_content_is_emitted_on_flush_not_on_every_change(self):
+        editor = EditorTabs()._default_editor
+        seen = []
+        editor.content_changed.connect(seen.append)
+        editor.open_file("a.ltx", text="[a]\nx = 1\n")
+
+        editor.editor.setText("[a]\nx = 2\n")
+        self.assertEqual(seen, [])
+        editor.flush_pending()
+        self.assertEqual(seen[-1], "[a]\nx = 2\n")
+
+
 class EditorTabsTest(unittest.TestCase):
     def _make(self):
         events = Events()

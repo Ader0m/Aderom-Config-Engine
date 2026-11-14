@@ -84,6 +84,40 @@ class ProjectServiceTest(unittest.TestCase):
                 "[a]\nx = 3\n",
             )
 
+    def test_project_overlay_is_cached_until_state_changes(self):
+        with tempfile.TemporaryDirectory() as d:
+            source = Path(d) / "a.ltx"
+            source.write_text("[a]\nx = 1\n", encoding="windows-1251")
+            service = ProjectService(Path(d) / "projects")
+            service.create("Overlay")
+            service.update_draft(source, "[a]\nx = 1\n")
+
+            first = service.project_overlay()
+            second = service.project_overlay()
+            self.assertIs(first, second)
+            self.assertEqual(first.source_files[source], "[a]\nx = 1\n")
+
+            service.update_draft(source, "[a]\nx = 2\n")
+            third = service.project_overlay()
+            self.assertIsNot(first, third)
+            self.assertEqual(third.source_files[source], "[a]\nx = 2\n")
+
+    def test_autosave_event_does_not_carry_full_text(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d) / "projects"
+            source = Path(d) / "a.ltx"
+            source.write_text("[a]\nx = 1\n", encoding="windows-1251")
+
+            service = ProjectService(base)
+            service.create("Events")
+            service.update_draft(source, "[a]\nx = 2\n")
+            saved = service.autosave()
+
+            self.assertEqual(len(saved), 1)
+            self.assertEqual(saved[0].kind, "file")
+            self.assertEqual(saved[0].text, "")
+            self.assertGreater(saved[0].size, 0)
+
     def test_delete_active_project_removes_directory(self):
         with tempfile.TemporaryDirectory() as d:
             base = Path(d) / "projects"

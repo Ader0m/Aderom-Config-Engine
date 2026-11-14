@@ -281,6 +281,14 @@ class CodeEditor(QWidget):
         self._readonly_content = True
         self._baseline_text = ""
         self._dirty = False
+        # Полный текст нельзя гонять по слоям на каждый символ: для
+        # system.ltx это десятки мегабайт. Копим изменения и отдаём
+        # прикладному слою после паузы.
+        self._pending_content = None
+        self._content_timer = QTimer(self)
+        self._content_timer.setSingleShot(True)
+        self._content_timer.setInterval(250)
+        self._content_timer.timeout.connect(self._flush_content)
 
         self._init_ui()
         self._init_shortcuts()
@@ -449,6 +457,10 @@ class CodeEditor(QWidget):
         отключает лексер. ``notice`` показывает дисклеймер над файлом,
         не добавляя его в текст и не сдвигая номера строк.
         """
+        # Перед заменой содержимого фиксируем несохранённую правку
+        # старого файла (в проектный черновик), иначе она потеряется.
+        self.flush_pending()
+
         text = str(text or "")
         self._loading = True
         self._readonly_content = bool(readonly)
@@ -463,6 +475,8 @@ class CodeEditor(QWidget):
             self._readonly_content or not self._editable
         )
 
+        self._pending_content = None
+        self._content_timer.stop()
         self._baseline_text = text
         self._set_dirty(False)
 
@@ -520,8 +534,28 @@ class CodeEditor(QWidget):
 
     def mark_clean(self, text=None):
         """Зафиксировать текущий текст как сохранённый в проекте."""
+        self.flush_pending()
         self._baseline_text = self.text() if text is None else str(text)
         self._set_dirty(self.text() != self._baseline_text)
+
+    def flush_pending(self):
+        """Немедленно отдать накопленный текст прикладному слою."""
+        if not self._flush_content():
+            return False
+        return True
+
+    def _flush_content(self):
+        if self._pending_content is None:
+            return False
+        self._content_timer.stop()
+        # Полный текст читаем один раз — после паузы, а не на каждый
+        # символ: иначе Scintilla копирует десятки мегабайт на каждый
+        # textChanged.
+        text = self.text()
+        self._pending_content = None
+        self.content_changed.emit(text)
+        self._set_dirty(text != self._baseline_text)
+        return True
 
     def _set_dirty(self, dirty):
         dirty = bool(dirty)
@@ -534,12 +568,15 @@ class CodeEditor(QWidget):
         if self._loading:
             return
 
-        text = self.text()
-        self.content_changed.emit(text)
-        self._set_dirty(text != self._baseline_text)
+        self._pending_content = True
+        self._content_timer.start()
+        # Сравнение всего 40-МБ текста на каждый символ недопустимо.
+        # Точный статус пересчитается один раз при сбросе debounce.
+        self._set_dirty(True)
 
     def _request_save(self):
         if self.is_editable:
+            self.flush_pending()
             self.save_requested.emit()
 
     def goto_line(self, line_number):
@@ -828,6 +865,13 @@ class ResolvedView(QWidget):
         self._baseline_text = ""
         self._dirty = False
         self._document = None
+        # Синхронизация полного resolved-текста с документом — после
+        # паузы ввода. Иначе каждый символ копирует и нормализует 40 МБ.
+        self._pending_text = None
+        self._sync_timer = QTimer(self)
+        self._sync_timer.setSingleShot(True)
+        self._sync_timer.setInterval(250)
+        self._sync_timer.timeout.connect(self._flush_document)
         self._init_ui()
         self._init_shortcuts()
         self._lexer_scheduler = _LexerScheduler(
@@ -1004,6 +1048,7 @@ class ResolvedView(QWidget):
 
     def bind_document(self, document):
         """Привязать живой документ: правки идут в него, а не в копию."""
+        self.flush_pending()
         self._document = document
         if document is not None:
             document.bind_view(self)
@@ -1013,6 +1058,7 @@ class ResolvedView(QWidget):
 
     def unbind_document(self, document=None):
         if document is None or self._document is document:
+            self.flush_pending()
             if self._document is not None:
                 self._document.unbind_view(self)
             self._document = None
@@ -1053,6 +1099,8 @@ class ResolvedView(QWidget):
 
     @property
     def is_dirty(self):
+        if self._pending_text is not None:
+            return True
         if self._document is not None:
             return self._document.is_dirty
         return self._dirty
@@ -1072,6 +1120,7 @@ class ResolvedView(QWidget):
         self.editor.setReadOnly(not self._editable)
 
     def mark_clean(self, text=None):
+        self.flush_pending()
         if self._document is not None:
             self._document.mark_saved(
                 self.text() if text is None else text
@@ -1083,15 +1132,72 @@ class ResolvedView(QWidget):
 
     def set_dirty_state(self, dirty):
         """Установить признак изменений без пересчёта всего текста."""
+        if self._pending_text is not None:
+            # Текущее состояние вкладки ещё не перенесено в документ.
+            return
         if self._document is not None:
             dirty = self._document.is_dirty
         self._set_dirty(bool(dirty))
 
     def undo(self):
+        self.flush_pending()
         self.editor.undo()
 
     def redo(self):
+        self.flush_pending()
         self.editor.redo()
+
+    def flush_pending(self):
+        """Перенести накопленный текст в документ немедленно."""
+        return self._flush_document()
+
+    def _flush_document(self):
+        if self._pending_text is None:
+            return False
+        self._sync_timer.stop()
+        # Полный текст читаем один раз после паузы, а не на каждый
+        # textChanged.
+        text = self.text()
+        self._pending_text = None
+
+        if self._document is not None:
+            current = self._document.current_text
+            if (
+                current
+                and len(text) == len(current) * 2
+                and text == current + current
+            ):
+                # Не даём «двойному» тексту попасть в документ и проект.
+                self.diagnostic.emit(
+                    "Обнаружено дублирование resolved-текста; "
+                    "вкладка восстановлена из документа"
+                )
+                self._loading = True
+                try:
+                    self.editor.setText(current)
+                    self._line_sources = list(
+                        self._document.line_sources
+                    )
+                    self.source_list.set_sources(self._line_sources)
+                finally:
+                    self._loading = False
+                self._set_dirty(self._document.is_dirty)
+                return False
+
+            self.content_changed.emit(text)
+            self._document.replace_text(
+                text,
+                origin=self,
+                focus_line=self.cursor_line(),
+            )
+            if len(self._line_sources) != self._document.line_count:
+                self._line_sources = list(self._document.line_sources)
+                self.source_list.set_sources(self._line_sources)
+            self._set_dirty(self._document.is_dirty)
+        else:
+            self.content_changed.emit(text)
+            self._set_dirty(text != self._baseline_text)
+        return True
 
     def _on_editor_context_menu(self, position):
         menu = QMenu(self.editor)
@@ -1141,6 +1247,11 @@ class ResolvedView(QWidget):
             line_number = int(line_number)
         except (TypeError, ValueError):
             return False
+
+        # Документ уже содержит каноническое состояние этой правки;
+        # отложенный полный текст относится к предыдущей версии.
+        self._pending_text = None
+        self._sync_timer.stop()
 
         line_count = editor.lines()
         old_loading = self._loading
@@ -1238,50 +1349,13 @@ class ResolvedView(QWidget):
     def _on_text_changed(self):
         if self._loading:
             return
-        text = self.text()
-        if self._document is not None:
-            current = self._document.current_text
-            if (
-                current
-                and len(text) == len(current) * 2
-                and text == current + current
-            ):
-                # Не даём «двойному» тексту попасть в документ и проект.
-                self.diagnostic.emit(
-                    "Обнаружено дублирование resolved-текста; "
-                    "вкладка восстановлена из документа"
-                )
-                self._loading = True
-                try:
-                    self.editor.setText(current)
-                    self._line_sources = list(
-                        self._document.line_sources
-                    )
-                    self.source_list.set_sources(self._line_sources)
-                finally:
-                    self._loading = False
-                self._set_dirty(self._document.is_dirty)
-                return
-
-        self.content_changed.emit(text)
-        if self._document is not None:
-            self._document.replace_text(
-                text,
-                origin=self,
-                focus_line=self.cursor_line(),
-            )
-            # Панель источников перестраиваем только при изменении
-            # количества строк: иначе каждый символ в 40-МБ файле
-            # приводил бы к полной перезаливке модели списка.
-            if len(self._line_sources) != self._document.line_count:
-                self._line_sources = list(self._document.line_sources)
-                self.source_list.set_sources(self._line_sources)
-            self._set_dirty(self._document.is_dirty)
-            return
-        self._set_dirty(text != self._baseline_text)
+        self._pending_text = True
+        self._sync_timer.start()
+        self._set_dirty(True)
 
     def _request_save(self):
         if self._editable:
+            self.flush_pending()
             self.save_requested.emit()
 
     def set_sources_visible(self, visible):
@@ -1292,6 +1366,9 @@ class ResolvedView(QWidget):
             self.splitter.setSizes([1, 0])
 
     def set_content(self, text, line_sources, root_path, sources_visible=True):
+        self.flush_pending()
+        self._pending_text = None
+        self._sync_timer.stop()
         self._root_path = str(root_path)
         self._line_sources = list(line_sources)
 

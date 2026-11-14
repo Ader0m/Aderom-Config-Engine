@@ -24,7 +24,11 @@ from pathlib import Path
 
 from core.tools.fs import read_xml_text, pattern_match, normalize_path
 from core.models import LineSource
-from core.tools.cache import file_stamp, path_key
+from core.tools.cache import (
+    file_stamp,
+    overlay_content_signature,
+    path_key,
+)
 from core.xml.dxml import DxmlProcessor
 from core.xml.slaxml import (
     SlaxmlParser,
@@ -52,7 +56,65 @@ class XmlResolveOutput:
 _INCLUDE_QUOTED_RE = re.compile(r'"([^"]*)"')
 
 # Версия логики XML-резолва: меняется при изменении формата результата.
-XML_CACHE_VERSION = "xml-resolve-v2"
+XML_CACHE_VERSION = "xml-resolve-v3"
+
+
+class _OverlayView:
+    """XML-часть ProjectOverlay, подготовленная для резолвера."""
+
+    __slots__ = ("files", "virtual")
+
+    def __init__(self, config_dir, overlay):
+        source_files = getattr(overlay, "source_files", None)
+        if source_files is None:
+            source_files = overlay if hasattr(overlay, "items") else {}
+        self.files = {}
+        self.virtual = {}
+        for path, text in (source_files or {}).items():
+            try:
+                path = Path(path)
+                if path.suffix.lower() != ".xml":
+                    continue
+                path = normalize_path(path)
+            except (TypeError, ValueError, OSError):
+                continue
+            self.files[path_key(path)] = (path, str(text or ""))
+            try:
+                rel = path.relative_to(config_dir)
+            except ValueError:
+                continue
+            rel = str(rel).replace("\\", "/").lower()
+            self.virtual[rel] = path
+
+    def path_for_relative(self, relative):
+        rel = str(relative).replace("\\", "/").lstrip("/").lower()
+        return self.virtual.get(rel)
+
+    def text_for(self, path):
+        item = self.files.get(path_key(path))
+        return item[1] if item is not None else None
+
+
+def _xml_overlay_signature(overlay) -> str:
+    """Подпись только XML-части overlay.
+
+    LTX-черновики проекта не участвуют в XML-резолве, и их 40-МБ тексты
+    не должны пересчитываться при открытии XML.
+    """
+    if not overlay:
+        return ""
+    source_files = getattr(overlay, "source_files", None)
+    if source_files is None:
+        source_files = overlay if hasattr(overlay, "items") else {}
+    filtered = {}
+    for path, text in (source_files or {}).items():
+        try:
+            if Path(path).suffix.lower() != ".xml":
+                continue
+        except (TypeError, ValueError, OSError):
+            continue
+        filtered[path] = text
+    return overlay_content_signature(filtered)
 
 
 class XmlResolver:
@@ -116,6 +178,10 @@ class XmlResolver:
         # актуальность по mtime/size/ctime (см. ``_dependencies_signature``).
         self._dep_cache = {}
         self._dep_lock = threading.RLock()
+        # Overlay — контекст одного вызова resolve_output в этом потоке.
+        # Так один и тот же XmlResolver можно использовать и для
+        # дискового, и для проектного резолва без гонок.
+        self._overlay_local = threading.local()
 
         if self.dxml.unsupported_scripts:
             self.notes.append(
@@ -149,6 +215,28 @@ class XmlResolver:
         return str(rel).replace("/", "\\")
 
     # -------------------------------------------------- доступ к файлам
+    # -------------------------------------------------- overlay
+    def _overlay_view(self):
+        return getattr(self._overlay_local, "view", None)
+
+    def _set_overlay(self, overlay):
+        view = None
+        if overlay:
+            try:
+                view = _OverlayView(self.config_dir, overlay)
+            except Exception as exc:
+                self._log("XML overlay: %s" % exc)
+        self._overlay_local.view = view
+        return view
+
+    def _read_text(self, path):
+        view = self._overlay_view()
+        if view is not None:
+            text = view.text_for(path)
+            if text is not None:
+                return text
+        return read_xml_text(path)
+
     def _resolve_relative(self, relative: str):
         """Найти файл относительно config_dir без учёта регистра."""
         rel = str(relative).replace("\\", "/").lstrip("/")
@@ -156,6 +244,15 @@ class XmlResolver:
         if any(p == ".." for p in parts):
             return None
         rel = "/".join(parts)
+
+        view = self._overlay_view()
+        if view is not None:
+            overlay_path = view.path_for_relative(rel)
+            if overlay_path is not None:
+                return overlay_path
+            candidate = normalize_path(self.config_dir / rel)
+            if path_key(candidate) in view.files:
+                return candidate
 
         candidate = self.config_dir / rel
         if candidate.is_file():
@@ -191,7 +288,7 @@ class XmlResolver:
         if path is None:
             return None
         try:
-            return read_xml_text(path)
+            return self._read_text(path)
         except Exception as exc:
             self._log("XML: не удалось прочитать include %s: %s" % (relative, exc))
             return None
@@ -222,9 +319,13 @@ class XmlResolver:
     def _list_include_files(self, mask: str):
         """Список файлов по маске как FS.file_list(FS_ListFiles)."""
         mask = str(mask).replace("\\", "/")
+        names = set(self._all_files())
+        view = self._overlay_view()
+        if view is not None:
+            names.update(view.virtual.keys())
         out = [
             rel.replace("/", "\\")
-            for rel in self._all_files()
+            for rel in names
             if pattern_match(rel, mask)
         ]
         out.sort(key=lambda s: s.lower())
@@ -259,7 +360,7 @@ class XmlResolver:
         out.append(path)
 
         try:
-            text = read_xml_text(path)
+            text = self._read_text(path)
         except Exception:
             return
 
@@ -365,14 +466,15 @@ class XmlResolver:
         self._scripts_signature = sig
         return sig
 
-    def cache_key(self, path, dxml=None):
-        """Ключ кэша результата: файл + include-дерево + DXML-скрипты."""
+    def cache_key(self, path, dxml=None, overlay=None):
+        """Ключ кэша результата: файл + include-дерево + overlay + скрипты."""
         use_dxml = self._dxml_enabled if dxml is None else bool(dxml)
         return (
             XML_CACHE_VERSION,
             path_key(self.config_dir),
             path_key(path),
             self._dependencies_signature(path),
+            _xml_overlay_signature(overlay),
             self.scripts_signature() if use_dxml else "",
             bool(use_dxml),
         )
@@ -407,7 +509,7 @@ class XmlResolver:
             )
 
         try:
-            text = read_xml_text(path)
+            text = self._read_text(path)
         except Exception as exc:
             raise XmlResolveError(
                 "Не удалось прочитать %s: %s" % (virtual_name, exc)
@@ -477,64 +579,70 @@ class XmlResolver:
     def resolve_file(self, path, dxml=None) -> str:
         return self.resolve(self.virtual_name(path), dxml=dxml)
 
-    def resolve_output(self, path, dxml=None) -> XmlResolveOutput:
+    def resolve_output(self, path, dxml=None, overlay=None) -> XmlResolveOutput:
         """Полный результат: текст, владельцы строк, DXML и примечания."""
-        virtual_name = self.virtual_name(path)
-        assembled, origins = self.assemble_with_origins(virtual_name)
+        previous = getattr(self._overlay_local, "view", None)
+        if overlay is not None:
+            self._set_overlay(overlay)
+        try:
+            virtual_name = self.virtual_name(path)
+            assembled, origins = self.assemble_with_origins(virtual_name)
 
-        use_dxml = self._dxml_enabled if dxml is None else bool(dxml)
-        text = assembled
-        dom = None
+            use_dxml = self._dxml_enabled if dxml is None else bool(dxml)
+            text = assembled
+            dom = None
 
-        if use_dxml:
-            text, xml_obj = self.dxml.process_dom(
-                virtual_name.replace("/", "\\"),
-                assembled,
-                origins,
-            )
-            if xml_obj is not None:
-                dom = xml_obj.xml_table
-
-        if dom is None:
-            # DXML отключён/пропущен: DOM нужен только для форматирования
-            # и построчной атрибуции по include-сборке.
-            try:
-                dom = SlaxmlParser(
-                    include_loader=self.load_include_text
-                ).simple_dom(
+            if use_dxml:
+                text, xml_obj = self.dxml.process_dom(
+                    virtual_name.replace("/", "\\"),
                     assembled,
-                    strip_whitespace=True,
-                    parse_includes=True,
+                    origins,
                 )
-                assign_origins(dom, origins)
-            except Exception as exc:
-                self._log(
-                    "XML: не удалось разобрать %s: %s"
-                    % (virtual_name, exc)
-                )
-                dom = None
+                if xml_obj is not None:
+                    dom = xml_obj.xml_table
 
-        line_sources = ()
-        if dom is not None:
-            try:
-                text, refs = pretty_dom(dom)
-                line_sources = tuple(
-                    self._to_line_source(ref, virtual_name)
-                    for ref in refs
-                )
-            except Exception as exc:
-                self._log(
-                    "XML: не удалось отформатировать %s: %s"
-                    % (virtual_name, exc)
-                )
+            if dom is None:
+                # DXML отключён/пропущен: DOM нужен только для
+                # форматирования и построчной атрибуции по include-сборке.
+                try:
+                    dom = SlaxmlParser(
+                        include_loader=self.load_include_text
+                    ).simple_dom(
+                        assembled,
+                        strip_whitespace=True,
+                        parse_includes=True,
+                    )
+                    assign_origins(dom, origins)
+                except Exception as exc:
+                    self._log(
+                        "XML: не удалось разобрать %s: %s"
+                        % (virtual_name, exc)
+                    )
+                    dom = None
 
-        return XmlResolveOutput(
-            text=text,
-            virtual_name=virtual_name,
-            dxml_applied=bool(use_dxml),
-            notes=tuple(self.notes),
-            line_sources=line_sources,
-        )
+            line_sources = ()
+            if dom is not None:
+                try:
+                    text, refs = pretty_dom(dom)
+                    line_sources = tuple(
+                        self._to_line_source(ref, virtual_name)
+                        for ref in refs
+                    )
+                except Exception as exc:
+                    self._log(
+                        "XML: не удалось отформатировать %s: %s"
+                        % (virtual_name, exc)
+                    )
+
+            return XmlResolveOutput(
+                text=text,
+                virtual_name=virtual_name,
+                dxml_applied=bool(use_dxml),
+                notes=tuple(self.notes),
+                line_sources=line_sources,
+            )
+        finally:
+            self._overlay_local.view = previous
 
     def _to_line_source(self, ref, root_virtual_name):
         """SourceRef -> доменный LineSource."""

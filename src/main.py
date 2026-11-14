@@ -124,6 +124,10 @@ def main():
         cache_dir=app_dir / "generated" / "resolved_cache",
         max_entries=128,
         max_chars=256_000_000,
+        # Один файл кэша — это один корень/XML. Рабочий набор большой
+        # VFS может быть больше тысяч файлов, поэтому ограничиваем не
+        # количество, а общий объём (с запасом; типичный кэш — десятки МБ).
+        max_disk_bytes=1_000_000_000,
     )
     resolver_service = ResolverService(
         cache=cache,

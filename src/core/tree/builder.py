@@ -376,6 +376,15 @@ def _recount_subtrees(forest):
         forest.system_tree_files = counts.get(system_root, 0)
 
 
+def _invalidate_derived_indexes(forest) -> None:
+    """Сбросить индексы целей патча после изменения состава леса."""
+    try:
+        from core.patching.targets import invalidate_forest_indexes
+    except Exception:
+        return
+    invalidate_forest_indexes(forest)
+
+
 def add_virtual_file(forest, path, text) -> bool:
     """Добавить новый виртуальный файл в уже построенное дерево."""
     path = normalize_path(path)
@@ -408,6 +417,7 @@ def add_virtual_file(forest, path, text) -> bool:
         forest.roots.append(path)
         _sort_roots(forest)
         _recount_subtrees(forest)
+        _invalidate_derived_indexes(forest)
         return True
 
     forest.files.append(path)
@@ -459,6 +469,7 @@ def add_virtual_file(forest, path, text) -> bool:
 
     _sort_roots(forest)
     _recount_subtrees(forest)
+    _invalidate_derived_indexes(forest)
     return True
 
 
@@ -504,6 +515,7 @@ def remove_virtual_file(forest, path) -> bool:
     forest.total_xml_files = len(forest.xml_files)
     _sort_roots(forest)
     _recount_subtrees(forest)
+    _invalidate_derived_indexes(forest)
     return True
 
 

@@ -295,8 +295,25 @@ class EditorTabs(QTabWidget):
         self._publish(Events.UI_TAB_OPENED, tab_id)
         self._publish_file_opened(source_path, tab_id)
 
+    def flush_pending(self):
+        """Зафиксировать отложенный текст всех вкладок."""
+        for widget in list(self._tab_ids.values()):
+            flush = getattr(widget, "flush_pending", None)
+            if callable(flush):
+                try:
+                    flush()
+                except Exception:
+                    log.exception("Не удалось зафиксировать текст вкладки")
+
     def close_tab(self, tab_id):
-        widget = self._tab_ids.pop(tab_id, None)
+        widget = self._tab_ids.get(tab_id)
+        flush = getattr(widget, "flush_pending", None)
+        if callable(flush):
+            try:
+                flush()
+            except Exception:
+                log.exception("Не удалось зафиксировать текст вкладки")
+        self._tab_ids.pop(tab_id, None)
         self._tab_source_paths.pop(tab_id, None)
         self._tab_busy.discard(tab_id)
         self._busy_icons.pop(tab_id, None)

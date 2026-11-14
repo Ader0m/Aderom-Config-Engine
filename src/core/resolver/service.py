@@ -143,10 +143,16 @@ def _filter_overlay(forest, root_path, overlay):
     if not has_attrs:
         return filtered_sources
 
-    return SimpleNamespace(
+    filtered = SimpleNamespace(
         source_files=filtered_sources,
         resolved_edits=filtered_resolved,
     )
+    # Фильтрация детерминирована: для того же исходного overlay и корня
+    # подпись не нужно пересчитывать по 40-МБ текстам.
+    revision = getattr(overlay, "revision", None)
+    if revision is not None:
+        filtered.revision = "%s:%s" % (revision, root_key)
+    return filtered
 
 
 class ResolverService:
@@ -161,6 +167,8 @@ class ResolverService:
         self._cache = cache
         self._resolved_cache = resolved_cache or ResolvedCache()
         self._adapter = None
+        self._adapter_context = None
+        self._adapter_signature = None
         self._inflight_lock = threading.RLock()
         self._inflight = {}
         self._last_keys = {}
@@ -214,17 +222,38 @@ class ResolverService:
     # -------------------------------------------------- адаптер
 
     def _ensure_adapter(self, forest, config_dir):
-        """Найти и создать адаптер, если ещё не создан."""
-        if self._adapter is not None:
+        """Найти адаптер; пересоздать при смене VFS или Resolver4.py."""
+        # Адаптер, установленный снаружи (тесты/альтернативный
+        # композиционный корень), не пересоздаём: у него нет контекста.
+        if self._adapter is not None and self._adapter_context is None:
             return self._adapter
 
-        bases = build_search_bases(forest.scan_dir, config_dir)
+        scan_dir = getattr(forest, "scan_dir", None)
+        context = (
+            path_key(scan_dir) if scan_dir else "",
+            path_key(config_dir) if config_dir else "",
+        )
+
+        bases = build_search_bases(scan_dir, config_dir)
         script = find_resolver_script(bases)
         if script is None:
             logger.warning("Resolver4.py не найден в базах: %s", bases)
+            self._adapter = None
+            self._adapter_context = None
+            self._adapter_signature = None
             return None
 
+        signature = resolver_signature(script)
+        if (
+            self._adapter is not None
+            and self._adapter_context == context
+            and self._adapter_signature == signature
+        ):
+            return self._adapter
+
         self._adapter = LtxResolverAdapter(script, cache=self._cache)
+        self._adapter_context = context
+        self._adapter_signature = signature
         logger.info("Resolver4 подключён: %s", self._adapter.resolver_script)
         return self._adapter
 
@@ -258,7 +287,7 @@ class ResolverService:
         root_key = path_key(root_path)
         overlay_key = project_overlay_signature(overlay)
         identity = (
-            id(forest),
+            str(getattr(forest, "cache_id", id(forest))),
             kind,
             root_key,
             overlay_key,

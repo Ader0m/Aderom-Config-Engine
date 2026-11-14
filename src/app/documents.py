@@ -83,10 +83,13 @@ def collapse_duplicated_text(text, original=""):
 
 def fit_sources(sources, count):
     """Дополнить/обрезать карту источников до числа строк."""
-    result = list(sources or ())
+    values = tuple(sources or ())
+    if len(values) == count:
+        return values
+    result = list(values)
     if len(result) < count:
         result.extend([None] * (count - len(result)))
-    elif len(result) > count:
+    else:
         del result[count:]
     return tuple(result)
 
