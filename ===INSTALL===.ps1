@@ -94,6 +94,7 @@ try {
         Get-NumberedScript -Dir $InstallDir -Number '1'
         Get-NumberedScript -Dir $InstallDir -Number '2'
         Get-NumberedScript -Dir $InstallDir -Number '3'
+        Get-NumberedScript -Dir $InstallDir -Number '4'
     )
 
     Write-Info "Project root: $ProjectRoot"

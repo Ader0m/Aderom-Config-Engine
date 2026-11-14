@@ -93,6 +93,7 @@ try {
 
     # Undo the installation in reverse order.
     $scripts = @(
+		Get-NumberedScript -Dir $InstallDir -Number '4'
         Get-NumberedScript -Dir $InstallDir -Number '3'
         Get-NumberedScript -Dir $InstallDir -Number '2'
         Get-NumberedScript -Dir $InstallDir -Number '1'

@@ -1,6 +1,7 @@
 generated
 src/generated
 /projects
+/ACE.lnk
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
