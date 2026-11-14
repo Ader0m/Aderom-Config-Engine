@@ -85,6 +85,126 @@ class XmlForkTest(unittest.TestCase):
         )
         self.services = Services()
 
+    def test_root_mode_merges_references_from_different_ltx_files(self):
+        from core.tools.cache import FileCacheSystem
+        from core.tree.builder import TreeBuilder
+        from tests.helpers import write_text
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp) / "gamedata" / "configs"
+            write_text(
+                cfg / "system.ltx",
+                '[system]\n'
+                '#include "mod_system_z_mas_bas_reflex.ltx"\n'
+                '#include "items/weapons/weapon_addons.ltx"\n',
+            )
+            write_text(
+                cfg / "mod_system_z_mas_bas_reflex.ltx",
+                "[0kp2]\n"
+                "inv_name = old_key\n"
+                "inv_name_short = old_key\n",
+            )
+            write_text(
+                cfg / "items" / "weapons" / "weapon_addons.ltx",
+                "[0kp2]\n"
+                "inv_name = old_key\n"
+                "inv_name_short = old_key\n",
+            )
+            xml_path = write_text(
+                cfg / "text" / "rus" / "strings.xml",
+                '<string_table>\n'
+                '  <string id="old_key"><text>old</text></string>\n'
+                "</string_table>\n",
+            )
+            after = (
+                '<string_table>\n'
+                '  <string id="old_key"><text>new</text></string>\n'
+                "</string_table>\n"
+            )
+            forest = TreeBuilder(FileCacheSystem()).build(
+                cfg,
+                cfg / "system.ltx",
+                use_cache=False,
+            )
+
+            result = XmlForkService(self.services).plan(
+                xml_path,
+                '<string_table>\n'
+                '  <string id="old_key"><text>old</text></string>\n'
+                "</string_table>\n",
+                after,
+                forest=forest,
+                options=PatchOptions(
+                    project_tag="proj",
+                    patch_mod="ACE Patch - proj",
+                ),
+                project_mode="root",
+            )
+
+            ltx_files = [
+                file for file in result.generated.files
+                if file.relative_path.suffix.lower() == ".ltx"
+            ]
+            self.assertEqual(len(ltx_files), 1)
+            self.assertEqual(
+                ltx_files[0].text.count("old_key_ace_proj"),
+                2,
+            )
+            self.assertNotIn(
+                "изменён несколькими файлами",
+                ltx_files[0].text,
+            )
+            self.assertIn(
+                "Заменён ключ old_key в [0kp2].inv_name",
+                ltx_files[0].text,
+            )
+            self.assertIn(
+                "Правило Root объединило перепривязки из 2 файлов",
+                ltx_files[0].text,
+            )
+
+    def test_path_aliases_do_not_generate_duplicate_patch_files(self):
+        ltx_alias = (
+            self.config / "items" / ".." / "items" / "items.ltx"
+        )
+        xml_alias = (
+            self.config / "ui" / ".." / "ui" / "other.xml"
+        )
+        forest = Forest(
+            self.config,
+            [self.ltx, ltx_alias],
+            [self.source, self.other_xml, xml_alias],
+        )
+
+        result = XmlForkService(self.services).plan(
+            self.source,
+            self.before,
+            self.after,
+            forest=forest,
+            options=PatchOptions(
+                project_tag="proj",
+                patch_mod="ACE Patch - proj",
+            ),
+            project_mode="on_file",
+        )
+
+        self.assertTrue(result.generated.verification.ok)
+        ltx_files = [
+            file for file in result.generated.files
+            if file.relative_path.suffix.lower() == ".ltx"
+        ]
+        self.assertEqual(len(ltx_files), 1)
+        self.assertEqual(
+            ltx_files[0].text.count("old_key_ace_proj"),
+            2,
+        )
+
+        xml_copies = [
+            file for file in result.generated.files
+            if file.relative_path.name == "other.xml"
+        ]
+        self.assertEqual(len(xml_copies), 1)
+
     def test_fork_creates_new_xml_rewires_ltx_and_xml(self):
         result = XmlForkService(self.services).plan(
             self.source,

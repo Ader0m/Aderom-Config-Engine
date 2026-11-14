@@ -152,6 +152,15 @@ def _raw_contains(raw: bytes, key: str) -> bool:
     return False
 
 
+def _file_identity(path) -> str:
+    """Идентичность файла с разыменованием junction/symlink-алиасов."""
+    path = Path(path)
+    try:
+        return str(path.resolve()).lower()
+    except OSError:
+        return str(path).lower()
+
+
 def _read_bytes_cached(path: Path, cache: Optional[Dict]) -> Optional[bytes]:
     path = Path(path)
     try:
@@ -513,6 +522,7 @@ def _find_ltx_references(
     """Найти LTX-значения, ссылающиеся на старые ключи."""
     result: Dict[Tuple[Path, str, str], Tuple[str, str]] = {}
     files = list(getattr(forest, "files", ()) or ())
+    seen_paths = set()
 
     for path in files:
         path = Path(path)
@@ -526,6 +536,14 @@ def _find_ltx_references(
             _raw_contains(raw, key.old_key or "") for key in keys
         ):
             continue
+
+        # VFS может содержать один файл под несколькими путями (junction,
+        # регистр, алиасы MO2). Иначе ссылка находится дважды и один и то
+        # же DLTX-патч генерируется повторно.
+        path_identity = _file_identity(path)
+        if path_identity in seen_paths:
+            continue
+        seen_paths.add(path_identity)
 
         try:
             document = parse_ltx_document(
@@ -571,6 +589,7 @@ def _find_xml_references(
     """Найти XML-атрибуты/текст, ссылающиеся на старые ключи."""
     plans = []
     references: List[XmlForkReference] = []
+    seen_paths = set()
 
     for path in list(getattr(forest, "xml_files", ()) or ()):
         path = Path(path)
@@ -587,6 +606,11 @@ def _find_xml_references(
             _raw_contains(raw, key.old_key or "") for key in keys
         ):
             continue
+
+        path_identity = _file_identity(path)
+        if path_identity in seen_paths:
+            continue
+        seen_paths.add(path_identity)
 
         try:
             before = parse_xml_document(
@@ -1222,28 +1246,26 @@ class XmlForkService:
                 ),
             )
 
-        plans_by_root: Dict[Path, List[PatchPlan]] = {}
-        root_references = {}
-        mod_references = {}
-        for key, value in references.items():
-            if Path(key[0]).name.lower().startswith("mod_"):
-                mod_references[key] = value
-            else:
-                root_references[key] = value
+        # Root-режим: один итоговый DLTX-файл на корень загрузки.
+        # Ссылки могут жить в разных LTX-файлах (например, в items/... и
+        # в mod_system_*.ltx), но если у них один корень, все изменения
+        # должны попасть в один патч. Нельзя генерировать мод-ссылку
+        # отдельно от остальных: оба плана получат одно и то же имя
+        # патч-файла, и он появится в предпросмотре дважды.
+        plans_by_root: Dict[str, List[PatchPlan]] = {}
 
-        generated: List[GeneratedPatch] = []
-        if mod_references:
-            generated.extend(
-                self._ltx_reference_file_patches(
-                    mod_references,
-                    forest,
-                    options,
-                    warnings,
-                    dltx_mode="on_file",
-                )
-            )
+        def display_path(path):
+            rel_paths = getattr(forest, "rel_paths", None) or {}
+            try:
+                value = rel_paths.get(Path(path))
+            except Exception:
+                value = None
+            return str(value) if value else Path(path).name
 
-        for (path, section, key), (_old, new_value) in root_references.items():
+        rewire_notes: List[PatchIssue] = []
+        rewired_files = set()
+
+        for (path, section, key), (old_value, new_value) in references.items():
             try:
                 plan = self.services.patch.plan_property_patch(
                     path,
@@ -1276,15 +1298,71 @@ class XmlForkService:
                     )
                 )
                 continue
-            plans_by_root.setdefault(plan.target.root_path, []).append(plan)
 
-        groups: List[List[PatchPlan]] = list(plans_by_root.values())
+            # Один корень может быть представлен алиасами пути (junction,
+            # регистр). Группируем по физической идентичности.
+            root_key = _file_identity(plan.target.root_path)
+            plans_by_root.setdefault(root_key, []).append(plan)
+            rewired_files.add(_file_identity(path))
+            rewire_notes.append(
+                PatchIssue(
+                    code="xml_fork_key_rewired",
+                    message=(
+                        "Заменён ключ %s в [%s].%s (файл: %s)"
+                        % (
+                            old_value,
+                            section,
+                            key,
+                            display_path(path),
+                        )
+                    ),
+                    severity="info",
+                )
+            )
 
-        for plans in groups:
+        generated: List[GeneratedPatch] = []
+
+        for plans in plans_by_root.values():
             try:
                 merged = merge_patch_plans(
                     plans,
                     patch_mod=options.patch_mod or "ACE Patch",
+                )
+
+                # Это не конфликт правок пользователя, а перепривязка
+                # одной и той же XML-ссылки в разных LTX-файлах.
+                # Убираем ложное предупреждение мерджера и пишем
+                # человекочитаемый отчёт вместо него.
+                kept_warnings = tuple(
+                    warning
+                    for warning in merged.warnings
+                    if warning.code != "merge_key_conflict"
+                )
+                merged = replace(
+                    merged,
+                    warnings=(
+                        kept_warnings
+                        + tuple(rewire_notes)
+                        + (
+                            (
+                                PatchIssue(
+                                    code="xml_fork_root_merged",
+                                    message=(
+                                        "Правило Root объединило "
+                                        "перепривязки из %d файлов в "
+                                        "один патч: %s"
+                                        % (
+                                            len(rewired_files),
+                                            merged.patch_file_rel or "—",
+                                        )
+                                    ),
+                                    severity="info",
+                                ),
+                            )
+                            if len(rewired_files) > 1
+                            else ()
+                        )
+                    ),
                 )
                 generated.append(self.services.generate_patch(merged))
             except Exception as exc:
@@ -1312,15 +1390,25 @@ class XmlForkService:
         соблюдает настройку DLTX проекта, а не всегда собирает один патч
         на корень.
         """
-        by_file: Dict[Path, List[Tuple[str, str, str]]] = {}
+        # Ключ группы — нормализованный путь. Один физический файл,
+        # найденный в VFS под алиасами, не должен дать два одинаковых
+        # патча.
+        by_file: Dict[str, Tuple[Path, List[Tuple[str, str, str]]]] = {}
         for (path, section, key), (_old, new_value) in references.items():
-            by_file.setdefault(Path(path), []).append(
-                (section, key, new_value)
-            )
+            file_key = _file_identity(path)
+            entry = by_file.get(file_key)
+            if entry is None:
+                entry = (Path(path), [])
+                by_file[file_key] = entry
+            entry[1].append((section, key, new_value))
 
         generated: List[GeneratedPatch] = []
 
-        for path in sorted(by_file, key=lambda item: str(item).lower()):
+        for file_key in sorted(
+            by_file,
+            key=lambda item: str(by_file[item][0]).lower(),
+        ):
+            path, file_references = by_file[file_key]
             raw = _read_bytes_cached(path, self._byte_cache)
             if raw is None:
                 warnings.append(
@@ -1333,7 +1421,7 @@ class XmlForkService:
                 continue
 
             baseline = _decode_text(raw)
-            edited = replace_values(baseline, by_file[path])
+            edited = replace_values(baseline, file_references)
             if edited == baseline:
                 warnings.append(
                     PatchIssue(

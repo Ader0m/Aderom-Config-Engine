@@ -84,6 +84,12 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         # Живые resolved-документы: один владелец текста на tab_id.
         self._resolved_documents = {}
 
+        # Фоновые записи текстовых черновиков: не более одной на файл.
+        # ``_text_save_pending`` хранит последний текст, пришедший во
+        # время уже выполняющейся записи.
+        self._text_save_jobs = {}
+        self._text_save_pending = {}
+
         self._file_opened_sub = events.subscribe(
             Events.FILE_OPENED,
             self._on_file_opened,

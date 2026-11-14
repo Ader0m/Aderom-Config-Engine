@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 import time
 from pathlib import Path
 
@@ -10,6 +11,30 @@ from app.documents import ResolvedDocument
 from app.projects import ProjectError
 from sdk.api import ItemCardRequest, ResolvedDraftInfo
 from sdk.events import Events
+
+
+def _call_with_overlay(func, *args, overlay=None, **kwargs):
+    """Передать ``overlay`` только тем поставщикам, которые его знают.
+
+    Тестовые и сторонние реализации сервиса могут сохранять старую
+    подпись; платформа не должна падать из-за нового необязательного
+    аргумента.
+    """
+    if overlay is None:
+        return func(*args, **kwargs)
+
+    try:
+        parameters = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+
+    accepts = "overlay" in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    if accepts:
+        kwargs["overlay"] = overlay
+    return func(*args, **kwargs)
 
 
 class ResolvedDocumentMixin:
@@ -502,10 +527,20 @@ class ResolvedDocumentMixin:
         return document.section_at_line(line_number)
 
     def item_entry(self, tab_id, section):
-        """Текущая проекция предмета из документа (для карточки)."""
+        """Текущая проекция предмета из документа (для карточки).
+
+        Локализация читается вместе с черновиками проекта: отображаемый
+        текст должен совпадать с XML, который будет сохранён в патч.
+        """
         document = self._get_or_restore_document(tab_id)
         if document is None or self._forest is None:
             return None
+
+        overlay = (
+            self.project_overlay()
+            if self.project.is_active
+            else None
+        )
 
         block = document.section_block(section)
         builder = getattr(
@@ -515,17 +550,21 @@ class ResolvedDocumentMixin:
         )
         if block is not None and callable(builder):
             block_text, offset = block
-            return builder(
+            return _call_with_overlay(
+                builder,
                 self._forest,
                 block_text,
                 section,
                 offset,
+                overlay=overlay,
             )
 
-        return self.services.build_item_entry(
+        return _call_with_overlay(
+            self.services.build_item_entry,
             self._forest,
             document.current_text,
             section,
+            overlay=overlay,
         )
 
     def open_item_card_at_cursor(self):

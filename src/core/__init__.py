@@ -53,8 +53,10 @@ from core.items.catalog import (
 from core.items.icons import ICON_CACHE_VERSION, ItemIconService
 from core.items.localization import (
     LOCALIZATION_VERSION,
+    LocalizationEntry,
     LocalizationService,
     LocalizationTable,
+    edit_localization_text,
 )
 from core.tools.cache import (
     FileCacheSystem,
@@ -239,8 +241,10 @@ __all__ = [
     "ICON_CACHE_VERSION",
     "ItemIconService",
     "LOCALIZATION_VERSION",
+    "LocalizationEntry",
     "LocalizationService",
     "LocalizationTable",
+    "edit_localization_text",
     "ObjectCache",
     "DdsError",
     "DdsInfo",

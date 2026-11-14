@@ -179,6 +179,176 @@ class ProjectControllerMixin:
         self._update_project_status()
         return True
 
+    def write_project_text_async(
+        self,
+        path,
+        text,
+        on_done=None,
+        original_text=None,
+    ):
+        """Записать текстовый черновик в фоновом потоке.
+
+        На один файл одновременно работает только одна запись. Если во
+        время неё приходит новый текст, он ставится в очередь и
+        записывается следующим. Сериализация/запись JSON выполняются в
+        рабочем потоке; проект и вкладки обновляются в UI-потоке.
+        """
+        if not self.project.is_active:
+            if callable(on_done):
+                on_done(False, "Создайте проект, чтобы сохранять изменения")
+            return False
+
+        path = Path(path)
+        key = self.project.path_key(path)
+        request = {
+            "path": path,
+            "text": str(text or ""),
+            "original_text": (
+                None if original_text is None else str(original_text)
+            ),
+            "on_done": on_done,
+        }
+
+        if key in self._text_save_jobs:
+            # Последняя версия текста заменит предыдущую после записи.
+            self._text_save_pending[key] = request
+            return True
+
+        return self._start_text_save(key, request)
+
+    def _start_text_save(self, key, request):
+        path = Path(request["path"])
+        try:
+            target, payload, revision, saved_at = (
+                self.project.stage_text_draft(
+                    path,
+                    request["text"],
+                    original_text=request.get("original_text"),
+                )
+            )
+        except Exception as exc:
+            self.log(
+                "Проект: не удалось подготовить сохранение %s: %s"
+                % (path.name, exc)
+            )
+            callback = request.get("on_done")
+            if callable(callback):
+                callback(False, str(exc))
+            return False
+
+        job = dict(request)
+        job.update(
+            target=target,
+            payload=payload,
+            revision=revision,
+            saved_at=saved_at,
+            project=self.project.active,
+        )
+        self._text_save_jobs[key] = job
+
+        def work(_log):
+            self.project.write_staged_draft(
+                path,
+                target,
+                payload,
+                revision,
+            )
+            return target
+
+        def finish(_result, error):
+            self._finish_text_save(key, error)
+
+        run = getattr(self.tasks, "run", None)
+        if not callable(run):
+            try:
+                work(None)
+            except Exception as exc:
+                self._finish_text_save(key, exc)
+            else:
+                self._finish_text_save(key, None)
+            return True
+
+        try:
+            run(work, on_done=finish)
+        except Exception as exc:
+            self._text_save_jobs.pop(key, None)
+            self.log(
+                "Проект: не удалось запустить сохранение %s: %s"
+                % (path.name, exc)
+            )
+            callback = request.get("on_done")
+            if callable(callback):
+                callback(False, str(exc))
+            return False
+        return True
+
+    def _finish_text_save(self, key, error):
+        job = self._text_save_jobs.pop(key, None)
+        if job is None:
+            return
+
+        path = Path(job["path"])
+        message = None if error is None else str(error)
+        ok = False
+
+        if error is None:
+            if not self.project.is_active:
+                message = "Проект закрыт во время сохранения"
+            elif self.project.active is not job.get("project"):
+                message = "Во время сохранения открыт другой проект"
+            elif self.project.mark_draft_saved(
+                path,
+                job["revision"],
+                job["saved_at"],
+            ):
+                ok = True
+            else:
+                message = "Черновик изменён во время сохранения"
+
+        if ok:
+            if self.window is not None:
+                editor = getattr(self.window, "editor", None)
+                if editor is not None:
+                    try:
+                        editor.mark_clean(path, job["text"])
+                    except Exception:
+                        pass
+            try:
+                self._invalidate_paths([path])
+            except Exception as exc:
+                self.log(
+                    "Проект: не удалось сбросить кэш после %s: %s"
+                    % (path.name, exc)
+                )
+            try:
+                self._update_project_status()
+            except Exception:
+                pass
+            self.log("Проект: сохранён текст %s" % path.name)
+        elif message:
+            self.log(
+                "Проект: ошибка сохранения %s: %s"
+                % (path.name, message)
+            )
+
+        callback = job.get("on_done")
+        if callable(callback):
+            try:
+                callback(ok, message)
+            except Exception:
+                logger.exception(
+                    "Ошибка обработчика фонового сохранения %s",
+                    path,
+                )
+
+        pending = self._text_save_pending.pop(key, None)
+        if (
+            pending is not None
+            and self.project.is_active
+            and self.project.active is job.get("project")
+        ):
+            self._start_text_save(key, pending)
+
     def write_project_texts(self, files):
         """Атомарно записать несколько черновиков проекта.
 
@@ -430,6 +600,14 @@ class ProjectControllerMixin:
         setter = getattr(editor, "set_tab_dirty", None)
         if callable(setter):
             setter(tab_id, bool(dirty))
+
+    def set_editor_tab_busy(self, tab_id, busy):
+        if self.window is None:
+            return
+        editor = getattr(self.window, "editor", None)
+        setter = getattr(editor, "set_tab_busy", None)
+        if callable(setter):
+            setter(str(tab_id or ""), bool(busy))
 
     def save_project_now(self):
         if not self.project.is_active:

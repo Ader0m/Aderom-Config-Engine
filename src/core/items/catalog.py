@@ -33,9 +33,14 @@ from core.patching.ltx.document import (
     parse_ltx_document,
     parse_section_header,
 )
+from core.items.localization import LocalizationEntry
 from core.tools.fs import read_text_safe, strip_comments
 from core.tools.cache import ObjectCache
-from core.tools.cache import file_subtree_signature, path_key
+from core.tools.cache import (
+    file_subtree_signature,
+    path_key,
+    project_overlay_signature,
+)
 from core.tools.vfs import resolve_asset_path
 
 
@@ -44,7 +49,8 @@ from core.tools.vfs import resolve_asset_path
 # 3 — ItemField.line_number для правки system.ltx.
 # 4 — список всех секций (поля и родители) для создания предметов.
 # 5 — имена родителей из исходных LTX (resolved-текст уже без наследования).
-ITEM_CATALOG_VERSION = 5
+# 6 — источник строки локализации для правки XML из карточки.
+ITEM_CATALOG_VERSION = 6
 
 DEFAULT_ICON_TEXTURE = r"ui\ui_icon_equipment"
 GRID_SIZE = 50
@@ -98,6 +104,11 @@ class ItemRecord:
     # Локализованные значения inv_name/description из text/<lang>.
     name_text: str = ""
     description_text: str = ""
+    # Ключи и победившие XML-объявления: карточка правит именно их.
+    name_key: str = ""
+    description_key: str = ""
+    name_source: Optional[LocalizationEntry] = None
+    description_source: Optional[LocalizationEntry] = None
 
     def field(self, name: str, default: Optional[str] = None) -> Optional[str]:
         wanted = str(name).lower()
@@ -230,38 +241,71 @@ class ItemCatalogService:
 
     # -------------------------------------------------- кэш снимка
 
-    def _snapshot_key(self, forest, root):
+    def _snapshot_key(self, forest, root, overlay=None):
         """Ключ кэша: версия правил + путь + подпись include/DLTX-дерева."""
         try:
             signature = file_subtree_signature(forest, root)
         except Exception:
             signature = "unknown"
 
-        loc_signature = ""
-        if self._localization is not None:
-            try:
-                loc_signature = self._localization.signature(forest)
-            except Exception:
-                loc_signature = ""
+        loc_signature = self._localization_signature(forest, overlay)
+        overlay_key = project_overlay_signature(overlay)
 
-        raw = "%s|%s|%s|%s" % (
+        raw = "%s|%s|%s|%s|%s" % (
             ITEM_CATALOG_VERSION,
             path_key(root),
             signature,
             loc_signature,
+            overlay_key,
         )
         digest = hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()
         return ("item_catalog", digest), digest
+
+    def _localization_signature(self, forest, overlay=None):
+        if self._localization is None:
+            return ""
+        try:
+            if overlay is None:
+                return self._localization.signature(forest)
+            return self._localization.signature(forest, overlay=overlay)
+        except TypeError:
+            try:
+                return self._localization.signature(forest)
+            except Exception:
+                return ""
+        except Exception:
+            return ""
 
     def clear_memory(self):
         """Сбросить каталоги в памяти (диск остаётся до смены снимка)."""
         self._cache.clear()
         self._text_cache.clear()
 
+    @staticmethod
+    def _effective_overlay(overlay):
+        """Overlay только если в нём есть XML/LTX-черновики.
+
+        Пустой ``ProjectOverlay`` не должен отключать дисковый кэш
+        снимка: локализация в этом случае читается с диска.
+        """
+        if overlay is None:
+            return None
+        sources = getattr(overlay, "source_files", None)
+        if sources is None and isinstance(overlay, dict):
+            sources = overlay
+        return overlay if sources else None
+
     # -------------------------------------------------- сборка
 
-    def build(self, forest, log=None, config_dir=None,
-              resolved_text=None, reuse_snapshot_cache=False) -> ItemCatalog:
+    def build(
+        self,
+        forest,
+        log=None,
+        config_dir=None,
+        resolved_text=None,
+        reuse_snapshot_cache=False,
+        overlay=None,
+    ) -> ItemCatalog:
         """Собрать каталог предметов.
 
         ``resolved_text`` — готовый текст ``system.ltx``. Если он уже
@@ -269,18 +313,21 @@ class ItemCatalogService:
         использовать дисковый кэш снимка и не вызывать резолвер второй раз.
         Черновик проекта кэшируется только в памяти: он меняется каждую
         правку и не должен плодить 40-МБ файлы на диске.
+
+        ``overlay`` — правки проекта: локализация читается из XML-черновиков,
+        поэтому название и описание совпадают с отображаемым текстом ещё до
+        сохранения патча.
         """
+        overlay = self._effective_overlay(overlay)
         root = self.find_root(forest)
         cfg = config_dir or getattr(forest, "scan_dir", None)
 
-        loc_signature = ""
-        if self._localization is not None:
-            try:
-                loc_signature = self._localization.signature(forest)
-            except Exception:
-                loc_signature = ""
+        loc_signature = self._localization_signature(forest, overlay)
+        overlay_key = project_overlay_signature(overlay)
 
         cache_target = self._cache
+        if overlay is not None:
+            cache_target = self._text_cache
 
         if resolved_text is None:
             if root is None:
@@ -293,8 +340,12 @@ class ItemCatalogService:
                     ),
                 )
 
-            cache_key, catalog_key = self._snapshot_key(forest, root)
-            cached = self._cache.get(cache_key)
+            cache_key, catalog_key = self._snapshot_key(
+                forest,
+                root,
+                overlay,
+            )
+            cached = cache_target.get(cache_key)
             if cached is not None:
                 if log:
                     log("Предметы: кэш снимка %s" % root.name)
@@ -332,7 +383,11 @@ class ItemCatalogService:
         else:
             text = str(resolved_text)
 
-            if reuse_snapshot_cache and root is not None:
+            if (
+                reuse_snapshot_cache
+                and root is not None
+                and overlay is None
+            ):
                 cache_key, catalog_key = self._snapshot_key(forest, root)
                 cache_target = self._cache
 
@@ -351,11 +406,12 @@ class ItemCatalogService:
                     text_digest,
                     path_key(root) if root is not None else "",
                     loc_signature,
+                    overlay_key,
                 )
                 catalog_key = text_digest
                 cache_target = self._text_cache
 
-                cached = self._text_cache.get(cache_key)
+                cached = cache_target.get(cache_key)
                 if cached is not None:
                     if log:
                         log("Предметы: кэш текста проекта")
@@ -370,10 +426,11 @@ class ItemCatalogService:
         localization = None
         if self._localization is not None:
             try:
-                localization = self._localization.load(
+                localization = self._load_localization(
                     forest,
-                    config_dir=cfg,
-                    log=log,
+                    cfg,
+                    log,
+                    overlay,
                 )
             except Exception as exc:
                 if log:
@@ -524,7 +581,26 @@ class ItemCatalogService:
             line_number=int(getattr(section, "line_number", 0) or 0),
             name_text=name_text,
             description_text=description_text,
+            name_key=name_key,
+            description_key=description_key,
+            name_source=self._localization_entry(localization, name_key),
+            description_source=self._localization_entry(
+                localization,
+                description_key,
+            ),
         )
+
+    @staticmethod
+    def _localization_entry(localization, key):
+        if localization is None or not key:
+            return None
+        getter = getattr(localization, "entry", None)
+        if not callable(getter):
+            return None
+        try:
+            return getter(key)
+        except Exception:
+            return None
 
     # -------------------------------------------------- один предмет
 
@@ -534,6 +610,7 @@ class ItemCatalogService:
         resolved_text,
         section,
         log=None,
+        overlay=None,
     ) -> Optional[ItemRecord]:
         """Собрать одну запись предмета из текущего resolved-текста.
 
@@ -552,6 +629,7 @@ class ItemCatalogService:
             section,
             offset=offset,
             log=log,
+            overlay=overlay,
         )
 
     def build_entry_from_block(
@@ -561,8 +639,10 @@ class ItemCatalogService:
         section,
         offset=0,
         log=None,
+        overlay=None,
     ) -> Optional[ItemRecord]:
         """Собрать запись предмета из готового блока секции."""
+        overlay = self._effective_overlay(overlay)
         document = parse_ltx_document(str(block_text or ""))
         model = document.section(section)
         if model is None:
@@ -575,6 +655,7 @@ class ItemCatalogService:
             forest,
             getattr(forest, "scan_dir", None),
             log,
+            overlay,
         )
         record = self._record_for_section(
             model.name,
@@ -637,15 +718,29 @@ class ItemCatalogService:
         offset = text.count("\n", 0, match.start())
         return text[match.start():end], offset
 
-    def _load_localization(self, forest, cfg, log=None):
+    def _load_localization(self, forest, cfg, log=None, overlay=None):
         if self._localization is None:
             return None
         try:
-            return self._localization.load(
-                forest,
-                config_dir=cfg,
-                log=log,
-            )
+            if overlay is None:
+                return self._localization.load(
+                    forest,
+                    config_dir=cfg,
+                    log=log,
+                )
+            try:
+                return self._localization.load(
+                    forest,
+                    config_dir=cfg,
+                    log=log,
+                    overlay=overlay,
+                )
+            except TypeError:
+                return self._localization.load(
+                    forest,
+                    config_dir=cfg,
+                    log=log,
+                )
         except Exception as exc:
             if log:
                 log("Предметы: локализация недоступна: %s" % exc)

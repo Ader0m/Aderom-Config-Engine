@@ -330,6 +330,20 @@ class ItemField:
 
 
 @dataclass(frozen=True)
+class LocalizationString:
+    """Победившее объявление строки локализации.
+
+    ``path`` — XML-документ (включая ``#include``-фрагмент), в котором
+    записан текст; ``line`` — строка в этом документе.
+    """
+
+    key: str
+    text: str = ""
+    path: Optional[Path] = None
+    line: int = 0
+
+
+@dataclass(frozen=True)
 class ItemEntry:
     """Предмет из корневого файла предметов (``items.ltx``).
 
@@ -350,6 +364,11 @@ class ItemEntry:
     # Готовый текст из configs/text/<lang>, а не ключ локализации.
     name_text: str = ""
     description_text: str = ""
+    # Ключи inv_name/description и XML-объявления для их правки.
+    name_key: str = ""
+    description_key: str = ""
+    name_source: Optional[LocalizationString] = None
+    description_source: Optional[LocalizationString] = None
 
     def field(self, name: str, default: Optional[str] = None) -> Optional[str]:
         """Значение поля без учёта регистра ключа."""
@@ -669,6 +688,7 @@ class CoreApi(Protocol):
         log: Optional[Callable[[str], None]] = None,
         resolved_text: Optional[str] = None,
         reuse_snapshot_cache: bool = False,
+        overlay: Optional[ProjectOverlay] = None,
     ) -> ItemCatalog:
         """Собрать каталог предметов из резолва ``system.ltx``.
 
@@ -678,6 +698,10 @@ class CoreApi(Protocol):
 
         ``resolved_text`` — готовый текст (черновик проекта); тогда резолв
         не выполняется, а кэш ключуется хэшем текста.
+
+        ``overlay`` — правки проекта: названия и описания читаются из
+        XML-черновиков, поэтому карточка показывает те же данные, которые
+        попадут в патч.
         """
 
     def build_item_entry(
@@ -686,6 +710,7 @@ class CoreApi(Protocol):
         resolved_text: str,
         section: str,
         log: Optional[Callable[[str], None]] = None,
+        overlay: Optional[ProjectOverlay] = None,
     ) -> Optional[ItemEntry]:
         """Собрать один предмет из текущего resolved-текста.
 
@@ -701,8 +726,17 @@ class CoreApi(Protocol):
         section: str,
         offset: int = 0,
         log: Optional[Callable[[str], None]] = None,
+        overlay: Optional[ProjectOverlay] = None,
     ) -> Optional[ItemEntry]:
         """Собрать предмет из готового блока секции и смещения строк."""
+
+    def edit_localization_text(self, text: str, key: str, value: str):
+        """Изменить ``<text>`` строки ``<string id="key">`` в XML.
+
+        Возвращает новый текст XML или ``None``, если документ не похож
+        на строковую таблицу. Остальные строки и форматирование не
+        меняются; результат затем записывается в черновик проекта.
+        """
 
     def read_texture_region(
         self,
@@ -909,6 +943,22 @@ class UiApi(Protocol):
     def write_project_text(self, path: Path, text: str) -> bool:
         """Записать текст в черновик проекта, не меняя оригинальный файл."""
 
+    def write_project_text_async(
+        self,
+        path: Path,
+        text: str,
+        on_done=None,
+        original_text: Optional[str] = None,
+    ) -> bool:
+        """Записать текстовый черновик в фоновом потоке.
+
+        На один файл одновременно выполняется только одна запись;
+        повторные вызовы для того же пути ставятся в очередь, и
+        сохраняется последний текст. ``on_done(ok, error)`` вызывается в
+        UI-потоке после завершения записи. ``original_text`` позволяет
+        не перечитывать исходный файл при создании первого черновика.
+        """
+
     def write_project_texts(self, files) -> bool:
         """Атомарно записать несколько текстовых черновиков проекта."""
 
@@ -982,6 +1032,9 @@ class UiApi(Protocol):
 
     def set_editor_tab_dirty(self, tab_id: str, dirty: bool) -> None:
         """Пометить вкладку модуля как изменённую/сохранённую."""
+
+    def set_editor_tab_busy(self, tab_id: str, busy: bool) -> None:
+        """Показать/снять «часики» сохранения на вкладке модуля."""
 
     def resolved_draft(self, tab_id: str) -> Optional[ResolvedDraftInfo]:
         """Текущий resolved-черновик проекта по id вкладки."""

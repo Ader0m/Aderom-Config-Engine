@@ -22,6 +22,7 @@ from .api import (
     ItemField,
     ItemIcon,
     ItemSection,
+    LocalizationString,
     ProjectSetting,
     ProjectSettingChoice,
     SectionGraph,
@@ -34,6 +35,22 @@ from .api import (
 
 
 _SDK_API_MARKER = "_sdk_api_kind"
+
+
+def _to_localization_string(value):
+    if value is None:
+        return None
+
+    path = getattr(value, "path", None)
+    if path is not None:
+        path = Path(path)
+
+    return LocalizationString(
+        key=str(getattr(value, "key", "") or ""),
+        text=str(getattr(value, "text", "") or ""),
+        path=path,
+        line=int(getattr(value, "line", 0) or 0),
+    )
 
 
 def _to_item_entry(item) -> ItemEntry:
@@ -68,6 +85,16 @@ def _to_item_entry(item) -> ItemEntry:
         name_text=str(getattr(item, "name_text", "") or ""),
         description_text=str(
             getattr(item, "description_text", "") or ""
+        ),
+        name_key=str(getattr(item, "name_key", "") or ""),
+        description_key=str(
+            getattr(item, "description_key", "") or ""
+        ),
+        name_source=_to_localization_string(
+            getattr(item, "name_source", None)
+        ),
+        description_source=_to_localization_string(
+            getattr(item, "description_source", None)
         ),
     )
 
@@ -382,12 +409,14 @@ class CoreApiAdapter:
         log=None,
         resolved_text=None,
         reuse_snapshot_cache=False,
+        overlay=None,
     ):
         raw = self._provider.build_item_catalog(
             forest,
             log=log,
             resolved_text=resolved_text,
             reuse_snapshot_cache=reuse_snapshot_cache,
+            overlay=overlay,
         )
 
         source_path = getattr(raw, "source_path", None)
@@ -427,12 +456,20 @@ class CoreApiAdapter:
 
 
 
-    def build_item_entry(self, forest, resolved_text, section, log=None):
+    def build_item_entry(
+        self,
+        forest,
+        resolved_text,
+        section,
+        log=None,
+        overlay=None,
+    ):
         raw = self._provider.build_item_entry(
             forest,
             resolved_text,
             section,
             log=log,
+            overlay=overlay,
         )
         if raw is None:
             return None
@@ -445,6 +482,7 @@ class CoreApiAdapter:
         section,
         offset=0,
         log=None,
+        overlay=None,
     ):
         raw = self._provider.build_item_entry_from_block(
             forest,
@@ -452,10 +490,14 @@ class CoreApiAdapter:
             section,
             offset=offset,
             log=log,
+            overlay=overlay,
         )
         if raw is None:
             return None
         return _to_item_entry(raw)
+
+    def edit_localization_text(self, text, key, value):
+        return self._provider.edit_localization_text(text, key, value)
 
     def read_texture_region(self, path, x, y, width, height):
         raw = self._provider.read_texture_region(path, x, y, width, height)
@@ -795,6 +837,31 @@ class UiApiAdapter:
     def write_project_text(self, path, text):
         return self._platform.write_project_text(path, text)
 
+    def write_project_text_async(
+        self,
+        path,
+        text,
+        on_done=None,
+        original_text=None,
+    ):
+        fn = getattr(
+            self._platform,
+            "write_project_text_async",
+            None,
+        )
+        if not callable(fn):
+            if on_done is not None:
+                on_done(False, "Асинхронная запись недоступна")
+            return False
+        return bool(
+            fn(
+                path,
+                text,
+                on_done=on_done,
+                original_text=original_text,
+            )
+        )
+
     def write_project_texts(self, files):
         return self._platform.write_project_texts(files)
 
@@ -923,6 +990,12 @@ class UiApiAdapter:
 
     def set_editor_tab_dirty(self, tab_id, dirty):
         return self._platform.set_editor_tab_dirty(tab_id, dirty)
+
+    def set_editor_tab_busy(self, tab_id, busy):
+        fn = getattr(self._platform, "set_editor_tab_busy", None)
+        if not callable(fn):
+            return None
+        return fn(tab_id, busy)
 
     def resolved_draft(self, tab_id):
         return self._platform.resolved_draft(tab_id)

@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import inspect
 import re
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from sdk import (
     DEFAULT_SEARCH_DELAY_MS,
     ITEM_SECTION_MIME,
     encode_item_section,
+    path_key as sdk_path_key,
     same_path as sdk_same_path,
 )
 from sdk.events import Events
@@ -70,8 +72,8 @@ from PyQt5.QtWidgets import (
     QListWidgetItem,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
-    QScrollArea,
     QShortcut,
     QSplitter,
     QTableWidget,
@@ -251,6 +253,48 @@ def _placeholder_pixmap(color: str, size: int = PLACEHOLDER_SIZE) -> QPixmap:
     painter.end()
 
     return pixmap
+
+
+def _call_with_overlay(func, *args, overlay=None, **kwargs):
+    """Передать ``overlay`` только тем сервисам, которые его понимают."""
+    if overlay is not None:
+        try:
+            parameters = inspect.signature(func).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+
+        accepts = "overlay" in parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+        if accepts:
+            kwargs["overlay"] = overlay
+    return func(*args, **kwargs)
+
+
+def _call_async_text_save(
+    writer,
+    path,
+    text,
+    on_done,
+    original_text=None,
+):
+    """Вызвать асинхронную запись, передав необязательный original_text."""
+    kwargs = {"on_done": on_done}
+    if original_text is not None:
+        try:
+            parameters = inspect.signature(writer).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+
+        accepts = "original_text" in parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        )
+        if accepts:
+            kwargs["original_text"] = original_text
+
+    return bool(writer(path, text, **kwargs))
 
 
 def _project_tag(name) -> str:
@@ -704,6 +748,11 @@ class ItemViewerFeature:
         self._card_retains = set()
         self._retained = set()
 
+        # Фоновые сохранения текста: не более одной задачи на файл.
+        self._text_save_jobs = {}
+        self._text_save_seq = 0
+        self._disposed = False
+
         self._pending_sections = set()
         self._pending_cards = set()
         self._pending_full = False
@@ -760,6 +809,7 @@ class ItemViewerFeature:
 
     # -------------------------------------------------- жизненный цикл
     def show(self):
+        self._disposed = False
         if not self.session.has_tree:
             self.ctx.ui.show_error(
                 "Дерево не построено: сначала «Пересобрать VFS»."
@@ -819,10 +869,12 @@ class ItemViewerFeature:
                 )
                 original = draft.original_text or original_text
                 saved = draft.saved_text
-                catalog = self.ctx.services.build_item_catalog(
+                catalog = _call_with_overlay(
+                    self.ctx.services.build_item_catalog,
                     forest,
                     log=log,
                     resolved_text=text,
+                    overlay=overlay,
                 )
             else:
                 text = original_text
@@ -830,16 +882,20 @@ class ItemViewerFeature:
                 original = original_text
                 saved = original_text
                 if original_text:
-                    catalog = self.ctx.services.build_item_catalog(
+                    catalog = _call_with_overlay(
+                        self.ctx.services.build_item_catalog,
                         forest,
                         log=log,
                         resolved_text=original_text,
                         reuse_snapshot_cache=not has_overlay,
+                        overlay=overlay,
                     )
                 else:
-                    catalog = self.ctx.services.build_item_catalog(
+                    catalog = _call_with_overlay(
+                        self.ctx.services.build_item_catalog,
                         forest,
                         log=log,
+                        overlay=overlay,
                     )
 
             line_count = text.count("\n") + 1
@@ -876,6 +932,11 @@ class ItemViewerFeature:
         )
 
     def close(self):
+        self._disposed = True
+        for job in list(self._text_save_jobs.values()):
+            self._set_save_busy(job, False)
+        self._text_save_jobs.clear()
+
         if self._window is not None:
             self.ctx.ui.close_module_window(self.WINDOW_KEY)
             self._window = None
@@ -993,6 +1054,14 @@ class ItemViewerFeature:
                         section,
                         old_key,
                         new_key,
+                        value,
+                    )
+                ),
+                on_text_edit=lambda section, field, value: (
+                    self._apply_item_text(
+                        self._tab_id,
+                        section,
+                        field,
                         value,
                     )
                 ),
@@ -1280,6 +1349,14 @@ class ItemViewerFeature:
                     value,
                 )
             ),
+            on_text_edit=lambda section, field, value: (
+                self._apply_item_text(
+                    tab_id,
+                    section,
+                    field,
+                    value,
+                )
+            ),
             on_go_to_line=lambda line: self._go_to_line(tab_id, line),
             on_save=self._save_now,
             on_undo=lambda: self.ctx.ui.undo_resolved_document(tab_id),
@@ -1445,6 +1522,364 @@ class ItemViewerFeature:
                 % (old_key, section)
             )
         return ok
+
+    def _apply_item_text(self, tab_id, section, field, value):
+        """Изменить название/описание через XML строковой таблицы.
+
+        Правка идёт в тот XML-документ, который дал текущий перевод, и
+        попадает в проектный черновик. Дальше с ним работает обычный
+        XML-конвейер проекта (DXML-Lua / XML / Override), поэтому
+        отображаемый текст и сохраняемый патч остаются согласованными.
+        """
+        if not self._can_edit_tab(tab_id):
+            self.ctx.ui.show_error(
+                "Создайте проект, чтобы изменять название и описание."
+            )
+            return False
+
+        entry = self._item_entry(tab_id, section)
+        if entry is None:
+            self.ctx.ui.show_error(
+                "Секция [%s] не является предметом." % section
+            )
+            return False
+
+        if str(field).lower() == "name":
+            source = getattr(entry, "name_source", None)
+            label = "названия"
+        else:
+            source = getattr(entry, "description_source", None)
+            label = "описания"
+
+        if source is None or getattr(source, "path", None) is None:
+            self.ctx.ui.show_error(
+                "Не найден ключ локализации для %s секции [%s]."
+                % (label, section)
+            )
+            return False
+
+        path = Path(source.path)
+        key = str(getattr(source, "key", "") or "")
+        if not key:
+            self.ctx.ui.show_error(
+                "У строки локализации отсутствует id."
+            )
+            return False
+
+        reader = getattr(self.ctx.ui, "read_project_text", None)
+        writer = getattr(self.ctx.ui, "write_project_text", None)
+        async_writer = getattr(
+            self.ctx.ui,
+            "write_project_text_async",
+            None,
+        )
+        editor = getattr(self.ctx.services, "edit_localization_text", None)
+        if not callable(reader) or not callable(editor):
+            self.ctx.ui.show_error(
+                "Платформа не предоставляет доступ к черновикам XML."
+            )
+            return False
+
+        current = reader(path)
+        updated = editor(
+            current,
+            key,
+            str(value or ""),
+        )
+        if updated is None:
+            self.ctx.ui.show_error(
+                "Не удалось найти строку %s в %s."
+                % (key, Path(path).name)
+            )
+            return False
+
+        if updated == current:
+            return True
+
+        if callable(async_writer):
+            return self._start_item_text_save(
+                tab_id,
+                section,
+                path,
+                key,
+                label,
+                current,
+                updated,
+            )
+
+        if not callable(writer):
+            self.ctx.ui.show_error(
+                "Платформа не предоставляет запись черновиков XML."
+            )
+            return False
+
+        if not writer(path, updated):
+            return False
+
+        self.ctx.ui.log(
+            "Проект: изменён текст %s (%s) в %s"
+            % (key, label, Path(path).name)
+        )
+        self.ctx.ui.set_status(
+            "Текст предмета записан в черновик XML: %s" % Path(path).name,
+            5000,
+        )
+        self._refresh_item_text(tab_id, section)
+        return True
+
+    def _text_save_cards(self, tab_id, section):
+        """Карточки, которые показывают сохраняемый предмет."""
+        wanted = str(section or "").lower()
+        cards = []
+
+        for card_tab_id, record in list(self._cards.items()):
+            root_tab, card_section, card = record
+            if (
+                root_tab == tab_id
+                and card_section.lower() == wanted
+            ):
+                cards.append((card_tab_id, card))
+
+        if (
+            self._window is not None
+            and self._window.card.section().lower() == wanted
+        ):
+            cards.append((None, self._window.card))
+
+        return cards
+
+    def _set_save_busy(self, job, busy):
+        """Показать/снять «часы» и блокировку ввода на карточках."""
+        for card_tab_id, card in job.get("cards", ()):
+            try:
+                card.set_saving(busy)
+            except Exception:
+                pass
+
+            if card_tab_id:
+                setter = getattr(
+                    self.ctx.ui,
+                    "set_editor_tab_busy",
+                    None,
+                )
+                if callable(setter):
+                    try:
+                        setter(card_tab_id, bool(busy))
+                    except Exception:
+                        pass
+
+    def _start_item_text_save(
+        self,
+        tab_id,
+        section,
+        path,
+        key,
+        label,
+        current,
+        updated,
+    ):
+        """Поставить запись XML в очередь и заблокировать представления."""
+        path = Path(path)
+        path_key = sdk_path_key(path)
+
+        if path_key in self._text_save_jobs:
+            self.ctx.ui.set_status(
+                "Файл уже сохраняется: %s" % path.name,
+                5000,
+            )
+            return False
+
+        writer = getattr(
+            self.ctx.ui,
+            "write_project_text_async",
+            None,
+        )
+        if not callable(writer):
+            return False
+
+        self._text_save_seq += 1
+        job = {
+            "token": self._text_save_seq,
+            "tab_id": str(tab_id or ""),
+            "section": str(section or ""),
+            "path": path,
+            "key": key,
+            "label": label,
+            "text": updated,
+            "cards": self._text_save_cards(tab_id, section),
+        }
+        self._text_save_jobs[path_key] = job
+        self._set_save_busy(job, True)
+        self.ctx.ui.set_status(
+            "Сохранение текста: %s…" % path.name,
+        )
+
+        def done(ok, error):
+            self._on_item_text_saved(job, bool(ok), error)
+
+        try:
+            started = _call_async_text_save(
+                writer,
+                path,
+                updated,
+                done,
+                current,
+            )
+        except Exception as exc:
+            started = False
+            self.ctx.ui.log(
+                "Предметы: не удалось запустить сохранение %s: %s"
+                % (path.name, exc)
+            )
+
+        if not started:
+            if self._text_save_jobs.get(path_key) is job:
+                self._text_save_jobs.pop(path_key, None)
+            self._set_save_busy(job, False)
+            self.ctx.ui.show_error(
+                "Не удалось запустить сохранение XML %s." % path.name
+            )
+            return False
+        return True
+
+    def _on_item_text_saved(self, job, ok, error):
+        if self._disposed:
+            return
+
+        path = Path(job["path"])
+        if not ok:
+            if error:
+                self.ctx.ui.show_error(
+                    "Не удалось сохранить XML %s:\n%s"
+                    % (path.name, error)
+                )
+            self.ctx.ui.set_status(
+                "Ошибка сохранения текста: %s" % path.name,
+                5000,
+            )
+            self._apply_item_text_entry(
+                job,
+                self._item_entry(job["tab_id"], job["section"]),
+            )
+            self._finish_item_text_save(job)
+            return
+
+        self.ctx.ui.log(
+            "Проект: изменён текст %s (%s) в %s"
+            % (job["key"], job["label"], path.name)
+        )
+        self.ctx.ui.set_status(
+            "Текст предмета сохранён в XML: %s" % path.name,
+            5000,
+        )
+        self._refresh_item_text_async(job)
+
+    def _refresh_item_text_async(self, job):
+        """Пересобрать карточку без блокировки UI-потока."""
+        tab_id = job["tab_id"]
+        section = job["section"]
+
+        forest = None
+        if self.session is not None:
+            forest = getattr(self.session, "forest", None)
+
+        draft = None
+        try:
+            draft = self.ctx.ui.resolved_draft(tab_id)
+        except Exception:
+            draft = None
+
+        run = getattr(getattr(self.ctx, "tasks", None), "run", None)
+        overlay = self._project_overlay()
+
+        if (
+            forest is not None
+            and draft is not None
+            and callable(run)
+        ):
+            text = draft.text
+            builder = getattr(
+                self.ctx.services,
+                "build_item_entry",
+                None,
+            )
+
+            def work(_log):
+                return _call_with_overlay(
+                    builder,
+                    forest,
+                    text,
+                    section,
+                    overlay=overlay,
+                )
+
+            try:
+                run(
+                    work,
+                    on_done=lambda entry, error: (
+                        self._on_item_text_refreshed(job, entry, error)
+                    ),
+                )
+                return
+            except Exception as exc:
+                self.ctx.ui.log(
+                    "Предметы: фоновая пересборка карточки недоступна: %s"
+                    % exc
+                )
+
+        self._apply_item_text_entry(
+            job,
+            self._item_entry(tab_id, section),
+        )
+        self._finish_item_text_save(job)
+
+    def _on_item_text_refreshed(self, job, entry, error):
+        if self._disposed:
+            return
+
+        if error is not None:
+            self.ctx.ui.log(
+                "Предметы: не удалось обновить карточку после сохранения: %s"
+                % error
+            )
+            entry = self._item_entry(job["tab_id"], job["section"])
+
+        self._apply_item_text_entry(job, entry)
+        self._finish_item_text_save(job)
+
+    def _apply_item_text_entry(self, job, entry):
+        section = job["section"]
+        if self._window is not None:
+            try:
+                self._window.update_section(section, entry)
+            except Exception:
+                pass
+
+        for _card_tab_id, card in job.get("cards", ()):
+            try:
+                if card.section().lower() == str(section).lower():
+                    card.refresh(entry)
+            except Exception:
+                pass
+
+    def _finish_item_text_save(self, job):
+        path_key = sdk_path_key(job["path"])
+        current = self._text_save_jobs.get(path_key)
+        if current is not None and current.get("token") == job.get("token"):
+            self._text_save_jobs.pop(path_key, None)
+            self._set_save_busy(job, False)
+
+    def _refresh_item_text(self, tab_id, section):
+        entry = self._item_entry(tab_id, section)
+        if self._window is not None:
+            self._window.update_section(section, entry)
+        for record in list(self._cards.values()):
+            root_tab, card_section, card = record
+            if (
+                root_tab == tab_id
+                and card_section.lower() == str(section).lower()
+            ):
+                card.refresh()
 
     def _replace_line(self, tab_id, line_number, new_line):
         if self._new_file_for_line(tab_id, line_number) is not None:
@@ -1705,6 +2140,141 @@ class ItemViewerFeature:
         self.show()
 
 
+class ClickToEditLineEdit(QLineEdit):
+    """Название выглядит как подпись, пока пользователь не кликнул."""
+
+    _IDLE_STYLE = (
+        "QLineEdit { background: transparent; border: none; "
+        "padding: 0; font-weight: 600; }"
+    )
+    _EDIT_STYLE = (
+        "QLineEdit { background: palette(base); "
+        "border: 1px solid palette(mid); padding: 2px; "
+        "font-weight: 600; }"
+    )
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._edit_allowed = False
+        self._editing = False
+        self.setFrame(False)
+        self.setReadOnly(True)
+        self.setStyleSheet(self._IDLE_STYLE)
+
+    def set_edit_allowed(self, allowed):
+        self._edit_allowed = bool(allowed)
+        self.end_editing()
+        self.setCursor(
+            Qt.IBeamCursor if self._edit_allowed else Qt.ArrowCursor
+        )
+
+    def is_editing(self):
+        return self._editing
+
+    def begin_editing(self):
+        if not self._edit_allowed:
+            return
+        self._editing = True
+        self.setReadOnly(False)
+        self.setStyleSheet(self._EDIT_STYLE)
+        self.setFocus(Qt.MouseFocusReason)
+
+    def end_editing(self):
+        self._editing = False
+        self.setReadOnly(True)
+        self.setStyleSheet(self._IDLE_STYLE)
+
+    def mousePressEvent(self, event):
+        if (
+            self._edit_allowed
+            and not self._editing
+            and event.button() == Qt.LeftButton
+        ):
+            self.begin_editing()
+        super().mousePressEvent(event)
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        if self._editing:
+            self.end_editing()
+
+
+class LocalizedDescriptionEdit(QPlainTextEdit):
+    """Описание выглядит как подпись, пока пользователь не кликнул.
+
+    ``QPlainTextEdit`` не имеет ``editingFinished``; карточке нужно
+    зафиксировать правку при потере фокуса или по Ctrl+Enter, не записывая
+    XML на каждый символ.
+    """
+
+    editing_finished = pyqtSignal()
+
+    _IDLE_STYLE = (
+        "QPlainTextEdit { background: transparent; border: none; }"
+    )
+    _EDIT_STYLE = (
+        "QPlainTextEdit { background: palette(base); "
+        "border: 1px solid palette(mid); }"
+    )
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._edit_allowed = False
+        self._editing = False
+        self.setFrameShape(QFrame.NoFrame)
+        self.setReadOnly(True)
+        self.setStyleSheet(self._IDLE_STYLE)
+
+    def set_edit_allowed(self, allowed):
+        self._edit_allowed = bool(allowed)
+        self.end_editing()
+        self.setCursor(
+            Qt.IBeamCursor if self._edit_allowed else Qt.ArrowCursor
+        )
+
+    def is_editing(self):
+        return self._editing
+
+    def begin_editing(self):
+        if not self._edit_allowed:
+            return
+        self._editing = True
+        self.setReadOnly(False)
+        self.setStyleSheet(self._EDIT_STYLE)
+        self.setFocus(Qt.MouseFocusReason)
+
+    def end_editing(self):
+        self._editing = False
+        self.setReadOnly(True)
+        self.setStyleSheet(self._IDLE_STYLE)
+
+    def mousePressEvent(self, event):
+        if (
+            self._edit_allowed
+            and not self._editing
+            and event.button() == Qt.LeftButton
+        ):
+            self.begin_editing()
+        super().mousePressEvent(event)
+
+    def focusOutEvent(self, event):
+        was_editing = self._editing
+        super().focusOutEvent(event)
+        if was_editing:
+            self.end_editing()
+            self.editing_finished.emit()
+
+    def keyPressEvent(self, event):
+        if (
+            event.key() in (Qt.Key_Return, Qt.Key_Enter)
+            and event.modifiers() & Qt.ControlModifier
+        ):
+            self.editing_finished.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class ItemCardView(QWidget):
     """Карточка предмета.
 
@@ -1723,6 +2293,7 @@ class ItemCardView(QWidget):
         on_insert_line=None,
         on_field_edit=None,
         on_field_rename=None,
+        on_text_edit=None,
         on_go_to_line=None,
         on_save=None,
         on_undo=None,
@@ -1745,6 +2316,7 @@ class ItemCardView(QWidget):
         self._on_insert_line = on_insert_line
         self._on_field_edit = on_field_edit
         self._on_field_rename = on_field_rename
+        self._on_text_edit = on_text_edit
         self._on_go_to_line = on_go_to_line
         self._on_save = on_save
         self._on_undo = on_undo
@@ -1759,6 +2331,10 @@ class ItemCardView(QWidget):
         self._preview = bool(preview)
         self._entry = None
         self._populating_fields = False
+        self._populating_text = False
+        self._saving = False
+        self._shown_name = ""
+        self._shown_description = ""
 
         self._placeholder = _placeholder_pixmap(
             self._palette("text_muted", "#787878")
@@ -1833,8 +2409,9 @@ class ItemCardView(QWidget):
         header.addWidget(self.icon_label, 0, Qt.AlignTop)
 
         text_block = QVBoxLayout()
-        self.name_label = QLabel()
-        self.name_label.setWordWrap(True)
+        self.name_label = ClickToEditLineEdit()
+        self.name_label.setPlaceholderText("Название предмета")
+        self.name_label.editingFinished.connect(self._apply_name_text)
         text_block.addWidget(self.name_label)
 
         self.meta_label = QLabel()
@@ -1855,21 +2432,15 @@ class ItemCardView(QWidget):
         self.description_caption.setProperty("role", "muted")
         description_layout.addWidget(self.description_caption)
 
-        self.description_label = QLabel()
-        self.description_label.setWordWrap(True)
-        self.description_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self.description_label.setTextInteractionFlags(
-            Qt.TextSelectableByMouse
+        self.description_label = LocalizedDescriptionEdit()
+        self.description_label.setPlaceholderText("Описание предмета")
+        self.description_label.setToolTip(
+            "Клик — редактировать. Потеря фокуса или Ctrl+Enter — применить."
         )
-
-        self.description_scroll = QScrollArea()
-        self.description_scroll.setWidgetResizable(True)
-        self.description_scroll.setFrameShape(QFrame.NoFrame)
-        self.description_scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarAlwaysOff
+        self.description_label.editing_finished.connect(
+            self._apply_description_text
         )
-        self.description_scroll.setWidget(self.description_label)
-        description_layout.addWidget(self.description_scroll, 1)
+        description_layout.addWidget(self.description_label, 1)
 
         self.fields_table = QTableWidget(0, 2)
         self.fields_table.setHorizontalHeaderLabels(["Поле", "Значение"])
@@ -1987,18 +2558,62 @@ class ItemCardView(QWidget):
 
         self.section_label.setText("[%s]" % entry.section)
 
-        name = entry.name_text or entry.field("inv_name") or entry.section
-        description = (
-            entry.description_text
-            or entry.field("description")
-            or ""
+        editable = bool(self._can_edit())
+        name_source = getattr(entry, "name_source", None)
+        description_source = getattr(entry, "description_source", None)
+        name_editable = (
+            editable
+            and name_source is not None
+            and getattr(name_source, "path", None) is not None
         )
-        self.name_label.setText(name)
-        self.name_label.setToolTip(name)
+        description_editable = (
+            editable
+            and description_source is not None
+            and getattr(description_source, "path", None) is not None
+        )
 
-        has_description = bool(description.strip())
-        self.description_panel.setVisible(has_description)
-        self.description_label.setText(description)
+        if name_source is not None:
+            # Строка существует, даже если её текст пока пуст: не
+            # показываем вместо названия сырой ключ локализации.
+            name = entry.name_text
+        else:
+            name = entry.name_text or entry.field("inv_name") or entry.section
+
+        if description_source is not None:
+            description = entry.description_text
+        else:
+            description = (
+                entry.description_text
+                or entry.field("description")
+                or ""
+            )
+
+        self._populating_text = True
+        try:
+            self.name_label.setText(name)
+            self.name_label.set_edit_allowed(name_editable)
+            self.name_label.setToolTip(
+                self._text_source_tooltip(name, name_source)
+            )
+
+            has_description = bool(description.strip()) or (
+                description_editable
+            )
+            self.description_panel.setVisible(has_description)
+            self.description_label.setPlainText(description)
+            self.description_label.set_edit_allowed(
+                description_editable
+            )
+            self.description_label.setToolTip(
+                self._text_source_tooltip(
+                    "Описание",
+                    description_source,
+                )
+            )
+            self._shown_name = name
+            self._shown_description = description
+        finally:
+            self._populating_text = False
 
         kind = entry.field("kind") or "—"
         texture = entry.field("icons_texture") or entry.icon_texture
@@ -2028,7 +2643,6 @@ class ItemCardView(QWidget):
         self.fields_table.clearContents()
         self.fields_table.setRowCount(len(entry.fields))
 
-        editable = bool(self._can_edit())
         any_editable = False
 
         for row, field in enumerate(entry.fields):
@@ -2060,15 +2674,107 @@ class ItemCardView(QWidget):
         self.fields_table.setUpdatesEnabled(True)
         self._populating_fields = False
 
+    @staticmethod
+    def _text_source_tooltip(text, source):
+        path = getattr(source, "path", None)
+        key = str(getattr(source, "key", "") or "")
+        if path is None:
+            return str(text or "")
+        return "%s\n\nXML: %s\nid: %s" % (text, path, key)
+
+    def set_saving(self, saving):
+        """Заблокировать ввод и показать «часы» на время записи XML."""
+        self._saving = bool(saving)
+        if self._saving:
+            self.name_label.end_editing()
+            self.description_label.end_editing()
+        widgets = (
+            self.name_label,
+            self.description_label,
+            self.fields_table,
+            self.save_btn,
+            self.open_doc_btn,
+            self.open_tab_btn,
+        )
+        for widget in widgets:
+            if widget is None:
+                continue
+            try:
+                widget.setEnabled(not self._saving)
+                if self._saving:
+                    widget.setCursor(Qt.WaitCursor)
+                else:
+                    widget.unsetCursor()
+            except RuntimeError:
+                pass
+
+        try:
+            if self._saving:
+                self.setCursor(Qt.WaitCursor)
+            else:
+                self.unsetCursor()
+        except RuntimeError:
+            pass
+
+    def _apply_name_text(self):
+        if self._saving or self._populating_text or self._entry is None:
+            return
+
+        value = self.name_label.text()
+        self.name_label.end_editing()
+        if value == self._shown_name:
+            return
+
+        if not self._can_edit() or self._on_text_edit is None:
+            self.refresh()
+            return
+
+        if self._on_text_edit(self._entry.section, "name", value):
+            self._shown_name = value
+            QTimer.singleShot(0, self.refresh)
+        else:
+            self.refresh()
+
+    def _apply_description_text(self):
+        if self._saving or self._populating_text or self._entry is None:
+            return
+
+        value = self.description_label.toPlainText()
+        self.description_label.end_editing()
+        if value == self._shown_description:
+            return
+
+        if not self._can_edit() or self._on_text_edit is None:
+            self.refresh()
+            return
+
+        if self._on_text_edit(
+            self._entry.section,
+            "description",
+            value,
+        ):
+            self._shown_description = value
+            QTimer.singleShot(0, self.refresh)
+        else:
+            self.refresh()
+
     def _clear_details(self):
-        self.icon_label.clear()
-        self.section_label.setText("—")
-        self.name_label.clear()
-        self.meta_label.clear()
-        self.description_label.clear()
-        self.description_panel.setVisible(False)
-        self.fields_table.clearContents()
-        self.fields_table.setRowCount(0)
+        self._populating_text = True
+        try:
+            self.icon_label.clear()
+            self.section_label.setText("—")
+            self.name_label.clear()
+            self.name_label.set_edit_allowed(False)
+            self.meta_label.clear()
+            self.description_label.clear()
+            self.description_label.set_edit_allowed(False)
+            self.description_panel.setVisible(False)
+            self.fields_table.clearContents()
+            self.fields_table.setRowCount(0)
+            self._shown_name = ""
+            self._shown_description = ""
+        finally:
+            self._populating_text = False
 
     # -------------------------------------------------- правка
     def _on_field_item_changed(self, item):
@@ -2266,6 +2972,7 @@ class ItemViewerWindow(QDialog):
         on_insert_line=None,
         on_field_edit=None,
         on_field_rename=None,
+        on_text_edit=None,
         on_go_to_line=None,
         on_save=None,
         on_create_item=None,
@@ -2289,6 +2996,7 @@ class ItemViewerWindow(QDialog):
         self._on_insert_line = on_insert_line
         self._on_field_edit = on_field_edit
         self._on_field_rename = on_field_rename
+        self._on_text_edit = on_text_edit
         self._on_go_to_line = on_go_to_line
         self._on_save = on_save
         self._on_create_item = on_create_item
@@ -2415,6 +3123,7 @@ class ItemViewerWindow(QDialog):
             on_insert_line=self._on_insert_line,
             on_field_edit=self._on_field_edit,
             on_field_rename=self._on_field_rename,
+            on_text_edit=self._on_text_edit,
             on_go_to_line=self._on_go_to_line,
             on_save=self._on_save,
             on_undo=self._on_undo,
@@ -2621,6 +3330,8 @@ class ItemViewerWindow(QDialog):
                 entry.field("inv_name") or "",
                 entry.field("description") or "",
                 entry.field("$spawn") or "",
+                getattr(entry, "name_text", "") or "",
+                getattr(entry, "description_text", "") or "",
             ]
         ).lower()
 

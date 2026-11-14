@@ -406,6 +406,7 @@ class CoreServices:
         log=None,
         resolved_text=None,
         reuse_snapshot_cache=False,
+        overlay=None,
     ):
         """Разобрать корневой файл предметов и вернуть каталог."""
         return self.items.build(
@@ -413,15 +414,24 @@ class CoreServices:
             log=log,
             resolved_text=resolved_text,
             reuse_snapshot_cache=reuse_snapshot_cache,
+            overlay=overlay,
         )
 
-    def build_item_entry(self, forest, resolved_text, section, log=None):
+    def build_item_entry(
+        self,
+        forest,
+        resolved_text,
+        section,
+        log=None,
+        overlay=None,
+    ):
         """Собрать один предмет из текущего resolved-текста."""
         return self.items.build_entry(
             forest,
             resolved_text,
             section,
             log=log,
+            overlay=overlay,
         )
 
     def build_item_entry_from_block(
@@ -431,6 +441,7 @@ class CoreServices:
         section,
         offset=0,
         log=None,
+        overlay=None,
     ):
         """Собрать один предмет из готового блока секции."""
         return self.items.build_entry_from_block(
@@ -439,7 +450,14 @@ class CoreServices:
             section,
             offset=offset,
             log=log,
+            overlay=overlay,
         )
+
+    def edit_localization_text(self, text, key, value):
+        """Изменить текст строки локализации в XML-документе."""
+        from core.items.localization import edit_localization_text
+
+        return edit_localization_text(text, key, value)
 
     def read_texture_region(self, path, x, y, width, height):
         """Декодировать прямоугольник DDS в RGBA (с кэшем регионов)."""

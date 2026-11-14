@@ -1,6 +1,6 @@
 generated
 src/generated
-projects
+/projects
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
