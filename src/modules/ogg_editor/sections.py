@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
+
+from sdk.paths import path_key
 
 _SECTION_RE = re.compile(r"^\[([^\]]+)\](?::.*)?$")
 _KEY_RE = re.compile(r"^([^=]+?)\s*=\s*(.*)$")
@@ -179,7 +180,7 @@ def _tokens(value: str):
 def _add_file(result: dict, path: Path):
     try:
         if path.is_file() and path.suffix.lower() == ".ogg":
-            key = os.path.normcase(os.path.abspath(str(path)))
+            key = path_key(path)
             result[key] = path
     except OSError:
         pass
@@ -293,7 +294,7 @@ def extract_sound_references(text, section, sounds_root, source_path=None):
             except OSError:
                 continue
 
-            key_norm = os.path.normcase(os.path.abspath(str(path)))
+            key_norm = path_key(path)
             entry = result.setdefault(
                 key_norm,
                 {"path": path, "items": []},

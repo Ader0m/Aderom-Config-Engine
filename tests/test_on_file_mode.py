@@ -15,7 +15,7 @@ from tests.support import SRC  # noqa: F401
 from core.patching.ltx.generator import DltxGenerator
 from core.patching.ltx.verifier import ModelPatchVerifier
 from core.patching.planner import PatchPlanner
-from ui.project import ProjectService
+from app.projects import ProjectService
 
 
 class Forest:
@@ -33,6 +33,11 @@ class Forest:
 class Services:
     def __init__(self):
         self.patch = PatchPlanner()
+
+    def plan_ltx_patch(self, *args, **kwargs):
+        from core.patching.ltx.service import LtxPatchService
+
+        return LtxPatchService(self).plan(*args, **kwargs)
 
     def generate_patch(self, plan):
         generated = DltxGenerator().generate(plan)

@@ -33,7 +33,7 @@ from core.resolver.service import ResolverService
 from core.tree.builder import TreeBuilder
 from core.tree.query import TreeQueryService
 from core.xml.service import XmlResolveService
-from ui.project import ProjectService
+from app.projects import ProjectService
 
 
 GAME_LTX = r'''#include "game_maps_single.ltx"

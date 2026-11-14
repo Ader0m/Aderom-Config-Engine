@@ -15,7 +15,7 @@ from core.patching.models import (
     VerificationCheck,
     VerificationResult,
 )
-from ui.project import ProjectService
+from app.projects import ProjectService
 
 
 class _Forest:
@@ -64,6 +64,13 @@ class _CountingServices:
             patch_mod="Test",
             patch_file_rel=Path("a.ltx"),
             changes=(object(),),
+        )
+
+    def plan_ltx_patch(self, *args, **kwargs):
+        plan = self._plan(args[0])
+        return PatchResult(
+            plan=plan,
+            generated=self.generate_patch(plan),
         )
 
     def plan_ltx_override(self, *args, **kwargs):

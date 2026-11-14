@@ -14,7 +14,7 @@ from core.resolver.service import ResolverService
 from core.tree.builder import TreeBuilder
 from core.tree.query import TreeQueryService
 from core.xml.service import XmlResolveService
-from ui.project import ProjectError, ProjectService
+from app.projects import ProjectError, ProjectService
 
 
 class ProjectServiceTest(unittest.TestCase):

@@ -10,13 +10,18 @@ from core.patching.ltx.in_place import LtxInPlaceService
 from core.patching.ltx.override import LtxOverrideService
 from core.patching.models import PatchOptions
 from core.patching.planner import PatchPlanner
-from ui.project import ProjectService
+from app.projects import ProjectService
 
 
 class InPlaceServices:
     def __init__(self):
         self.patch = PatchPlanner()
         self.ltx_in_place = LtxInPlaceService()
+
+    def plan_ltx_patch(self, *args, **kwargs):
+        from core.patching.ltx.service import LtxPatchService
+
+        return LtxPatchService(self).plan(*args, **kwargs)
 
     def plan_ltx_in_place(self, *args, **kwargs):
         return self.ltx_in_place.plan(*args, **kwargs)

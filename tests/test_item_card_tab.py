@@ -8,7 +8,7 @@ from tests.support import SRC  # noqa: F401
 from tests.qt_support import qapp
 from sdk.api import ItemEntry, ItemField
 from ui.bus import EventBus
-from ui.documents import ResolvedDocument
+from app.documents import ResolvedDocument
 from ui.editor_tabs import EditorTabs
 from modules.base_module.item_viewer import ItemCardView, ItemViewerFeature
 

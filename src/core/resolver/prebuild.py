@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import multiprocessing as mp
 import threading
+import time
 from pathlib import Path
 
 from core.tools.parallel import default_workers
@@ -55,7 +56,7 @@ def _default_workers():
     return default_workers("ACE_PREBUILD_WORKERS")
 
 
-def _init_worker(resolver_script, source_map, abs_map, overlay=None):
+def _init_worker(resolver_script, source_map, abs_map):
     """Инициализация процесса-воркера (один раз на процесс)."""
     from core.resolver.ltx import LtxResolverAdapter
 
@@ -65,18 +66,17 @@ def _init_worker(resolver_script, source_map, abs_map, overlay=None):
     )
     _WORKER_STATE["source_map"] = source_map
     _WORKER_STATE["abs_map"] = abs_map
-    _WORKER_STATE["overlay"] = overlay or {}
 
 
 def _worker_resolve(job):
     """Резолв одного LTX-корня в дочернем процессе."""
-    root_path, key = job
+    root_path, key, overlay = job
     try:
         value = _WORKER_STATE["adapter"].assemble_resolved(
             str(root_path),
             _WORKER_STATE["source_map"],
             _WORKER_STATE["abs_map"],
-            overlay=_WORKER_STATE.get("overlay"),
+            overlay=overlay,
         )
         return root_path, key, value, None
     except Exception as exc:
@@ -118,8 +118,13 @@ class PrebuildService:
         self._error = None
 
     # -------------------------------------------------- управление
-    def start(self, forest, config_dir, overlay=None):
-        """Запустить предсборку для нового дерева (старую остановить)."""
+    def start(self, forest, config_dir, overlay=None, roots=None):
+        """Запустить предсборку.
+
+        ``roots`` — необязательный набор корней. Для точечной инвалидации
+        после проекта пересобираются только они; XML-файлы при этом не
+        трогаются, потому что overlay проекта в XML-резолв не входит.
+        """
         with self._lock:
             old = self._thread
             self._stop.set()
@@ -135,8 +140,14 @@ class PrebuildService:
             old.join(timeout=0.5)
 
         ltx_targets = resolved_ltx_roots(forest)
+        if roots is not None:
+            wanted = {str(Path(path)).lower() for path in roots}
+            ltx_targets = [
+                path for path in ltx_targets
+                if str(path).lower() in wanted
+            ]
         xml_targets = []
-        if self._xml_resolver is not None:
+        if roots is None and self._xml_resolver is not None:
             if hasattr(self._xml_resolver, "refresh"):
                 self._xml_resolver.refresh()
             seen = set()
@@ -186,10 +197,11 @@ class PrebuildService:
             self._thread.start()
 
         logger.info(
-            "Фоновая сборка запущена: LTX %d, XML %d, процессов: %d",
+            "Фоновая сборка запущена: LTX %d, XML %d, процессов: %d%s",
             len(ltx_targets),
             len(xml_targets),
             self._workers or _default_workers(),
+            " (только затронутые корни)" if roots is not None else "",
         )
 
     def stop(self):
@@ -203,17 +215,35 @@ class PrebuildService:
             except Exception:
                 pass
 
-    def wait(self, log=None):
-        """Дождаться окончания фоновой сборки (для графа связей)."""
+    def wait(self, log=None, timeout=None):
+        """Дождаться окончания фоновой сборки (для графа связей).
+
+        ``timeout`` — защита от вечного ожидания: зависший один корень не
+        должен блокировать граф связей навсегда.
+        """
         if log:
             log("Ожидание фоновой сборки…")
 
+        deadline = (
+            time.monotonic() + float(timeout)
+            if timeout is not None
+            else None
+        )
         while True:
             with self._lock:
                 thread = self._thread
 
             if thread is None or not thread.is_alive():
                 break
+
+            if deadline is not None and time.monotonic() >= deadline:
+                if log:
+                    log(
+                        "Фоновая сборка не завершилась за %.0f с; "
+                        "граф продолжит работу по кэшу/по требованию"
+                        % float(timeout)
+                    )
+                return
 
             thread.join(timeout=0.2)
 
@@ -265,6 +295,18 @@ class PrebuildService:
                     total,
                 )
 
+    def _overlay_for_root(self, forest, path, overlay):
+        """Overlay для ключа/значения одного корня.
+
+        У настоящего ResolverService есть фильтрация по поддереву. У
+        тестовых/альтернативных реализаций её может не быть — тогда
+        используем overlay как есть.
+        """
+        fn = getattr(self._resolver, "overlay_for_root", None)
+        if callable(fn):
+            return fn(forest, path, overlay)
+        return overlay
+
     def _run_ltx(self, forest, config_dir, targets, stop_event,
                  overlay=None):
         # Подпись Resolver4.py входит в ключ кэша, поэтому адаптер
@@ -272,40 +314,54 @@ class PrebuildService:
         adapter = self._resolver.ensure_adapter(forest, config_dir)
 
         missing = []
+        cached = 0
         for path in targets:
             if stop_event.is_set():
                 break
+            # Ключ и значение обязаны считаться по одному и тому же
+            # overlay. Для каждого корня отбрасываем resolved-правки,
+            # которые к его поддереву не относятся.
+            root_overlay = self._overlay_for_root(
+                forest,
+                path,
+                overlay,
+            )
             key = self._resolver.resolved_key(
                 path,
                 forest,
                 config_dir,
-                overlay=overlay,
+                overlay=root_overlay,
             )
             if self._resolver.has_resolved_key(key):
+                cached += 1
                 self._advance(stop_event)
             else:
-                missing.append((path, key))
+                missing.append((path, key, root_overlay))
 
+        logger.info(
+            "Предсборка LTX: кэш %d, вычислить %d из %d",
+            cached,
+            len(missing),
+            len(targets),
+        )
         if not missing or stop_event.is_set():
             return
 
         workers = self._workers or _default_workers()
 
-        def load(path, key):
+        def load(job):
+            path, key, root_overlay = job
             return self._resolver.assemble_resolved(
                 path,
                 forest,
                 config_dir,
                 log=None,
                 key=key,
-                overlay=overlay,
+                overlay=root_overlay,
             )
 
         if workers > 1 and adapter is not None:
             source_map, abs_map = self._resolver.source_maps(forest)
-            overlay_files = getattr(overlay, "source_files", None)
-            if overlay_files is None:
-                overlay_files = overlay or {}
 
             self._run_parallel(
                 missing,
@@ -316,7 +372,6 @@ class PrebuildService:
                     str(adapter.resolver_script),
                     source_map,
                     abs_map,
-                    dict(overlay_files),
                 ),
                 worker=_worker_resolve,
                 store=lambda path, key, value: self._resolver.store_resolved(
@@ -325,7 +380,7 @@ class PrebuildService:
                     config_dir,
                     value,
                     key=key,
-                    overlay=overlay,
+                    overlay=None,
                 ),
                 label="Предсборка",
                 fallback=lambda: self._run_sequential(
@@ -364,7 +419,8 @@ class PrebuildService:
 
         workers = self._workers or _default_workers()
 
-        def load(path, key):
+        def load(job):
+            path, key = job
             return self._xml_resolver.resolve_output(
                 path,
                 config_dir,
@@ -418,11 +474,12 @@ class PrebuildService:
         label,
         break_on_missing_resolver=False,
     ):
-        for path, key in jobs:
+        for job in jobs:
             if stop_event.is_set():
                 break
+            path = job[0]
             try:
-                load(path, key)
+                load(job)
             except Exception as exc:
                 with self._lock:
                     if self._stop is stop_event:
@@ -449,7 +506,10 @@ class PrebuildService:
         label,
         fallback,
     ):
-        jobs = [(str(path), key) for path, key in missing]
+        jobs = [
+            (str(path), key, *rest)
+            for path, key, *rest in missing
+        ]
         pool = None
         try:
             ctx = mp.get_context("spawn")

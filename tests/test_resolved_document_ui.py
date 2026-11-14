@@ -6,7 +6,7 @@ import unittest
 from tests.support import SRC  # noqa: F401
 
 from tests.qt_support import qapp
-from ui.documents import ResolvedDocument
+from app.documents import ResolvedDocument
 from ui.editor import ResolvedView
 
 _app = qapp()

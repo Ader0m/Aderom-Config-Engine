@@ -21,6 +21,7 @@ from sdk import (
     ProjectAssetType,
     ProjectSetting,
     ProjectSettingChoice,
+    path_key,
 )
 from sdk.events import Events
 
@@ -104,7 +105,6 @@ class OggEditorModule(ModuleBase):
             pass
         self._subs = []
         self._window = None
-        self._forest = None
         self._tabs: Dict[str, OggEditorTab] = {}
         self._asset_type_registered = False
         self._setting_registered = False
@@ -263,16 +263,16 @@ class OggEditorModule(ModuleBase):
         self.ctx.ui.show_module_window(self.WINDOW_KEY, self._window)
 
     def _game_root(self) -> Optional[Path]:
-        if self._forest is None:
+        forest = self.ctx.ui.workspace_forest()
+        if forest is None:
             return None
         try:
-            return self.ctx.services.game_root(self._forest)
+            return self.ctx.services.game_root(forest)
         except Exception as exc:
             self.ctx.log("ogg_editor: не удалось определить gamedata: %s" % exc)
             return None
 
-    def _on_tree_ready(self, forest):
-        self._forest = forest
+    def _on_tree_ready(self, _forest):
         if self._window is not None:
             self._window.set_game_root(self._game_root())
 
@@ -283,10 +283,7 @@ class OggEditorModule(ModuleBase):
             return
 
         tab_id = "ogg_editor." + hashlib.sha1(
-            os.path.normcase(os.path.abspath(str(path))).encode(
-                "utf-8",
-                "replace",
-            )
+            path_key(path).encode("utf-8", "replace")
         ).hexdigest()[:16]
 
         existing = self._tabs.get(tab_id)
@@ -404,7 +401,8 @@ class OggEditorModule(ModuleBase):
 
     # ------------------------------------------------------------ секции
     def open_section(self):
-        if self._forest is None:
+        forest = self.ctx.ui.workspace_forest()
+        if forest is None:
             self.ctx.ui.show_error(
                 "Сначала выполните «Пересобрать VFS», чтобы построить VFS."
             )
@@ -420,7 +418,6 @@ class OggEditorModule(ModuleBase):
             return
         label = section_label(section)
 
-        forest = self._forest
         config_dir = self.ctx.services.forest_scan_dir(forest)
         game_root = self.ctx.services.game_root(forest)
         overlay = self.ctx.ui.project_overlay()
@@ -548,11 +545,9 @@ class OggEditorModule(ModuleBase):
         )
 
     def _refresh_open_tab(self, path, data):
-        wanted = os.path.normcase(os.path.abspath(str(path)))
+        wanted = path_key(path)
         for widget in self._tabs.values():
-            current = os.path.normcase(
-                os.path.abspath(str(widget.path))
-            )
+            current = path_key(widget.path)
             if current != wanted:
                 continue
             try:

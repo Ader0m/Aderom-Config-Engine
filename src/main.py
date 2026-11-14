@@ -14,8 +14,54 @@
 
 import ctypes
 import sys
+import time
+import traceback
 from pathlib import Path
 from types import SimpleNamespace
+
+# Открытый файл диагностики держим на уровне модуля: faulthandler не
+# копирует дескриптор и должен иметь живой объект.
+_CRASH_LOG = None
+
+
+def _install_crash_log(app_dir):
+    """Писать необработанные исключения и аварийные стеки в файл.
+
+    PyQt5 при исключении в слоте вызывает qFatal() — процесс падает без
+    внятного сообщения, а stderr под Mod Organizer не виден. Этот лог
+    сохраняет traceback до аварийного завершения.
+    """
+    global _CRASH_LOG
+
+    log_path = Path(app_dir) / "generated" / "crash.log"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
+
+    def hook(exc_type, exc, tb):
+        try:
+            with log_path.open("a", encoding="utf-8") as stream:
+                stream.write(
+                    "\n=== %s ===\n"
+                    % time.strftime("%Y-%m-%d %H:%M:%S")
+                )
+                stream.write("".join(
+                    traceback.format_exception(exc_type, exc, tb)
+                ))
+        except Exception:
+            pass
+        sys.__excepthook__(exc_type, exc, tb)
+
+    sys.excepthook = hook
+
+    try:
+        import faulthandler
+
+        _CRASH_LOG = log_path.open("a", encoding="utf-8")
+        faulthandler.enable(file=_CRASH_LOG, all_threads=True)
+    except Exception:
+        _CRASH_LOG = None
 
 
 def _dpi():
@@ -56,6 +102,7 @@ def main():
     apply_theme(app)
 
     app_dir = Path(__file__).resolve().parent
+    _install_crash_log(app_dir)
 
     # 1) Сервисы ядра.
      # --------------------------------------------------
@@ -115,7 +162,14 @@ def main():
     # 3) Загрузка модулей (до построения окна, чтобы регистрации попали в меню).
     def make_context(manifest):
         return ModuleContext(
-            SDK_VERSION, events, commands, api, tasks, services, paths
+            SDK_VERSION,
+            events,
+            commands,
+            api,
+            tasks,
+            services,
+            paths,
+            module_name=manifest.name,
         )
 
     loader = ModuleLoader(make_context)

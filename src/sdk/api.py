@@ -465,6 +465,37 @@ class ItemCardRequest:
     line_number: int = 0
 
 
+@dataclass(frozen=True)
+class FileOpened:
+    """Факт открытия файла в конкретной вкладке."""
+
+    path: Path
+    tab_id: str = ""
+    request_id: int = 0
+
+
+@dataclass(frozen=True)
+class FileOpenFailed:
+    """Открытие файла не состоялось."""
+
+    path: Path
+    request_id: int = 0
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class SavedDraft:
+    """Сохранённый черновик проекта (payload ``PROJECT_SAVED``).
+
+    ``kind``: ``file`` | ``resolved`` | ``asset``.
+    """
+
+    kind: str
+    key: str
+    path: Path
+    text: str = ""
+
+
 # ---------------------------------------------------------------- контракты
 
 
@@ -519,6 +550,39 @@ class CoreApi(Protocol):
     def read_text(self, path: Path) -> str:
         """Прочитать текстовый файл средствами ядра."""
 
+    def read_xml_text(self, path: Path) -> str:
+        """Прочитать XML-файл по правилам X-Ray (windows-1251)."""
+
+    # --- единый разбор LTX ------------------------------------------------
+    # Это не Resolver4: разбор синтаксиса одного текста, без include и
+    # вычисления наследования между файлами. Нужен для правок и навигации.
+
+    def ltx_section_at_line(self, text: str, line_number: int):
+        """Имя секции на строке (1-based) или ``None``."""
+
+    def ltx_section_bounds(self, text: str, section: str):
+        """Границы секции ``(start, end)`` в 1-based нумерации."""
+
+    def ltx_field_line(self, text: str, section: str, key: str) -> int:
+        """Номер строки поля (последнее set-вхождение) или 0."""
+
+    def ltx_key_from_line(self, line: str) -> str:
+        """Ключ строки LTX без DLTX-префикса и значения."""
+
+    def ltx_declared_sections(self, text: str):
+        """Все имена секций в порядке появления."""
+
+    def ltx_edit_section(
+        self,
+        text: str,
+        section: str,
+        key: str,
+        action: str,
+        new_line: Optional[str] = None,
+        after_key: Optional[str] = None,
+    ):
+        """Точечно изменить строку секции, сохранив переводы строк."""
+
     # --- фоновая предсборка ----------------------------------------------
 
     def start_prebuild(self, forest, config_dir: Path, overlay=None) -> None:
@@ -533,8 +597,12 @@ class CoreApi(Protocol):
     def prebuild_status(self) -> dict:
         """Текущий статус фоновой сборки: state/done/total/error."""
 
-    def wait_prebuild(self, log: Optional[Callable[[str], None]] = None) -> None:
-        """Дождаться окончания фоновой сборки."""
+    def wait_prebuild(
+        self,
+        log: Optional[Callable[[str], None]] = None,
+        timeout: Optional[float] = None,
+    ) -> None:
+        """Дождаться окончания фоновой сборки (с необязательным timeout)."""
 
     def stop_prebuild(self) -> None:
         """Остановить фоновую сборку."""
@@ -749,6 +817,18 @@ class UiApi(Protocol):
         для конкретного файла (например, только для ``.xml``).
         """
 
+    def register_file_action(
+        self,
+        label: str,
+        handler: Callable,
+        predicate: Optional[Callable[[Path], bool]] = None,
+    ) -> None:
+        """Добавить действие в контекстное меню вкладки файла.
+
+        ``handler(path)`` вызывается платформой. ``predicate(path)``
+        необязателен и решает, показывать ли действие для файла.
+        """
+
     def register_open_handler(self, handler) -> None:
         """Зарегистрировать обработчик открытия файлов."""
 
@@ -809,6 +889,19 @@ class UiApi(Protocol):
 
     def project_overlay(self) -> ProjectOverlay:
         """Единый слой правок активного проекта для VFS."""
+
+    def refresh_workspace(self):
+        """Пересобрать виртуальные файлы проекта в текущем лесе.
+
+        Модуль не должен сам вызывать ``add_virtual_file``: платформа
+        публикует новое поколение дерева и сбрасывает зависимые кэши.
+        """
+
+    def workspace_forest(self):
+        """Текущий лес — единственный экземпляр, которым владеет платформа."""
+
+    def workspace_generation(self) -> int:
+        """Номер поколения workspace (меняется при пересборке/VFS)."""
 
     def read_project_text(self, path: Path) -> str:
         """Текст файла из черновика проекта (или с диска, если черновика нет)."""
@@ -1085,6 +1178,15 @@ class UiApi(Protocol):
         """
 
     # --- команды платформы ------------------------------------------------
+
+    def request_window(self, window_id: str) -> bool:
+        """Попросить модуль открыть своё окно по ключу."""
+
+    def request_tab(self, tab_id: str) -> bool:
+        """Попросить модуль открыть/сфокусировать вкладку по ключу."""
+
+    def request_file_open(self, path: Path) -> bool:
+        """Попросить открыть файл через перехватываемое действие."""
 
     def open_file(self, path: Path) -> None:
         """Открыть файл через общий маршрутизатор обработчиков."""

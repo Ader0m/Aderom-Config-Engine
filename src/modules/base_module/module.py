@@ -41,7 +41,7 @@ class BaseModule(ModuleBase):
     def init(self, ctx):
         super().init(ctx)
 
-        self.session = ModuleSession()
+        self.session = ModuleSession(ctx)
         self._clean_run = CleanRunFeature(ctx, self.session)
         self._ltx_opener = LtxFileOpener(ctx, self.session)
         self._xml_opener = XmlFileOpener(ctx, self.session)
@@ -175,7 +175,7 @@ class BaseModule(ModuleBase):
         # XML-путь: резолва нет, доступно только сырое открытие.
         ui.register_tree_context_action(
             "Открыть исходный XML",
-            actions.open_raw,
+            self._xml_opener.open_raw,
             predicate=is_xml_path,
         )
         ui.register_tree_context_action(
@@ -199,6 +199,49 @@ class BaseModule(ModuleBase):
         ui.register_tree_context_action(
             "Копировать относительный путь",
             actions.copy_relative_path,
+        )
+
+        # Действия для контекстного меню вкладок. Платформа рисует их
+        # из общего реестра и не знает имён команд базового модуля.
+        ui.register_file_action(
+            "Открыть исходный",
+            actions.open_raw,
+            predicate=is_ltx_path,
+        )
+        ui.register_file_action(
+            "Открыть исходный",
+            self._xml_opener.open_raw,
+            predicate=is_xml_path,
+        )
+        ui.register_file_action(
+            "Открыть resolved",
+            self.ctx.ui.open_file,
+            predicate=is_ltx_path,
+        )
+        ui.register_file_action(
+            "Открыть resolved",
+            self._xml_opener.open_resolved,
+            predicate=is_xml_path,
+        )
+        ui.register_file_action(
+            "Открыть resolved в Notepad++",
+            actions.assemble_and_open,
+            predicate=is_ltx_path,
+        )
+        ui.register_file_action(
+            "Открыть resolved в Notepad++",
+            self._xml_opener.open_resolved_in_external_editor,
+            predicate=is_xml_path,
+        )
+        ui.register_file_action(
+            "Открыть исходный в Notepad++",
+            actions.open_in_external_editor,
+            predicate=is_ltx_path,
+        )
+        ui.register_file_action(
+            "Открыть исходный в Notepad++",
+            actions.open_in_external_editor,
+            predicate=is_xml_path,
         )
 
 

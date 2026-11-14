@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Живые документы UI-слоя.
+"""Живые документы прикладного слоя.
 
 Один :class:`ResolvedDocument` — единственный владелец состояния
 resolved-файла: текста, карты источников, ревизии и признака изменений.
@@ -16,10 +16,12 @@ from __future__ import annotations
 import bisect
 import logging
 import re
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
+from core import parse_ltx_document
 from sdk.api import ResolvedDraftInfo
 from sdk.events import Events
 
@@ -57,6 +59,26 @@ def field_key(line) -> str:
     if "=" in value:
         value = value.split("=", 1)[0]
     return value.strip().lower()
+
+
+def collapse_duplicated_text(text, original=""):
+    """Схлопнуть ``text + text`` в один экземпляр.
+
+    Это инвариант предметной модели: resolved-текст не может быть точной
+    двойной копией самого себя. Вторая половина должна быть близка по
+    размеру к original, иначе замена считается легитимной.
+    """
+    value = str(text or "")
+    original = str(original or "")
+    if not value or not original or len(value) % 2:
+        return value
+    half = len(value) // 2
+    if value[:half] != value[half:]:
+        return value
+    tolerance = max(1024, int(len(original) * 0.02))
+    if abs(half - len(original)) > tolerance:
+        return value
+    return value[:half]
 
 
 def fit_sources(sources, count):
@@ -162,22 +184,32 @@ class ResolvedDocument:
         persist=None,
         save=None,
         log_fn=None,
+        document_format="ltx",
     ):
         self.tab_id = str(tab_id or "")
         self.root_path = Path(root_path) if root_path is not None else None
         self.title = str(title or "")
+        self.document_format = str(document_format or "ltx").lower()
 
-        self._text = normalize_text(text)
+        normalized = normalize_text(text)
+        original = normalize_text(
+            normalized if original_text is None else original_text
+        )
+        normalized = collapse_duplicated_text(normalized, original)
+        if saved_text is None:
+            saved = normalized
+        else:
+            saved = collapse_duplicated_text(
+                normalize_text(saved_text),
+                original,
+            )
+        self._text = normalized
         self._line_sources = fit_sources(
             line_sources,
             self._text.count("\n") + 1,
         )
-        self._saved_text = normalize_text(
-            self._text if saved_text is None else saved_text
-        )
-        self._original_text = normalize_text(
-            self._text if original_text is None else original_text
-        )
+        self._saved_text = saved
+        self._original_text = original
         self.revision = 0
         self.persist_error = False
 
@@ -192,6 +224,7 @@ class ResolvedDocument:
 
         self._spans = None
         self._span_by_name = None
+        self._parsed = None
 
         # История нужна только когда текстового представления нет:
         # при открытом ResolvedView undo живёт в самом Scintilla.
@@ -226,6 +259,10 @@ class ResolvedDocument:
     @property
     def line_count(self) -> int:
         return self._text.count("\n") + 1
+
+    @property
+    def is_xml(self) -> bool:
+        return self.document_format == "xml"
 
     def snapshot(self) -> ResolvedDraftInfo:
         return ResolvedDraftInfo(
@@ -300,6 +337,23 @@ class ResolvedDocument:
     ) -> bool:
         """Заменить весь текст (ввод в редакторе, перезагрузка проекта)."""
         normalized = normalize_text(text)
+
+        # Инвариант: документ не может внезапно стать своей точной
+        # двойной копией. Это защищает от ошибочного append во view и
+        # не даёт такому тексту уйти в overlay/Resolver4.
+        if (
+            self._text
+            and len(normalized) == len(self._text) * 2
+            and normalized == self._text + self._text
+        ):
+            log.error(
+                "ResolvedDocument %s: отклонена замена текста его "
+                "двойной копией.\n%s",
+                self.tab_id,
+                "".join(traceback.format_stack(limit=16)),
+            )
+            return False
+
         if line_sources is None:
             sources = fit_sources(
                 self._line_sources,
@@ -319,6 +373,7 @@ class ResolvedDocument:
         self._line_sources = sources
         self._spans = None
         self._span_by_name = None
+        self._parsed = None
         self.revision += 1
 
         if persist and not self._persist_state(atomic=atomic):
@@ -327,6 +382,7 @@ class ResolvedDocument:
                 self.revision -= 1
                 self._spans = None
                 self._span_by_name = None
+                self._parsed = None
                 return False
 
         self._publish(
@@ -379,6 +435,7 @@ class ResolvedDocument:
         self._line_sources = new_sources
         self._spans = None
         self._span_by_name = None
+        self._parsed = None
         self.revision += 1
 
         if persist and not self._persist_state(atomic=True):
@@ -387,6 +444,7 @@ class ResolvedDocument:
             self.revision = old_revision
             self._spans = old_spans
             self._span_by_name = old_by_name
+            self._parsed = None
             return False
 
         view = self._view
@@ -400,6 +458,7 @@ class ResolvedDocument:
                 self.revision = old_revision
                 self._spans = old_spans
                 self._span_by_name = old_by_name
+                self._parsed = None
                 self._persist_state(atomic=False)
                 return False
             view.set_dirty_state(self.is_dirty)
@@ -560,137 +619,63 @@ class ResolvedDocument:
 
     # -------------------------------------------------- индекс секций
     def _build_spans(self):
-        text = self._text
-        total_lines = text.count("\n") + 1
-        header_re = re.compile(
-            r"^[ \t]*(?:!!|!|@)?\[([^\]\r\n]+)\]",
-            re.MULTILINE,
+        # Единственный LTX-парсер живёт в core. Здесь только кэшируем
+        # результат, чтобы навигация и правки не разбирали текст повторно.
+        self._parsed = (
+            None
+            if self.is_xml
+            else parse_ltx_document(self._text)
         )
-
-        spans = []
-        current = None
-        last_position = 0
-        line_number = 1
-
-        for match in header_re.finditer(text):
-            line_number += text.count(
-                "\n",
-                last_position,
-                match.start(),
-            )
-            last_position = match.start()
-
-            name = match.group(1).strip().lower()
-            if not name:
-                continue
-
-            if current is not None:
-                current.end = line_number
-                current.char_end = match.start()
-            current = SectionSpan(
-                name,
-                line_number,
-                total_lines + 1,
-                match.start(),
-                len(text),
-            )
-            spans.append(current)
-
-        self._spans = spans
-        self._span_by_name = {span.name: span for span in spans}
+        self._spans = []
+        self._span_by_name = {}
 
     def _ensure_spans(self):
-        if self._spans is None:
+        if self._parsed is None and not self.is_xml:
             self._build_spans()
 
     def section_at_line(self, line_number) -> Optional[str]:
         """Секция, в которой находится строка (1-based), или ``None``."""
+        self._ensure_spans()
+        if self._parsed is None:
+            return None
         try:
-            line_number = int(line_number)
+            return self._parsed.section_at_line(int(line_number))
         except (TypeError, ValueError):
             return None
-        if line_number < 1:
-            return None
-
-        self._ensure_spans()
-        if not self._spans:
-            return None
-
-        starts = [span.start for span in self._spans]
-        index = bisect.bisect_right(starts, line_number) - 1
-        if index < 0:
-            return None
-
-        span = self._spans[index]
-        if line_number >= span.end:
-            return None
-        return span.name
 
     def section_bounds(self, section) -> Optional[tuple]:
         """Границы секции ``(start, end)``, 1-based, ``end`` исключающая."""
-        name = str(section or "").strip().lower()
-        if not name:
-            return None
         self._ensure_spans()
-        span = self._span_by_name.get(name)
-        if span is None:
+        if self._parsed is None:
             return None
-        return span.start, span.end
+        return self._parsed.section_bounds(section)
 
     def section_block(self, section) -> Optional[tuple]:
         """Текст блока секции и смещение строк (без полного копирования)."""
-        name = str(section or "").strip().lower()
-        if not name:
-            return None
         self._ensure_spans()
-        span = self._span_by_name.get(name)
-        if span is None:
+        if self._parsed is None:
             return None
-        return (
-            self._text[span.char_start:span.char_end],
-            span.start - 1,
-        )
+        return self._parsed.section_block(section)
 
     def section_names(self):
         self._ensure_spans()
-        return tuple(span.name for span in self._spans)
+        if self._parsed is None:
+            return ()
+        result = []
+        seen = set()
+        for name, _line in self._parsed.headers:
+            if name in seen:
+                continue
+            seen.add(name)
+            result.append(name)
+        return tuple(result)
 
     def field_line(self, section, key) -> int:
         """Номер строки поля в секции (последнее вхождение) или 0."""
-        block = self.section_block(section)
-        if block is None:
+        self._ensure_spans()
+        if self._parsed is None:
             return 0
-        wanted = str(key or "").strip().lower()
-        if not wanted:
-            return 0
-
-        block_text, offset = block
-        try:
-            from core.patching.ltx.document import parse_ltx_document
-
-            document = parse_ltx_document(block_text)
-            model = document.section(section)
-            if model is not None:
-                found = 0
-                for entry in model.entries:
-                    if entry.key.lower() != wanted:
-                        continue
-                    if entry.operation != "set":
-                        continue
-                    found = entry.line_number + offset
-                return found
-        except Exception:
-            pass
-
-        # Резервный путь: построчный поиск, если парсер недоступен.
-        found = 0
-        for line_number, line in enumerate(
-            block_text.split("\n"),
-            1,
-        ):
-            if field_key(line) == wanted:
-                found = line_number + offset
-        return found
+        return self._parsed.field_line(section, key)
 
     # -------------------------------------------------- сохранение
     def mark_saved(self, text=None) -> bool:
@@ -724,10 +709,19 @@ class ResolvedDocument:
         persist=False,
     ) -> bool:
         """Полная перезагрузка состояния (загрузка проекта, сброс)."""
+        original = (
+            self._original_text
+            if original_text is None
+            else normalize_text(original_text)
+        )
+        text = collapse_duplicated_text(normalize_text(text), original)
         if saved_text is not None:
-            self._saved_text = normalize_text(saved_text)
+            self._saved_text = collapse_duplicated_text(
+                normalize_text(saved_text),
+                original,
+            )
         if original_text is not None:
-            self._original_text = normalize_text(original_text)
+            self._original_text = original
         return self.replace_text(
             text,
             line_sources=line_sources,
@@ -827,6 +821,7 @@ class ResolvedDocument:
         self._line_sources = new_sources
         self._spans = None
         self._span_by_name = None
+        self._parsed = None
         self.revision += 1
 
         if not self._persist_state(atomic=True):
@@ -835,6 +830,7 @@ class ResolvedDocument:
             self.revision = old_revision
             self._spans = None
             self._span_by_name = None
+            self._parsed = None
             return False
 
         view = self._view

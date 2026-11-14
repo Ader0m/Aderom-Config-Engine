@@ -5,45 +5,41 @@ PlatformApi — сервисы UI-платформы и точка регист�
 Именно этот объект модуль видит как ctx.ui.
 """
 
-import os
-import re
-import time
-from dataclasses import replace
 from pathlib import Path
 
 from PyQt5.QtWidgets import QApplication, QFileDialog, QMessageBox
 
-from core.tools.fs import read_text_safe, read_xml_text
 from sdk.api import (
     AssetDraftInfo,
-    ItemCardRequest,
-    ProjectOverlay,
-    ResolvedDraftInfo,
+    FileOpened,
+    FileOpenFailed,
 )
 from sdk.events import Events
 
-from .documents import ResolvedDocument
+from app.projects import (
+    ProjectAssetRegistry,
+    ProjectFileReaderRegistry,
+    ProjectService,
+    ProjectSettingsRegistry,
+)
+from app.workspace import WorkspaceService
+
 from .file_open_router import FileOpenRouter
 from .input_bindings import MouseBindingManager, ShortcutManager
 from .module_windows import ModuleWindowManager
-from .project import ProjectError, ProjectService, SavedDraft
-from .project_assets import ProjectAssetRegistry, ProjectAssetTypeError
-from .project_readers import ProjectFileReaderRegistry
-from .project_settings import ProjectSettingError, ProjectSettingsRegistry
-from .project_dialogs import (
-    ProjectCreateDialog,
-    ProjectLoadDialog,
-    ProjectPreviewDialog,
-    ProjectSettingsDialog,
-)
+from .platform.project_controller import ProjectControllerMixin
+from .platform.registration import RegistrationHub
+from .platform.resolved import ResolvedDocumentMixin
 
 
 def _path_key(path):
     """Нормализовать путь для сопоставления запроса открытия и события."""
-    return os.path.normcase(os.path.abspath(os.fspath(path)))
+    from sdk.paths import path_key
+
+    return path_key(path)
 
 
-class PlatformApi:
+class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
     def __init__(self, events, commands, tasks, services, paths):
         self.events = events
         self.commands = commands
@@ -57,8 +53,7 @@ class PlatformApi:
         self._mouse_manager = MouseBindingManager(self.trigger_action)
 
         self.window = None
-        self._menu_reg = []      # (menu_title, label, callback, shortcut, action)
-        self._ctx_actions = []   # (label, handler(path), predicate(path)|None)
+        self.registrations = RegistrationHub()
         self._log_buffer = []
 
         projects_dir = getattr(paths, "projects_dir", None)
@@ -76,9 +71,11 @@ class PlatformApi:
             asset_registry=self.asset_types,
             file_readers=self.file_readers,
         )
-        self._forest = None
+        self.workspace = WorkspaceService(services)
+        # Корни, которые нужно пересобрать после последней точечной
+        # инвалидации. ``None`` — сборка всего леса.
+        self._project_prebuild_roots = None
         self._override_theme_enabled = None
-        self._virtual_paths = set()
 
         # Отложенная навигация: ключ — нормализованный путь файла.
         # Запрос живёт до события FILE_OPENED ровно для этого пути.
@@ -117,9 +114,29 @@ class PlatformApi:
         commands.register("ui.open_file_with_search", self.request_open_file_with_search)
 
 
+    # Совместимые алиасы: раньше лес и виртуальные пути жили прямо в
+    # PlatformApi. Теперь их владелец — WorkspaceService.
+    @property
+    def _forest(self):
+        return self.workspace.forest
+
+    @_forest.setter
+    def _forest(self, value):
+        self.workspace.set_forest(value)
+
+    @property
+    def _virtual_paths(self):
+        return self.workspace.virtual_paths
+
     # -------------------------------------------------- регистрации (SDK)
     def register_menu(self, menu_title, label, callback, shortcut=None, action=None):
-        self._menu_reg.append((menu_title, label, callback, shortcut, action))
+        self.registrations.register_menu(
+            menu_title,
+            label,
+            callback,
+            shortcut,
+            action,
+        )
 
     def register_tree_context_action(self, label, handler, predicate=None):
         """Добавить действие в контекстное меню дерева.
@@ -127,7 +144,27 @@ class PlatformApi:
         ``predicate(path)`` — необязательный фильтр: действие показывается
         только для путей, для которых он вернул truthy.
         """
-        self._ctx_actions.append((label, handler, predicate))
+        self.registrations.register_tree_context_action(
+            label,
+            handler,
+            predicate,
+        )
+
+    def register_file_action(self, label, handler, predicate=None):
+        """Действие в контекстном меню вкладки файла.
+
+        ``handler(path)`` вызывается платформой; имя модуля и его команды
+        здесь не участвуют.
+        """
+        self.registrations.register_file_action(
+            label,
+            handler,
+            predicate,
+        )
+
+    @property
+    def file_actions(self):
+        return self.registrations.file_actions
 
     def register_shortcut(self, key, callback, scope="global", action=None):
         self._shortcut_manager.register(key, callback, scope=scope, action=action)
@@ -172,11 +209,11 @@ class PlatformApi:
 
     @property
     def menu_registrations(self):
-        return list(self._menu_reg)
+        return self.registrations.menu_registrations
 
     @property
     def context_actions(self):
-        return list(self._ctx_actions)
+        return self.registrations.context_actions
 
     # -------------------------------------------------- привязка окна
     def bind_window(self, window):
@@ -205,6 +242,10 @@ class PlatformApi:
 
     def _invalidate_resolver_cache(self):
         """Сбросить кеш и пометить предсборку устаревшей."""
+        # Полная инвалидация отменяет и точечный набор корней: иначе
+        # следующая предсборка соберёт только старый «затронутый» корень
+        # и оставит остальной кеш пустым.
+        self._project_prebuild_roots = None
         invalidate = getattr(
             self.services,
             "invalidate_resolver_cache",
@@ -221,6 +262,26 @@ class PlatformApi:
         if resolver is not None and hasattr(resolver, "invalidate_cache"):
             resolver.invalidate_cache()
 
+    def _invalidate_paths(self, paths):
+        """Инвалидировать только корни, в поддеревья которых входят пути.
+
+        Возвращает ``True``, если удалось определить затронутые корни.
+        Если путь не связан с деревом (или сервис не умеет точечную
+        инвалидацию), выполняется полная инвалидация.
+        """
+        paths = [Path(path) for path in (paths or ()) if path is not None]
+        roots = self.workspace.roots_for(paths)
+        invalidate = getattr(self.services, "invalidate_paths", None)
+        if roots and callable(invalidate):
+            invalidate(roots)
+            self._project_prebuild_roots = roots
+            self.log("Проект: инвалидированы корни: %d" % len(roots))
+            return True
+
+        self._invalidate_resolver_cache()
+        return False
+
+
     def has_forest(self):
         return self._forest is not None
 
@@ -228,1478 +289,6 @@ class PlatformApi:
         return self.project.is_active
 
     # -------------------------------------------------- resolved-документы
-    def _on_project_changed(self, payload):
-        if payload is None:
-            for document in self._resolved_documents.values():
-                document.unbind_view()
-            self._resolved_documents.clear()
-
-    def _on_tab_closed(self, tab_id):
-        document = self._resolved_documents.get(str(tab_id))
-        if document is None:
-            return
-        document.unbind_view()
-        if document.can_drop():
-            self._resolved_documents.pop(str(tab_id), None)
-
-    def _ensure_resolved_document(
-        self,
-        tab_id,
-        root_path=None,
-        title="",
-        text="",
-        line_sources=(),
-        retain=False,
-    ):
-        """Вернуть живой документ, создав его из черновика или текста."""
-        tab_id = str(tab_id or "")
-        if not tab_id:
-            return None
-
-        document = self._resolved_documents.get(tab_id)
-        if document is None:
-            draft = (
-                self.project.get_resolved_draft(tab_id)
-                if self.project.is_active
-                else None
-            )
-            if draft is not None:
-                root_path = draft.root_path
-                title = draft.title or title
-                text = draft.current_text
-                saved_text = draft.saved_text
-                original_text = draft.original_text
-                line_sources = draft.line_sources or line_sources
-            else:
-                saved_text = None
-                original_text = None
-
-            if root_path is None:
-                return None
-
-            document = ResolvedDocument(
-                tab_id,
-                root_path,
-                title or ("[Res]%s" % Path(root_path).name),
-                text,
-                line_sources=line_sources,
-                saved_text=saved_text,
-                original_text=original_text,
-                events=self.events,
-                persist=self._persist_resolved_document,
-                save=self._save_resolved_document_state,
-                log_fn=self.log,
-            )
-            self._resolved_documents[tab_id] = document
-
-        if retain:
-            document.retain()
-        return document
-
-    def ensure_resolved_document(
-        self,
-        tab_id,
-        root_path,
-        title="",
-        text="",
-        line_sources=(),
-    ):
-        """Публичная точка создания/получения документа для модулей."""
-        document = self._ensure_resolved_document(
-            tab_id,
-            root_path=root_path,
-            title=title,
-            text=text,
-            line_sources=line_sources,
-        )
-        if (
-            document is not None
-            and text
-            and not document.is_dirty
-            and not document.has_changes
-            and str(text) != document.current_text
-        ):
-            # Свежий резолв (например, после создания нового файла)
-            # обновляет только чистый документ без сохранённых правок.
-            if self.project.is_active:
-                try:
-                    self.project.remove_resolved_draft(document.tab_id)
-                except Exception:
-                    pass
-            document.reset(
-                text,
-                line_sources=line_sources,
-                saved_text=text,
-                original_text=text,
-                persist=False,
-            )
-            view = (
-                self.window.editor.get_tab(document.tab_id)
-                if self.window is not None
-                else None
-            )
-            if view is not None and hasattr(view, "set_content"):
-                self._reload_resolved_view(
-                    view,
-                    document.current_text,
-                    document.line_sources,
-                    document.root_path,
-                )
-                view.set_dirty_state(False)
-        return document
-
-    @staticmethod
-    def _reload_resolved_view(view, text, line_sources, root_path):
-        """Перезалить текст вкладки, сохранив прокрутку и курсор."""
-        widget = getattr(view, "editor", None)
-        first_line = 0
-        cursor = (0, 0)
-        if widget is not None:
-            try:
-                first_line = widget.firstVisibleLine()
-                cursor = widget.getCursorPosition()
-            except Exception:
-                pass
-
-        view.set_content(text, line_sources, root_path)
-
-        if widget is not None:
-            try:
-                widget.setFirstVisibleLine(first_line)
-                widget.setCursorPosition(cursor[0], cursor[1])
-            except Exception:
-                pass
-
-    def _persist_resolved_document(self, document):
-        if not self.project.is_active:
-            return False
-        try:
-            self.project.update_resolved_draft(
-                document.tab_id,
-                document.root_path,
-                document.title,
-                document.original_text,
-                document.current_text,
-                line_sources=document.line_sources,
-            )
-        except ProjectError as exc:
-            self.log(
-                "Проект: не удалось обновить resolved-черновик: %s" % exc
-            )
-            return False
-
-        try:
-            self._invalidate_resolver_cache()
-        except Exception as exc:
-            self.log("Проект: не удалось сбросить кэш резолва: %s" % exc)
-
-        try:
-            self._update_project_status()
-        except Exception as exc:
-            self.log("Проект: не удалось обновить статус: %s" % exc)
-        return True
-
-    def _save_resolved_document_state(self, document):
-        if not self.project.is_active:
-            self.set_status(
-                "Создайте проект, чтобы сохранять изменения",
-                7000,
-            )
-            return False
-        try:
-            self.project.save_resolved_draft(
-                document.tab_id,
-                document.current_text,
-            )
-        except ProjectError as exc:
-            self.show_error(str(exc))
-            return False
-
-        if self.window is not None:
-            try:
-                self.window.editor.mark_tab_clean(document.tab_id)
-                view = self.window.editor.get_tab(document.tab_id)
-                if view is not None and hasattr(view, "mark_clean"):
-                    view.mark_clean(document.current_text)
-            except Exception as exc:
-                self.log("Проект: не удалось обновить вкладку: %s" % exc)
-
-        self.set_status("Resolved сохранён в проекте", 5000)
-        self.log(
-            "Проект: сохранён resolved-черновик %s" % document.tab_id
-        )
-        try:
-            self._update_project_status()
-        except Exception as exc:
-            self.log("Проект: не удалось обновить статус: %s" % exc)
-        return True
-
-    def resolved_document(self, tab_id):
-        """Живой документ по id вкладки (или ``None``)."""
-        return self._resolved_documents.get(str(tab_id or ""))
-
-    def _get_or_restore_document(self, tab_id):
-        """Документ из реестра или восстановленный из черновика проекта."""
-        tab_id = str(tab_id or "")
-        document = self._resolved_documents.get(tab_id)
-        if document is not None:
-            return document
-        draft = (
-            self.project.get_resolved_draft(tab_id)
-            if self.project.is_active
-            else None
-        )
-        if draft is None:
-            return None
-        return self._ensure_resolved_document(
-            tab_id,
-            draft.root_path,
-            draft.title,
-            draft.current_text,
-            draft.line_sources,
-        )
-
-    def has_resolved_document(self, tab_id):
-        return str(tab_id or "") in self._resolved_documents
-
-    def resolved_document_title(self, tab_id):
-        tab_id = str(tab_id or "")
-        document = self._resolved_documents.get(tab_id)
-        if document is not None:
-            return document.title
-        draft = (
-            self.project.get_resolved_draft(tab_id)
-            if self.project.is_active
-            else None
-        )
-        return draft.title if draft is not None else ""
-
-    def retain_resolved_document(self, tab_id):
-        document = self._get_or_restore_document(tab_id)
-        if document is not None:
-            document.retain()
-            return True
-        return False
-
-    def release_resolved_document(self, tab_id):
-        tab_id = str(tab_id or "")
-        document = self._resolved_documents.get(tab_id)
-        if document is None:
-            return False
-        document.release()
-        if document.can_drop():
-            self._resolved_documents.pop(tab_id, None)
-        return True
-
-    def apply_resolved_line_edit(
-        self,
-        tab_id,
-        action,
-        line_number,
-        text="",
-    ):
-        """Единственная точка правки resolved-документа из модуля."""
-        document = self._get_or_restore_document(tab_id)
-        if document is None:
-            return False
-        ok = document.apply_line_edit(action, line_number, text)
-        if ok and self.window is not None:
-            self.window.editor.set_tab_dirty(
-                document.tab_id,
-                document.is_dirty,
-            )
-        return ok
-
-    def apply_resolved_field_edit(self, tab_id, section, key, value):
-        document = self._get_or_restore_document(tab_id)
-        if document is None:
-            return False
-        ok = document.apply_field_edit(section, key, value)
-        if ok and self.window is not None:
-            self.window.editor.set_tab_dirty(
-                document.tab_id,
-                document.is_dirty,
-            )
-        return ok
-
-    def rename_resolved_field(
-        self,
-        tab_id,
-        section,
-        old_key,
-        new_key,
-        value,
-    ):
-        document = self._get_or_restore_document(tab_id)
-        if document is None:
-            return False
-        ok = document.rename_field(
-            section,
-            old_key,
-            new_key,
-            value,
-        )
-        if ok and self.window is not None:
-            self.window.editor.set_tab_dirty(
-                document.tab_id,
-                document.is_dirty,
-            )
-        return ok
-
-    def undo_resolved_document(self, tab_id):
-        document = self._get_or_restore_document(tab_id)
-        return bool(document is not None and document.undo())
-
-    def redo_resolved_document(self, tab_id):
-        document = self._get_or_restore_document(tab_id)
-        return bool(document is not None and document.redo())
-
-    def resolved_section_at_line(self, tab_id, line_number):
-        document = self._get_or_restore_document(tab_id)
-        if document is None:
-            return None
-        return document.section_at_line(line_number)
-
-    def item_entry(self, tab_id, section):
-        """Текущая проекция предмета из документа (для карточки)."""
-        document = self._get_or_restore_document(tab_id)
-        if document is None or self._forest is None:
-            return None
-
-        block = document.section_block(section)
-        builder = getattr(
-            self.services,
-            "build_item_entry_from_block",
-            None,
-        )
-        if block is not None and callable(builder):
-            block_text, offset = block
-            return builder(
-                self._forest,
-                block_text,
-                section,
-                offset,
-            )
-
-        return self.services.build_item_entry(
-            self._forest,
-            document.current_text,
-            section,
-        )
-
-    def open_item_card_at_cursor(self):
-        if self.window is None:
-            return False
-        view = self.window.editor.currentWidget()
-        section = getattr(view, "section_at_cursor", None)
-        if not callable(section):
-            self.set_status(
-                "Карточка предмета доступна только в resolved-вкладке",
-                5000,
-            )
-            return False
-        section_name = section()
-        if not section_name:
-            self.set_status("Курсор не находится в секции LTX", 5000)
-            return False
-        document = getattr(view, "document", None)
-        tab_id = getattr(document, "tab_id", "")
-        if not tab_id:
-            return False
-        self.events.publish(
-            Events.ITEM_CARD_REQUESTED,
-            ItemCardRequest(
-                tab_id=tab_id,
-                section=section_name,
-                line_number=getattr(view, "cursor_line", lambda: 0)(),
-            ),
-        )
-        return True
-
-
-    def is_project_active(self):
-        return self.project.is_active
-
-    def project_name(self):
-        if not self.project.is_active:
-            return ""
-        return str(self.project.active.name or "")
-
-    def project_overlay(self):
-        """Единый слой правок активного проекта для VFS."""
-        if not self.project.is_active:
-            return ProjectOverlay()
-
-        source_files = {}
-        new_files = set()
-        for draft in self.project.active.drafts.values():
-            path = Path(draft.path)
-            source_files[path] = str(draft.current_text or "")
-            if draft.is_new:
-                new_files.add(path)
-
-        resolved_edits = {}
-        for draft in self.project.active.resolved_drafts.values():
-            resolved_edits[Path(draft.root_path)] = (
-                str(draft.original_text or ""),
-                str(draft.current_text or ""),
-                tuple(draft.line_sources or ()),
-            )
-
-        return ProjectOverlay(
-            source_files=source_files,
-            resolved_edits=resolved_edits,
-            new_files=frozenset(new_files),
-        )
-
-    def _restore_project_virtual_files(self):
-        """Восстановить новые файлы проекта в текущем дереве VFS."""
-        forest = self._forest
-        if forest is None:
-            return 0, 0
-
-        overlay = self.project_overlay()
-        wanted = {
-            Path(path)
-            for path in overlay.source_files
-            if Path(path).suffix.lower() in (".ltx", ".xml")
-        }
-
-        removed = 0
-        for path in list(self._virtual_paths - wanted):
-            try:
-                if self.services.remove_virtual_file(forest, path):
-                    removed += 1
-            except Exception as exc:
-                self.log("Проект: не удалось убрать %s из VFS: %s" % (path, exc))
-            self._virtual_paths.discard(path)
-
-        added = 0
-        for path, text in overlay.source_files.items():
-            path = Path(path)
-            if path.suffix.lower() not in (".ltx", ".xml"):
-                continue
-            if path in forest.files or path in forest.xml_files:
-                continue
-            try:
-                if self.services.add_virtual_file(forest, path, text):
-                    self._virtual_paths.add(path)
-                    added += 1
-            except Exception as exc:
-                self.log(
-                    "Проект: не удалось добавить %s в VFS: %s"
-                    % (path, exc)
-                )
-
-        if added or removed:
-            self.events.publish(Events.TREE_READY, forest)
-            try:
-                self._invalidate_resolver_cache()
-            except Exception:
-                pass
-            self.log(
-                "Проект: VFS обновлён — добавлено файлов: %d, удалено: %d"
-                % (added, removed)
-            )
-        return added, removed
-
-    def write_project_text(self, path, text):
-        """Сохранить новый текст файла в черновик активного проекта."""
-        if not self.project.is_active:
-            self.set_status(
-                "Создайте проект, чтобы создавать файлы",
-                7000,
-            )
-            return False
-
-        try:
-            self.project.save_draft(path, text)
-        except ProjectError as exc:
-            self.show_error(str(exc))
-            return False
-
-        try:
-            self._invalidate_resolver_cache()
-        except Exception as exc:
-            self.log("Проект: не удалось сбросить кэш резолва: %s" % exc)
-
-        if self.window is not None:
-            editor = getattr(self.window, "editor", None)
-            if editor is not None:
-                try:
-                    editor.mark_clean(path, text)
-                except Exception:
-                    pass
-
-        self._update_project_status()
-        return True
-
-    def write_project_texts(self, files):
-        """Атомарно записать несколько черновиков проекта.
-
-        Сначала сохраняются все файлы. Если хотя бы один не записался,
-        уже сохранённые возвращаются к предыдущему состоянию.
-        """
-        if not self.project.is_active:
-            self.set_status(
-                "Создайте проект, чтобы создавать файлы",
-                7000,
-            )
-            return False
-
-        staged = []
-        for path, text in files:
-            path = Path(path)
-            draft = self.project.get_draft(path)
-            staged.append(
-                (
-                    path,
-                    replace(draft) if draft is not None else None,
-                )
-            )
-
-        try:
-            for path, text in files:
-                path = Path(path)
-                self.project.save_draft(path, text)
-        except ProjectError as exc:
-            for path, snapshot in staged:
-                try:
-                    if snapshot is not None:
-                        self.project.restore_draft(snapshot)
-                    else:
-                        self.project.remove_draft(path)
-                except Exception:
-                    self.log(
-                        "Проект: не удалось откатить %s" % path
-                    )
-            self.show_error(
-                "Не удалось записать файлы проекта:\n%s\n"
-                "Изменения отменены." % exc
-            )
-            return False
-
-        try:
-            self._invalidate_resolver_cache()
-        except Exception as exc:
-            self.log("Проект: не удалось сбросить кэш резолва: %s" % exc)
-
-        if self.window is not None:
-            editor = getattr(self.window, "editor", None)
-            if editor is not None:
-                for path, text in files:
-                    try:
-                        editor.mark_clean(path, text)
-                    except Exception:
-                        pass
-
-        self._update_project_status()
-        return True
-
-    def register_project_asset_type(self, asset_type):
-        """Зарегистрировать тип двоичного ресурса от имени модуля."""
-        try:
-            registered = self.asset_types.register(asset_type)
-        except ProjectAssetTypeError as exc:
-            self.log("Проект: тип ресурса не зарегистрирован: %s" % exc)
-            return False
-
-        self.project.invalidate_preview_cache()
-        self.log(
-            "Проект: зарегистрирован тип ресурса %s (%s/%s)"
-            % (
-                registered.key,
-                registered.vfs_root,
-                ", ".join(registered.extensions),
-            )
-        )
-        return True
-
-    def unregister_project_asset_type(self, key):
-        if not self.asset_types.unregister(key):
-            return False
-        self.project.invalidate_preview_cache()
-        self.log("Проект: тип ресурса снят: %s" % key)
-        return True
-
-    def project_asset_types(self):
-        return self.asset_types.types()
-
-    # -------------------------------------------------- настройки модулей
-    def register_project_setting(self, setting):
-        """Зарегистрировать настройку проекта от имени модуля."""
-        try:
-            registered = self.project_setting_registry.register(setting)
-        except ProjectSettingError as exc:
-            self.log("Проект: настройка не зарегистрирована: %s" % exc)
-            return False
-
-        self.project.invalidate_preview_cache()
-        self.log(
-            "Проект: зарегистрирована настройка %s (%s)"
-            % (registered.key, registered.label)
-        )
-        return True
-
-    def unregister_project_setting(self, key):
-        if not self.project_setting_registry.unregister(key):
-            return False
-        self.project.invalidate_preview_cache()
-        self.log("Проект: настройка снята: %s" % key)
-        return True
-
-    def project_setting_definitions(self):
-        """Описания настроек, которые показываются в окне проекта."""
-        return self.project_setting_registry.settings()
-
-    def project_setting(self, key, default=None):
-        """Текущее значение настройки активного проекта."""
-        setting = self.project_setting_registry.get(key)
-        fallback = (
-            default
-            if default is not None
-            else (setting.default if setting is not None else None)
-        )
-        if not self.project.is_active:
-            return fallback
-        value = self.project.module_setting(key, fallback)
-        if setting is None:
-            return value
-        try:
-            return self.project_setting_registry.normalize(key, value)
-        except ProjectSettingError:
-            return fallback
-
-    def set_project_setting(self, key, value):
-        """Сохранить значение настройки в активном проекте."""
-        setting = self.project_setting_registry.get(key)
-        if setting is None:
-            self.log("Проект: неизвестная настройка %s" % key)
-            return False
-
-        try:
-            normalized = self.project_setting_registry.normalize(key, value)
-            self.project.set_module_setting(key, normalized)
-        except (ProjectSettingError, ProjectError) as exc:
-            self.log("Проект: настройка %s не изменена: %s" % (key, exc))
-            return False
-
-        self.events.publish(
-            Events.PROJECT_SETTINGS_CHANGED,
-            {setting.key: normalized},
-        )
-        self.log(
-            "Проект: настройка %s = %r" % (setting.key, normalized)
-        )
-        return True
-
-    def register_file_reader(self, reader):
-        try:
-            subscription = self.file_readers.register(reader)
-        except TypeError as exc:
-            self.log("Проект: читатель не зарегистрирован: %s" % exc)
-            return None
-        self.log(
-            "Проект: зарегистрирован читатель %s"
-            % type(reader).__name__
-        )
-        return subscription
-
-    def read_file_view(self, path, data=None):
-        return self.file_readers.read(path, data)
-
-    def read_project_asset(self, path):
-        """Текущие байты двоичного черновика активного проекта."""
-        if not self.project.is_active:
-            return None
-        draft = self.project.get_asset_draft(path)
-        return draft.current_bytes if draft is not None else None
-
-    def update_project_asset(self, path, data):
-        """Обновить двоичный черновик в памяти."""
-        if not self.project.is_active:
-            self.set_status(
-                "Создайте проект, чтобы изменять ресурсы",
-                7000,
-            )
-            return False
-
-        try:
-            self.project.update_asset_draft(path, data)
-        except ProjectError as exc:
-            self.show_error(str(exc))
-            return False
-
-        self._update_project_status()
-        return True
-
-    def save_project_asset(self, path, data=None):
-        """Записать двоичный черновик в каталог проекта сейчас."""
-        if not self.project.is_active:
-            self.set_status(
-                "Создайте проект, чтобы сохранять ресурсы",
-                7000,
-            )
-            return False
-
-        try:
-            draft = self.project.save_asset_draft(path, data)
-        except ProjectError as exc:
-            self.show_error(str(exc))
-            return False
-
-        saved = SavedDraft(
-            kind="asset",
-            key=self.project.path_key(draft.path),
-            path=draft.path,
-            text="",
-        )
-        self.events.publish(Events.PROJECT_SAVED, saved)
-        self.set_status(
-            "Сохранено в проекте: %s" % Path(path).name,
-            5000,
-        )
-        self.log("Проект: сохранён ресурс %s" % Path(path).name)
-        self._update_project_status()
-        return True
-
-    def project_asset_drafts(self):
-        """Двоичные черновики активного проекта."""
-        if not self.project.is_active:
-            return ()
-        return tuple(
-            AssetDraftInfo(
-                path=draft.path,
-                is_new=bool(draft.is_new),
-                changed=bool(draft.has_changes),
-                dirty=bool(draft.is_dirty),
-                size=int(draft.size),
-            )
-            for draft in self.project.active.assets.values()
-        )
-
-    def set_editor_tab_dirty(self, tab_id, dirty):
-        if self.window is None:
-            return
-        editor = getattr(self.window, "editor", None)
-        setter = getattr(editor, "set_tab_dirty", None)
-        if callable(setter):
-            setter(tab_id, bool(dirty))
-
-    def resolved_draft(self, tab_id):
-        if not self.project.is_active:
-            return None
-        draft = self.project.get_resolved_draft(tab_id)
-        if draft is None:
-            return None
-        return ResolvedDraftInfo(
-            text=draft.current_text,
-            saved_text=draft.saved_text,
-            original_text=draft.original_text,
-            line_sources=tuple(draft.line_sources or ()),
-        )
-
-    def update_resolved_draft(
-        self,
-        tab_id,
-        root_path,
-        title,
-        original_text,
-        current_text,
-        line_sources=(),
-        line_edit=None,
-    ):
-        if not self.project.is_active:
-            self.set_status(
-                "Создайте проект, чтобы изменять файлы",
-                7000,
-            )
-            return False
-
-        document = self._ensure_resolved_document(
-            tab_id,
-            root_path=root_path,
-            title=title,
-            text=current_text,
-            line_sources=line_sources,
-        )
-        if document is None:
-            return False
-
-        if line_edit is not None:
-            return self.apply_resolved_line_edit(
-                tab_id,
-                line_edit.action,
-                line_edit.line_number,
-                line_edit.text,
-            )
-
-        # Полная замена допустима, но не должна затирать более свежий
-        # текст, если документ уже изменился из другой поверхности.
-        if document.current_text == str(current_text or ""):
-            return True
-        return document.replace_text(
-            current_text,
-            line_sources=line_sources,
-            atomic=True,
-        )
-
-    def sync_resolved_line_edit(self, tab_id, edit):
-        """Точечно обновить открытую resolved-вкладку."""
-        return self.apply_resolved_line_edit(
-            tab_id,
-            edit.action,
-            edit.line_number,
-            edit.text,
-        )
-
-    def sync_resolved_tab(self, tab_id, text, line_sources, root_path):
-        """Обновить открытую resolved-вкладку без переключения на неё."""
-        document = self._resolved_documents.get(str(tab_id or ""))
-        if document is not None:
-            document.replace_text(
-                text,
-                line_sources=line_sources,
-                persist=False,
-                atomic=False,
-            )
-
-        if self.window is None:
-            return
-        editor = getattr(self.window, "editor", None)
-        if editor is None:
-            return
-
-        getter = getattr(editor, "get_tab", None)
-        view = getter(tab_id) if callable(getter) else None
-        if view is None or not hasattr(view, "set_content"):
-            return
-
-        first_line = 0
-        cursor = (0, 0)
-        widget = getattr(view, "editor", None)
-        if widget is not None:
-            try:
-                first_line = widget.firstVisibleLine()
-                cursor = widget.getCursorPosition()
-            except Exception:
-                pass
-
-        view.set_content(text, line_sources, root_path)
-        if document is not None:
-            view.set_dirty_state(document.is_dirty)
-
-        if widget is not None:
-            try:
-                widget.setFirstVisibleLine(first_line)
-                widget.setCursorPosition(cursor[0], cursor[1])
-            except Exception:
-                pass
-
-    def save_project_now(self):
-        if not self.project.is_active:
-            self.set_status(
-                "Создайте проект, чтобы сохранять изменения",
-                7000,
-            )
-            return 0
-
-        try:
-            saved = self.project.flush()
-        except Exception as exc:
-            self.log("Проект: ошибка сохранения: %s" % exc)
-            return 0
-
-        if self.window is not None:
-            for event in saved:
-                if event.kind == "file":
-                    self.window.editor.mark_clean(event.path, event.text)
-                elif event.kind == "resolved":
-                    self.window.editor.mark_tab_clean(event.key)
-                    document = self._resolved_documents.get(str(event.key))
-                    if document is not None:
-                        document.mark_saved()
-                        view = self.window.editor.get_tab(document.tab_id)
-                        if view is not None and hasattr(
-                            view,
-                            "set_dirty_state",
-                        ):
-                            if hasattr(view, "mark_clean"):
-                                view.mark_clean(document.saved_text)
-                            else:
-                                view.set_dirty_state(False)
-
-        for event in saved:
-            self.events.publish(Events.PROJECT_SAVED, event)
-
-        self.set_status(
-            "Проект сохранён: %d файл(ов)" % len(saved),
-            4000,
-        )
-        self._update_project_status()
-        return len(saved)
-
-    def document_text(self, path):
-        """Текст файла для редактора: черновик проекта или оригинал."""
-        path = Path(path)
-        if self.project.is_active:
-            text = self.project.get_text(path)
-            if text is not None:
-                return text
-        try:
-            if path.suffix.lower() == ".xml":
-                return read_xml_text(path)
-            return read_text_safe(path)
-        except OSError:
-            return ""
-
-    def on_document_changed(self, path, text):
-        if not self.project.is_active:
-            return
-        try:
-            self.project.update_draft(path, text)
-        except ProjectError as exc:
-            self.log("Проект: не удалось обновить черновик: %s" % exc)
-            return
-
-        # Черновик входит в VFS: ранее собранные корни больше нельзя
-        # считать актуальными, даже если файл на диске не менялся.
-        try:
-            self._invalidate_resolver_cache()
-        except Exception as exc:
-            self.log("Проект: не удалось сбросить кэш резолва: %s" % exc)
-
-        self._update_project_status()
-
-    def on_resolved_changed(self, tab_id, view, text):
-        """Пользователь правит итоговый (resolved) текст."""
-        if not self.project.is_active:
-            return
-
-        title = "%s (resolved)" % Path(view.root_path).name
-
-        try:
-            self.project.update_resolved_draft(
-                tab_id,
-                view.root_path,
-                title,
-                view.baseline_text,
-                text,
-                line_sources=view.line_sources,
-            )
-        except ProjectError as exc:
-            self.log("Проект: не удалось обновить resolved-черновик: %s" % exc)
-            return
-
-        try:
-            self._invalidate_resolver_cache()
-        except Exception as exc:
-            self.log("Проект: не удалось сбросить кэш резолва: %s" % exc)
-
-        self._update_project_status()
-
-    def save_resolved_document(self, tab_id, view=None):
-        document = self._resolved_documents.get(str(tab_id or ""))
-        if document is not None:
-            document.save()
-            return
-
-        if not self.project.is_active:
-            self.set_status(
-                "Создайте проект, чтобы сохранять изменения",
-                7000,
-            )
-            return
-
-        try:
-            self.project.save_resolved_draft(tab_id, view.text())
-        except ProjectError as exc:
-            self.show_error(str(exc))
-            return
-
-        if self.window is not None:
-            self.window.editor.mark_tab_clean(tab_id)
-
-        self.set_status("Resolved сохранён в проекте", 5000)
-        self.log("Проект: сохранён resolved-черновик %s" % tab_id)
-        self._update_project_status()
-
-    def save_current_document(self, path=None, text=None):
-        if not self.project.is_active:
-            self.set_status(
-                "Создайте проект, чтобы сохранять изменения файлов",
-                7000,
-            )
-            return
-
-        if path is None or text is None:
-            editor = None
-            if self.window is not None:
-                editor = self.window.editor.current_editor()
-            if editor is None or not editor.current_file:
-                self.set_status("Нет активного текстового файла", 5000)
-                return
-            path = editor.current_file
-            text = editor.text()
-
-        try:
-            self.project.save_draft(path, text)
-        except ProjectError as exc:
-            self.show_error(str(exc))
-            return
-
-        if self.window is not None:
-            self.window.editor.mark_clean(path, text)
-
-        self.set_status(
-            "Сохранено в проекте: %s" % Path(path).name,
-            5000,
-        )
-        self.log("Проект: сохранён черновик %s" % Path(path).name)
-        self._update_project_status()
-
-    def create_project(self):
-        if self.window is None:
-            return
-
-        setting_definitions = self.project_setting_registry.settings()
-        setting_values = {
-            setting.key: setting.default
-            for setting in setting_definitions
-        }
-        dialog = ProjectCreateDialog(
-            self.window,
-            settings=setting_definitions,
-            setting_values=setting_values,
-            base_dir=self.project.base_dir,
-            suggest_dir=self.project.suggest_project_dir,
-        )
-        if not dialog.exec_():
-            return
-
-        name = dialog.project_name()
-        project_dir = dialog.project_directory() or None
-
-        try:
-            project = self.project.create(
-                name,
-                [],
-                dialog.save_mode(),
-                xml_patch_mode=dialog.xml_patch_mode(),
-                project_dir=project_dir,
-            )
-        except ProjectError as exc:
-            self.show_error(str(exc))
-            return
-
-        for key, value in dialog.module_setting_values().items():
-            self.set_project_setting(key, value)
-
-        self._restore_project_virtual_files()
-        self.window.editor.set_editable(True)
-        self._reload_open_documents()
-        self._update_project_status()
-        self.events.publish(Events.PROJECT_CHANGED, project)
-        self.log("Проект создан: %s" % project.name)
-        self.set_status("Проект создан: %s" % project.name, 5000)
-
-    def load_project(self):
-        if self.window is None:
-            return
-
-        projects = self.project.list_projects()
-        if not projects:
-            QMessageBox.information(
-                self.window,
-                "Проект",
-                "Сохранённых проектов пока нет.",
-            )
-            return
-
-        dialog = ProjectLoadDialog(projects, self.window)
-        if not dialog.exec_():
-            return
-
-        project_id = dialog.selected_id()
-        if not project_id:
-            return
-
-        try:
-            project = self.project.load(project_id)
-        except ProjectError as exc:
-            self.show_error(str(exc))
-            return
-
-        self._restore_project_virtual_files()
-        self.window.editor.set_editable(True)
-        self._reload_open_documents()
-        self._update_project_status()
-        self.events.publish(Events.PROJECT_CHANGED, project)
-        self.log("Проект загружен: %s" % project.name)
-        self.set_status("Проект загружен: %s" % project.name, 5000)
-
-    def _delete_project(self):
-        try:
-            self.project.delete_active_project()
-        except ProjectError as exc:
-            self.show_error(str(exc))
-            return False
-
-        self._restore_project_virtual_files()
-
-        if self.window is not None:
-            self.window.editor.set_editable(False)
-
-        self._update_project_status()
-        self.events.publish(Events.PROJECT_CHANGED, None)
-        self.log("Проект удалён")
-        self.set_status("Проект удалён", 5000)
-        return True
-
-    def project_settings(self):
-        if self.window is None:
-            return
-
-        if not self.project.is_active:
-            QMessageBox.information(
-                self.window,
-                "Проект",
-                "Сначала создайте или загрузите проект.",
-            )
-            return
-
-        setting_definitions = self.project_setting_registry.settings()
-        setting_values = {
-            setting.key: self.project_setting(setting.key)
-            for setting in setting_definitions
-        }
-        dialog = ProjectSettingsDialog(
-            self.project.active,
-            self.window,
-            on_delete=self._delete_project,
-            settings=setting_definitions,
-            setting_values=setting_values,
-        )
-        if not dialog.exec_():
-            return
-
-        if dialog.deleted:
-            return
-
-        try:
-            project = self.project.set_patch_mode(dialog.save_mode())
-            project = self.project.set_xml_patch_mode(
-                dialog.xml_patch_mode()
-            )
-        except ProjectError as exc:
-            self.show_error(str(exc))
-            return
-
-        for key, value in dialog.module_setting_values().items():
-            self.set_project_setting(key, value)
-
-        self._update_project_status()
-        self.log(
-            "Проект: DLTX=%s; DXML=%s"
-            % (project.save_mode, project.xml_patch_mode)
-        )
-        self.set_status(
-            "Проект: DLTX=%s; DXML=%s"
-            % (project.save_mode, project.xml_patch_mode),
-            5000,
-        )
-
-    def _reload_open_documents(self):
-        if self.window is None:
-            return
-        editor = getattr(self.window, "editor", None)
-        if editor is None:
-            return
-
-        for path in editor.open_paths():
-            text = self.document_text(path)
-            editor.reload_path(path, text)
-            editor.mark_clean(path, text)
-
-        handled = set()
-        for tab_id, document in list(self._resolved_documents.items()):
-            draft = self.project.get_resolved_draft(tab_id)
-            if draft is None:
-                continue
-            document.reset(
-                draft.current_text,
-                line_sources=draft.line_sources,
-                saved_text=draft.saved_text,
-                original_text=draft.original_text,
-                persist=False,
-            )
-            view = editor.get_tab(tab_id)
-            if view is not None and hasattr(view, "set_content"):
-                view.set_content(
-                    document.current_text,
-                    document.line_sources,
-                    document.root_path,
-                )
-                view.set_dirty_state(document.is_dirty)
-            editor.set_tab_dirty(tab_id, document.is_dirty)
-            handled.add(tab_id)
-
-        for tab_id, view in editor.resolved_tabs():
-            if tab_id in handled:
-                continue
-            draft = self.project.get_resolved_draft(tab_id)
-            if draft is None:
-                continue
-            view.set_content(
-                draft.current_text,
-                view.line_sources,
-                view.root_path,
-            )
-            view.mark_clean(draft.saved_text)
-            editor.set_tab_dirty(tab_id, draft.is_dirty)
-
-    def autosave_project(self):
-        if not self.project.is_active:
-            return
-
-        try:
-            saved = self.project.autosave()
-        except Exception as exc:
-            self.log("Проект: ошибка автосохранения: %s" % exc)
-            return
-
-        if not saved:
-            return
-
-        if self.window is not None:
-            for event in saved:
-                if event.kind == "file":
-                    self.window.editor.mark_clean(event.path, event.text)
-                elif event.kind == "resolved":
-                    self.window.editor.mark_tab_clean(event.key)
-                    document = self._resolved_documents.get(str(event.key))
-                    if document is not None:
-                        document.mark_saved()
-                        view = self.window.editor.get_tab(document.tab_id)
-                        if view is not None and hasattr(
-                            view,
-                            "set_dirty_state",
-                        ):
-                            if hasattr(view, "mark_clean"):
-                                view.mark_clean(document.saved_text)
-                            else:
-                                view.set_dirty_state(False)
-
-        for event in saved:
-            self.events.publish(Events.PROJECT_SAVED, event)
-
-        self.set_status(
-            "Автосохранение проекта: %d файл(ов)" % len(saved),
-            4000,
-        )
-        self.log("Проект: автосохранено файлов %d" % len(saved))
-        self._update_project_status()
-
-    def on_app_close(self):
-        if not self.project.is_active:
-            return
-        try:
-            self.project.flush()
-        except Exception as exc:
-            self.log("Проект: ошибка сохранения при закрытии: %s" % exc)
-
-    def build_patch_preview(self):
-        if self.window is None:
-            return
-
-        if not self.project.is_active:
-            self.show_error("Создайте или загрузите проект.")
-            return
-
-        if self._forest is None:
-            self.show_error(
-                "Дерево не построено: сначала выполните «Пересобрать VFS»."
-            )
-            return
-
-        if (
-            not self.project.changed_drafts()
-            and not self.project.changed_resolved_drafts()
-            and not self.project.changed_asset_drafts()
-        ):
-            QMessageBox.information(
-                self.window,
-                "Проект",
-                "В проекте нет изменённых файлов.",
-            )
-            return
-
-        self.autosave_project()
-        self.set_status("Подготовка патча проекта…")
-        self.log("Проект: подготовка патча…")
-
-        forest = self._forest
-
-        def work(log):
-            return self.project.build_preview(
-                self.services,
-                forest,
-                log=log,
-            )
-
-        self.tasks.run(
-            work,
-            on_done=self._on_preview_ready,
-            on_log=self.log,
-        )
-
-    def _on_preview_ready(self, preview, err):
-        if err is not None:
-            self.set_status("Ошибка подготовки патча")
-            self.log("Проект: ошибка подготовки патча: %s" % err)
-            self.show_error(str(err))
-            return
-
-        if preview is None:
-            return
-
-        self.set_status(
-            "Патч подготовлен: %d файл(ов)" % len(preview.items),
-            5000,
-        )
-
-        dialog = ProjectPreviewDialog(
-            preview,
-            self.window,
-            on_write=self.write_preview,
-        )
-        dialog.exec_()
-
-    def write_preview(self, preview):
-        if self._forest is None:
-            self.show_error("Нет построенного дерева.")
-            return False
-
-        directory = QFileDialog.getExistingDirectory(
-            self.window,
-            "Выберите каталог, в котором будет создан патч-мод",
-            "",
-            QFileDialog.ShowDirsOnly,
-        )
-        if not directory:
-            return False
-
-        safe_name = re.sub(
-            r'[<>:"/\\|?*]+',
-            "_",
-            preview.project.name,
-        ).strip(" .") or "ACE Patch"
-
-        mod_dir = Path(directory) / ("ACE Patch - " + safe_name)
-        written = []
-        skipped = []
-
-        for item in preview.items:
-            if not item.is_patch:
-                continue
-            if not item.ok:
-                skipped.append(item.title)
-                continue
-
-            plan = item.plan
-            if plan.needs_confirmation:
-                plan = replace(plan, confirmed=True)
-            generated = replace(item.generated, plan=plan)
-
-            try:
-                paths = self.services.write_patch(
-                    generated,
-                    mod_dir,
-                    forbidden_roots=[Path(self._forest.scan_dir)],
-                    overwrite=False,
-                    asset_rules=self.asset_types.patch_rules(),
-                )
-                written.extend(paths)
-            except Exception as exc:
-                self.show_error(
-                    "Не удалось записать %s:\n%s"
-                    % (item.title, exc)
-                )
-                return False
-
-        if not written:
-            self.show_error("Патчи не записаны.")
-            return False
-
-        self.set_status(
-            "Патч-мод создан: %s" % mod_dir.name,
-            7000,
-        )
-        self.log("Проект: записано файлов патча %d" % len(written))
-
-        if skipped:
-            QMessageBox.warning(
-                self.window,
-                "Проект",
-                "Записаны не все файлы. Пропущены:\n%s"
-                % "\n".join(skipped),
-            )
-        else:
-            QMessageBox.information(
-                self.window,
-                "Проект",
-                "Патч-мод создан:\n%s" % mod_dir,
-            )
-
-        return True
-
-    def _update_project_status(self):
-        if self.window is None:
-            return
-        setter = getattr(self.window, "set_project_status", None)
-        if callable(setter):
-            setter(self.project.status_text())
-
-        # Держим доступность «Сформировать патч» в актуальном состоянии,
-        # не дожидаясь повторного открытия меню.
-        updater = getattr(self.window, "_update_project_menu", None)
-        if callable(updater):
-            updater()
-
-        self._apply_override_warning()
-
-    def _apply_override_warning(self):
-        """Красные полосы и заголовок при опасном режиме Override."""
-        if self.window is None:
-            return
-
-        mode = self.project.patch_mode() if self.project.is_active else ""
-        xml_mode = (
-            self.project.active.xml_patch_mode
-            if self.project.is_active
-            else ""
-        )
-        enabled = mode == "override" or xml_mode == "xml_override"
-
-        if enabled == self._override_theme_enabled:
-            return
-        self._override_theme_enabled = enabled
-
-        try:
-            from .theme import apply_override_theme, apply_window_caption
-
-            apply_override_theme(QApplication.instance(), enabled)
-            apply_window_caption(self.window, enabled)
-        except Exception as exc:
-            self.log("Theme: не удалось применить Override-оформление: %s" % exc)
-
-        self.window.setWindowTitle(
-            "Внимание - включен опасный режим работы"
-            if enabled
-            else "LTX Explorer"
-        )
-
-    # -------------------------------------------------- ui-сервисы
     def on_lexer_status(self, message):
         """Обновляемая строка покраски файла в диагностике."""
         self.log_status("ui.lexer", message)
@@ -1749,6 +338,24 @@ class PlatformApi:
 
         return getattr(PALETTE, str(name), fallback)
 
+    def request_window(self, window_id):
+        return self.dispatch_action(
+            Events.UI_WINDOW_REQUESTED,
+            str(window_id or ""),
+        )
+
+    def request_tab(self, tab_id):
+        return self.dispatch_action(
+            Events.UI_TAB_REQUESTED,
+            str(tab_id or ""),
+        )
+
+    def request_file_open(self, path):
+        if self.dispatch_action(Events.UI_FILE_OPEN_REQUESTED, Path(path)):
+            return True
+        self.commands.execute("ui.open_file", Path(path))
+        return True
+
     # -------------------------------------------------- команды платформы
     def request_open_file(self, path):
         self._pending_file_actions.pop(_path_key(path), None)
@@ -1758,9 +365,9 @@ class PlatformApi:
         return ok
 
     # -------------------------------------------------- регистрации (SDK)
-    def register_open_handler(self, handler):
+    def register_open_handler(self, handler, context=None):
         """Модуль регистрирует своего обработчика открытия файла."""
-        self.router.register(handler)
+        self.router.register(handler, context=context)
 
     # -------------------------------------------------- окна модулей
     def show_module_window(self, key, window):
@@ -1826,6 +433,17 @@ class PlatformApi:
         if self.window is not None:
             self.window.editor.show_find()
 
+    def sort_file_tree_by_files_desc(self):
+        """Платформенное действие над деревом, без знания SDK о виджете."""
+        if self.window is None:
+            return False
+        tree = getattr(self.window, "file_tree", None)
+        fn = getattr(tree, "sort_by_files_desc", None)
+        if callable(fn):
+            fn()
+            return True
+        return False
+
     def ask_text(self, prompt: str, initial: str = "") -> str:
         """Запросить текст у пользователя через диалог."""
         from PyQt5.QtWidgets import QInputDialog
@@ -1872,14 +490,25 @@ class PlatformApi:
         return ok
 
     # -------------------------------------------------- факты открытия
-    def _on_file_opened(self, path):
-        """Событие FILE_OPENED: применить навигацию ровно для этого пути."""
+    def _on_file_opened(self, opened):
+        """Событие FILE_OPENED: навигация для открытого файла."""
+        if not isinstance(opened, FileOpened):
+            self.log(
+                "[open] FILE_OPENED должен содержать FileOpened, получено: %r"
+                % type(opened).__name__
+            )
+            return
+        path = opened.path
+        tab_id = str(opened.tab_id or "")
+        if path is None or not tab_id:
+            return
+
         pending = self._pending_file_actions.pop(_path_key(path), None)
         if pending is None or self.window is None:
             return
 
         kind, value = pending
-        widget = self.window.editor.currentWidget()
+        widget = self.window.editor.get_tab(tab_id)
 
         if kind == "search":
             if widget is not None and hasattr(widget, "find_first"):
@@ -1902,10 +531,22 @@ class PlatformApi:
                     "переход к строке: %s" % type(widget).__name__
                 )
 
-    def _on_file_open_failed(self, path):
+    def _on_file_open_failed(self, failed):
         """Файл не открылся: отложенная навигация больше не нужна."""
-        if self._pending_file_actions.pop(_path_key(path), None) is not None:
-            self.log("[open] навигация отменена, файл не открыт: %s" % path)
+        if not isinstance(failed, FileOpenFailed):
+            self.log(
+                "[open] FILE_OPEN_FAILED должен содержать FileOpenFailed, "
+                "получено: %r" % type(failed).__name__
+            )
+            return
+        if self._pending_file_actions.pop(
+            _path_key(failed.path),
+            None,
+        ) is not None:
+            self.log(
+                "[open] навигация отменена, файл не открыт: %s"
+                % failed.path
+            )
 
     def _log_slow_view(self, kind, title, content_elapsed, tab_elapsed):
         """Диагностика: показать, сколько заняла отрисовка вкладки."""
@@ -1915,239 +556,6 @@ class PlatformApi:
                 "[%s] отрисовка %.2f s (контент %.2f, вкладка %.2f): %s"
                 % (kind, total, content_elapsed, tab_elapsed, title)
             )
-
-    def open_resolved_tab(self, tab_id, title, text, line_sources, root_path,
-                          line_number=None):
-        """Открыть (или сфокусировать) вкладку живого resolved-документа."""
-        if self.window is None:
-            return
-
-        tab_id = str(tab_id or "")
-        existing_widget = self.window.editor.get_tab(tab_id)
-        from .editor import ResolvedView
-
-        if isinstance(existing_widget, ResolvedView):
-            document = self._get_or_restore_document(tab_id)
-            if document is None:
-                document = self._ensure_resolved_document(
-                    tab_id,
-                    root_path=root_path,
-                    title=title,
-                    text=text,
-                    line_sources=line_sources,
-                )
-            if document is not None:
-                if existing_widget.document is not document:
-                    existing_widget.bind_document(document)
-                if (
-                    not document.is_dirty
-                    and not document.has_changes
-                    and str(text) != document.current_text
-                ):
-                    if self.project.is_active:
-                        self.project.remove_resolved_draft(tab_id)
-                    document.reset(
-                        text,
-                        line_sources=line_sources,
-                        saved_text=text,
-                        original_text=text,
-                        persist=False,
-                    )
-                    self._reload_resolved_view(
-                        existing_widget,
-                        document.current_text,
-                        document.line_sources,
-                        document.root_path,
-                    )
-                    existing_widget.set_dirty_state(False)
-            self.window.editor.setCurrentWidget(existing_widget)
-            if line_number is not None:
-                existing_widget.goto_line(int(line_number))
-            return
-
-        document = self._ensure_resolved_document(
-            tab_id,
-            root_path=root_path,
-            title=title,
-            text=text,
-            line_sources=line_sources,
-        )
-        if document is None:
-            self.show_error(
-                "Не удалось открыть resolved-документ: %s" % tab_id
-            )
-            return
-
-        started = time.perf_counter()
-        view = ResolvedView()
-        view.set_editable(self.can_edit_documents())
-        view.set_content(
-            document.current_text,
-            document.line_sources,
-            document.root_path,
-        )
-        view.bind_document(document)
-        view.set_dirty_state(document.is_dirty)
-        content_elapsed = time.perf_counter() - started
-
-        view.source_activated.connect(
-            lambda path, search: self.request_open_file_with_search(path, search)
-        )
-        view.source_raw_activated.connect(
-            lambda path, search: self.request_open_file_raw_with_search(
-                path,
-                search,
-            )
-        )
-        view.diagnostic.connect(lambda msg: self.log("[resolved] %s" % msg))
-        view.diagnostic.connect(lambda msg: self.set_status(msg, 8000))
-        view.lexer_status.connect(self.on_lexer_status)
-        view.save_requested.connect(
-            lambda tid=tab_id: self.save_resolved_document(tid)
-        )
-        view.dirty_changed.connect(
-            lambda dirty, tid=tab_id: self.window.editor.set_tab_dirty(
-                tid,
-                dirty,
-            )
-        )
-        view.item_requested.connect(
-            lambda section, tid=tab_id, v=view: self._request_item_card(
-                tid,
-                section,
-                v.cursor_line(),
-            )
-        )
-
-        started = time.perf_counter()
-        self.window.editor.open_tab(
-            tab_id,
-            title,
-            view,
-            source_path=root_path,
-        )
-        tab_elapsed = time.perf_counter() - started
-        self._log_slow_view("resolved", title, content_elapsed, tab_elapsed)
-
-        if document.is_dirty:
-            self.window.editor.set_tab_dirty(tab_id, True)
-
-        if line_number is not None:
-            view.goto_line(int(line_number))
-
-    def _request_item_card(self, tab_id, section, line_number):
-        self.events.publish(
-            Events.ITEM_CARD_REQUESTED,
-            ItemCardRequest(
-                tab_id=str(tab_id),
-                section=str(section),
-                line_number=int(line_number or 0),
-            ),
-        )
-
-    def open_resolved_document(self, tab_id, line_number=None):
-        """Открыть или сфокусировать resolved-документ по id вкладки."""
-        tab_id = str(tab_id or "")
-        document = self._resolved_documents.get(tab_id)
-        if document is None:
-            draft = (
-                self.project.get_resolved_draft(tab_id)
-                if self.project.is_active
-                else None
-            )
-            if draft is None:
-                return False
-            document = self._ensure_resolved_document(
-                tab_id,
-                draft.root_path,
-                draft.title,
-                draft.current_text,
-                draft.line_sources,
-            )
-        if document is None:
-            return False
-
-        self.open_resolved_tab(
-            tab_id,
-            document.title,
-            document.current_text,
-            document.line_sources,
-            document.root_path,
-            line_number=line_number,
-        )
-        return True
-
-    def open_xml_resolved_tab(self, tab_id, title, text, root_path,
-                              line_sources=None, line_number=None):
-        """Открыть XML-резолв в отдельной вкладке с панелью источников."""
-        if self.window is None:
-            return
-        from .editor import ResolvedView
-
-        sources = list(line_sources or [])
-        has_sources = any(src is not None for src in sources)
-        started = time.perf_counter()
-        view = ResolvedView()
-        view.set_editable(self.can_edit_documents())
-
-        existing = (
-            self.project.get_resolved_draft(tab_id)
-            if self.project.is_active
-            else None
-        )
-        display_text = existing.current_text if existing is not None else text
-
-        view.set_content(
-            display_text,
-            sources,
-            str(root_path),
-            sources_visible=has_sources,
-        )
-        if existing is not None:
-            view.mark_clean(existing.saved_text)
-        content_elapsed = time.perf_counter() - started
-
-        view.source_activated.connect(
-            lambda path, search: self.request_open_file_with_search(path, search)
-        )
-        view.source_raw_activated.connect(
-            lambda path, search: self.request_open_file_raw_with_search(path, search)
-        )
-        view.diagnostic.connect(lambda msg: self.log("[xml-resolved] %s" % msg))
-        view.diagnostic.connect(lambda msg: self.set_status(msg, 8000))
-        view.lexer_status.connect(self.on_lexer_status)
-        view.content_changed.connect(
-            lambda new_text, tid=tab_id, v=view: self.on_resolved_changed(
-                tid,
-                v,
-                new_text,
-            )
-        )
-        view.save_requested.connect(
-            lambda tid=tab_id, v=view: self.save_resolved_document(tid, v)
-        )
-        view.dirty_changed.connect(
-            lambda dirty, tid=tab_id: self.window.editor.set_tab_dirty(
-                tid,
-                dirty,
-            )
-        )
-
-        started = time.perf_counter()
-        self.window.editor.open_tab(
-            tab_id,
-            title,
-            view,
-            source_path=str(root_path),
-        )
-        tab_elapsed = time.perf_counter() - started
-        self._log_slow_view("xml-resolved", title, content_elapsed, tab_elapsed)
-
-        if existing is not None and existing.is_dirty:
-            self.window.editor.set_tab_dirty(tab_id, True)
-
-        if line_number is not None:
-            view.goto_line(int(line_number))
 
     def request_open_file_raw_with_search(self, path, search_text):
         """Открыть файл как сырой текст и перейти к строке поиска."""

@@ -258,6 +258,21 @@ class LtxResolverAdapter:
             if original_text == current_text:
                 continue
 
+            # Защита от повреждённого/дублированного resolved-черновика:
+            # иначе diff на 80 МБ против 40 МБ фактически вешает резолв.
+            if len(current_text) > len(original_text) * 1.5 + 1_000_000:
+                _log(
+                    log,
+                    "Resolved overlay: %s — пропущено "
+                    "(текст подозрительно больше оригинала: %d > %d)"
+                    % (
+                        Path(root_path).name,
+                        len(current_text),
+                        len(original_text),
+                    ),
+                )
+                continue
+
             changes, issues = self._resolved_changes(
                 original_text,
                 current_text,

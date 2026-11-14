@@ -13,12 +13,12 @@ from tests.support import SRC  # noqa: F401
 
 from sdk import ProjectSetting, ProjectSettingChoice
 from sdk.adapters import UiApiAdapter
-from ui.project import Project, ProjectService
+from app.projects import Project, ProjectService
 from ui.project_dialogs import (
     ProjectCreateDialog,
     ProjectSettingsDialog,
 )
-from ui.project_settings import ProjectSettingError, ProjectSettingsRegistry
+from app.projects import ProjectSettingError, ProjectSettingsRegistry
 
 _app = qapp()
 

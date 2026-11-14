@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Связи секции: .ogg-файлы из snd_*-полей для общего графа.
+"""РЎРІСЏР·Рё СЃРµРєС†РёРё: .ogg-С„Р°Р№Р»С‹ РёР· snd_*-РїРѕР»РµР№ РґР»СЏ РѕР±С‰РµРіРѕ РіСЂР°С„Р°.
 
-Вся звуковая семантика (какие поля считаются звуковыми, как искать
-.ogg, как отличать потерянные ссылки) живёт здесь. Базовый модуль
-только складывает полученные узлы в общий граф.
+Р’СЃСЏ Р·РІСѓРєРѕРІР°СЏ СЃРµРјР°РЅС‚РёРєР° (РєР°РєРёРµ РїРѕР»СЏ СЃС‡РёС‚Р°СЋС‚СЃСЏ Р·РІСѓРєРѕРІС‹РјРё, РєР°Рє РёСЃРєР°С‚СЊ
+.ogg, РєР°Рє РѕС‚Р»РёС‡Р°С‚СЊ РїРѕС‚РµСЂСЏРЅРЅС‹Рµ СЃСЃС‹Р»РєРё) Р¶РёРІС‘С‚ Р·РґРµСЃСЊ. Р‘Р°Р·РѕРІС‹Р№ РјРѕРґСѓР»СЊ
+С‚РѕР»СЊРєРѕ СЃРєР»Р°РґС‹РІР°РµС‚ РїРѕР»СѓС‡РµРЅРЅС‹Рµ СѓР·Р»С‹ РІ РѕР±С‰РёР№ РіСЂР°С„.
 """
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from sdk import (
@@ -16,31 +15,32 @@ from sdk import (
     GraphMatch,
     GraphNode,
     SectionGraphContribution,
+    path_key as sdk_path_key,
 )
 
 from .sections import extract_sound_references
 
 
 class OggSectionGraphContributor:
-    """Дополняет граф связей секции найденными .ogg-файлами."""
+    """Р”РѕРїРѕР»РЅСЏРµС‚ РіСЂР°С„ СЃРІСЏР·РµР№ СЃРµРєС†РёРё РЅР°Р№РґРµРЅРЅС‹РјРё .ogg-С„Р°Р№Р»Р°РјРё."""
 
     EDGE_TYPE = "sound_reference"
     EDGE_STYLES = {
-        EDGE_TYPE: GraphEdgeStyle("Звук", "graph_sound"),
+        EDGE_TYPE: GraphEdgeStyle("Р—РІСѓРє", "graph_sound"),
     }
 
     def __init__(self, ctx):
         self.ctx = ctx
 
     def open_node(self, node):
-        """Открыть звуковой узел силами OGG-модуля."""
+        """РћС‚РєСЂС‹С‚СЊ Р·РІСѓРєРѕРІРѕР№ СѓР·РµР» СЃРёР»Р°РјРё OGG-РјРѕРґСѓР»СЏ."""
         target = (
             getattr(node, "target_path", None)
             or getattr(node, "physical_path", None)
         )
         if target is None:
             self.ctx.ui.show_error(
-                "Звуковой файл не найден: %s"
+                "Р—РІСѓРєРѕРІРѕР№ С„Р°Р№Р» РЅРµ РЅР°Р№РґРµРЅ: %s"
                 % (
                     getattr(node, "raw_ref", None)
                     or getattr(node, "display_name", "")
@@ -95,8 +95,8 @@ class OggSectionGraphContributor:
                 if self._path_key(reference.path) not in found_paths
             ]
             lost = self._make_nodes(lost_refs, resolved=False)
-            # Левый список уже заморожен; в VFS-режиме модуль
-            # добавляет только потерянные звуки в правую панель.
+            # Р›РµРІС‹Р№ СЃРїРёСЃРѕРє СѓР¶Рµ Р·Р°РјРѕСЂРѕР¶РµРЅ; РІ VFS-СЂРµР¶РёРјРµ РјРѕРґСѓР»СЊ
+            # РґРѕР±Р°РІР»СЏРµС‚ С‚РѕР»СЊРєРѕ РїРѕС‚РµСЂСЏРЅРЅС‹Рµ Р·РІСѓРєРё РІ РїСЂР°РІСѓСЋ РїР°РЅРµР»СЊ.
             found = ()
 
         return SectionGraphContribution(
@@ -125,7 +125,7 @@ class OggSectionGraphContributor:
         )
 
     def _vfs_references(self, services, graph, section_name, sounds_root):
-        """Ссылки из всех VFS-файлов, где встречается секция."""
+        """РЎСЃС‹Р»РєРё РёР· РІСЃРµС… VFS-С„Р°Р№Р»РѕРІ, РіРґРµ РІСЃС‚СЂРµС‡Р°РµС‚СЃСЏ СЃРµРєС†РёСЏ."""
         paths = []
         root = getattr(graph, "root", None)
         if root is not None and root.file_path is not None:
@@ -217,4 +217,4 @@ class OggSectionGraphContributor:
     def _path_key(path) -> str:
         if path is None:
             return ""
-        return os.path.normcase(os.path.abspath(str(path)))
+        return sdk_path_key(path)

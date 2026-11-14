@@ -33,9 +33,13 @@ class _Ui:
         self.errors = []
         self.logs = []
         self.overlay = ProjectOverlay()
+        self.resolved = None
 
     def is_project_active(self):
         return True
+
+    def resolved_draft(self, tab_id):
+        return self.resolved
 
     def project_name(self):
         return "Мой проект"
@@ -74,6 +78,48 @@ class _Services:
 
     def forest_scan_dir(self, forest):
         return self._scan_dir
+
+    def ltx_section_at_line(self, text, line_number):
+        from core import parse_ltx_document
+
+        return parse_ltx_document(text).section_at_line(line_number)
+
+    def ltx_section_bounds(self, text, section):
+        from core import parse_ltx_document
+
+        return parse_ltx_document(text).section_bounds(section)
+
+    def ltx_key_from_line(self, line):
+        from core.patching.ltx.document import parse_key_line
+        from core.tools.fs import strip_comments
+
+        parsed = parse_key_line(strip_comments(str(line or "")).strip())
+        return parsed[1].lower() if parsed else ""
+
+    def ltx_edit_section(
+        self,
+        text,
+        section,
+        key,
+        action,
+        new_line=None,
+        after_key=None,
+    ):
+        from core import edit_section_text
+
+        return edit_section_text(
+            text,
+            section,
+            key,
+            action,
+            new_line=new_line,
+            after_key=after_key,
+        )
+
+    def ltx_declared_sections(self, text):
+        from core import declared_sections
+
+        return declared_sections(text)
 
 
 class _Ctx:
@@ -209,21 +255,24 @@ class NewItemFileEditTest(unittest.TestCase):
             )
             feature._root_path = Path("system.ltx")
             feature._tab_id = "base.resolved:system.ltx"
-            feature._resolved_text = (
-                "[base_item]\n"
-                "kind = i_food\n"
-                "\n"
-                "[new_item]\n"
-                "kind =\n"
-                "cost =\n"
-            )
-            feature._line_sources = (
-                None,
-                None,
-                None,
-                SimpleNamespace(path=path),
-                SimpleNamespace(path=path),
-                SimpleNamespace(path=path),
+            feature._title = "[Res]system.ltx"
+            ctx.ui.resolved = SimpleNamespace(
+                text=(
+                    "[base_item]\n"
+                    "kind = i_food\n"
+                    "\n"
+                    "[new_item]\n"
+                    "kind =\n"
+                    "cost =\n"
+                ),
+                line_sources=(
+                    None,
+                    None,
+                    None,
+                    SimpleNamespace(path=path),
+                    SimpleNamespace(path=path),
+                    SimpleNamespace(path=path),
+                ),
             )
             feature.show = lambda: None
 
@@ -237,7 +286,7 @@ class NewItemFileEditTest(unittest.TestCase):
 
             self.assertIn("kind = i_med", ctx.ui.files[path])
             self.assertEqual(
-                feature._resolved_text,
+                ctx.ui.resolved.text,
                 "[base_item]\nkind = i_food\n\n"
                 "[new_item]\nkind =\ncost =\n",
             )
@@ -257,7 +306,11 @@ class ItemCreationTest(unittest.TestCase):
         )
         self.feature._root_path = Path("system.ltx")
         self.feature._tab_id = "base.resolved:system.ltx"
-        self.feature._resolved_text = "[base]\n"
+        self.feature._title = "[Res]system.ltx"
+        self.ctx.ui.resolved = SimpleNamespace(
+            text="[base]\n",
+            line_sources=(),
+        )
         self.feature._catalog = ItemCatalog(
             items=(
                 ItemEntry(

@@ -5,7 +5,7 @@ import unittest
 
 from tests.support import SRC  # noqa: F401
 
-from ui.documents import ResolvedDocument, apply_line_edit
+from app.documents import ResolvedDocument, apply_line_edit
 
 
 class _Events:

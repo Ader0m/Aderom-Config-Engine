@@ -3,7 +3,6 @@
 
 from pathlib import Path
 
-from sdk.api import ProjectOverlay
 from sdk.events import Events
 
 from .settings import config_dir_candidates
@@ -107,17 +106,13 @@ class CleanRunFeature:
         self.ctx.events.publish(Events.CLEAN_RUN_FINISHED, forest)
 
         try:
-            source_overlay = ProjectOverlay(
-                source_files=getattr(
-                    self._overlay,
-                    "source_files",
-                    None,
-                ) or {},
-            )
+            # Предсборка должна видеть тот же слой правок, что и обычный
+            # резолв: source_files и resolved_edits. Иначе ключ кэша и
+            # вычисленное значение расходятся.
             self.ctx.services.start_prebuild(
                 forest,
                 self.session.config_dir,
-                overlay=source_overlay,
+                overlay=self._overlay,
             )
         except Exception as exc:
             self.ctx.ui.log("Не удалось запустить фоновую сборку: %s" % exc)

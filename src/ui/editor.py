@@ -431,20 +431,12 @@ class CodeEditor(QWidget):
     # -------------------------------------------------- содержимое
     @staticmethod
     def _read_text(path: Path) -> str:
-        # XML в X-Ray/Anomaly всегда windows-1251, без автоопределения.
-        if path.suffix.lower() == ".xml":
-            raw = path.read_bytes()
-            if raw.startswith(b"\xef\xbb\xbf"):
-                raw = raw[3:]
-            return raw.decode("windows-1251", errors="replace")
+        # Правила кодировок живут в core, а не в UI.
+        from core import read_text_safe, read_xml_text
 
-        raw = path.read_bytes()
-        if raw.startswith(b"\xef\xbb\xbf"):
-            raw = raw[3:]
-        try:
-            return raw.decode("utf-8")
-        except UnicodeDecodeError:
-            return raw.decode("windows-1251", errors="replace")
+        if path.suffix.lower() == ".xml":
+            return read_xml_text(path)
+        return read_text_safe(path)
 
     def _show_content(self, text, label, source_path=None, readonly=False,
                       syntax=True, notice=None):
@@ -1049,14 +1041,20 @@ class ResolvedView(QWidget):
 
     @property
     def line_sources(self):
+        if self._document is not None:
+            return tuple(self._document.line_sources)
         return tuple(self._line_sources)
 
     @property
     def baseline_text(self):
+        if self._document is not None:
+            return self._document.saved_text
         return self._baseline_text
 
     @property
     def is_dirty(self):
+        if self._document is not None:
+            return self._document.is_dirty
         return self._dirty
 
     def text(self):
@@ -1074,11 +1072,19 @@ class ResolvedView(QWidget):
         self.editor.setReadOnly(not self._editable)
 
     def mark_clean(self, text=None):
+        if self._document is not None:
+            self._document.mark_saved(
+                self.text() if text is None else text
+            )
+            self._set_dirty(self._document.is_dirty)
+            return
         self._baseline_text = self.text() if text is None else str(text)
         self._set_dirty(self.text() != self._baseline_text)
 
     def set_dirty_state(self, dirty):
         """Установить признак изменений без пересчёта всего текста."""
+        if self._document is not None:
+            dirty = self._document.is_dirty
         self._set_dirty(bool(dirty))
 
     def undo(self):
@@ -1197,19 +1203,25 @@ class ResolvedView(QWidget):
             else:
                 return False
 
-            sources = list(self._line_sources)
-            while len(sources) < line_count:
-                sources.append(None)
+            if self._document is not None:
+                # Канонический line_sources уже обновлён документом
+                # до вызова view.apply_line_edit.
+                sources = list(self._document.line_sources)
+            else:
+                sources = list(self._line_sources)
+                while len(sources) < line_count:
+                    sources.append(None)
 
-            if action == "insert":
-                index = min(max(line_number, 0), len(sources))
-                sources.insert(index, None)
-            elif action == "delete":
-                index = line_number - 1
-                if 0 <= index < len(sources):
-                    del sources[index]
+                if action == "insert":
+                    index = min(max(line_number, 0), len(sources))
+                    sources.insert(index, None)
+                elif action == "delete":
+                    index = line_number - 1
+                    if 0 <= index < len(sources):
+                        del sources[index]
 
-            self._line_sources = sources
+            if self._document is None:
+                self._line_sources = sources
             self.source_list.set_sources(sources)
             return True
         finally:
@@ -1227,6 +1239,30 @@ class ResolvedView(QWidget):
         if self._loading:
             return
         text = self.text()
+        if self._document is not None:
+            current = self._document.current_text
+            if (
+                current
+                and len(text) == len(current) * 2
+                and text == current + current
+            ):
+                # Не даём «двойному» тексту попасть в документ и проект.
+                self.diagnostic.emit(
+                    "Обнаружено дублирование resolved-текста; "
+                    "вкладка восстановлена из документа"
+                )
+                self._loading = True
+                try:
+                    self.editor.setText(current)
+                    self._line_sources = list(
+                        self._document.line_sources
+                    )
+                    self.source_list.set_sources(self._line_sources)
+                finally:
+                    self._loading = False
+                self._set_dirty(self._document.is_dirty)
+                return
+
         self.content_changed.emit(text)
         if self._document is not None:
             self._document.replace_text(
@@ -1234,6 +1270,14 @@ class ResolvedView(QWidget):
                 origin=self,
                 focus_line=self.cursor_line(),
             )
+            # Панель источников перестраиваем только при изменении
+            # количества строк: иначе каждый символ в 40-МБ файле
+            # приводил бы к полной перезаливке модели списка.
+            if len(self._line_sources) != self._document.line_count:
+                self._line_sources = list(self._document.line_sources)
+                self.source_list.set_sources(self._line_sources)
+            self._set_dirty(self._document.is_dirty)
+            return
         self._set_dirty(text != self._baseline_text)
 
     def _request_save(self):

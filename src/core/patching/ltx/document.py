@@ -220,6 +220,10 @@ class LtxDocument:
     deleted_sections: set = field(default_factory=set)
     includes: Tuple[str, ...] = ()
     diagnostics: Tuple[str, ...] = ()
+    # Все заголовки в порядке появления: (имя, номер строки). Нужны для
+    # навигации/редактирования, где важны границы секции, а не только
+    # эффективные значения.
+    headers: Tuple[Tuple[str, int], ...] = ()
 
     def section(self, name: str) -> Optional[LtxSectionModel]:
         return self.sections.get((name or "").lower())
@@ -237,6 +241,78 @@ class LtxDocument:
 
     def defined_names(self) -> set:
         return set(self.sections)
+
+    def section_at_line(self, line_number) -> Optional[str]:
+        """Имя секции, в которой находится строка (1-based)."""
+        try:
+            line_number = int(line_number)
+        except (TypeError, ValueError):
+            return None
+        if line_number < 1:
+            return None
+        found = None
+        for name, line in self.headers:
+            if line > line_number:
+                break
+            found = name
+        return found
+
+    def section_bounds(self, name) -> Optional[Tuple[int, int]]:
+        """Границы секции ``(start, end)``; ``end`` — исключающая."""
+        wanted = str(name or "").strip().lower()
+        if not wanted:
+            return None
+        total = self.text.count("\n") + 1
+        for index, (header, line) in enumerate(self.headers):
+            if header != wanted:
+                continue
+            end = total + 1
+            if index + 1 < len(self.headers):
+                end = self.headers[index + 1][1]
+            return line, end
+        return None
+
+    def line_offsets(self) -> Tuple[int, ...]:
+        """Смещения начала каждой строки в ``text`` (0-based)."""
+        cached = getattr(self, "_line_offsets_cache", None)
+        if cached is not None:
+            return cached
+        offsets = [0]
+        position = 0
+        for line in self.text.split("\n")[:-1]:
+            position += len(line) + 1
+            offsets.append(position)
+        self._line_offsets_cache = tuple(offsets)
+        return self._line_offsets_cache
+
+    def section_block(self, name) -> Optional[Tuple[str, int]]:
+        """Текст блока секции и смещение её первой строки (0-based)."""
+        bounds = self.section_bounds(name)
+        if bounds is None:
+            return None
+        start, end = bounds
+        offsets = self.line_offsets()
+        char_start = offsets[start - 1]
+        char_end = (
+            offsets[end - 1]
+            if 0 < end <= len(offsets)
+            else len(self.text)
+        )
+        return self.text[char_start:char_end], start - 1
+
+    def field_line(self, section, key) -> int:
+        """Номер строки поля (последнее ``set``-вхождение) или 0."""
+        model = self.section(section)
+        if model is None:
+            return 0
+        wanted = str(key or "").strip().lower()
+        if not wanted:
+            return 0
+        found = 0
+        for entry in model.entries:
+            if entry.key.lower() == wanted and entry.operation == "set":
+                found = entry.line_number
+        return found
 
     @property
     def is_empty(self) -> bool:
@@ -350,6 +426,7 @@ def parse_ltx_document(text: str, source_path=None) -> LtxDocument:
     deleted_sections = set()
     includes: List[str] = []
     diagnostics: List[str] = []
+    headers: List[Tuple[str, int]] = []
 
     current: Optional[LtxSectionModel] = None
     i = 0
@@ -380,6 +457,8 @@ def parse_ltx_document(text: str, source_path=None) -> LtxDocument:
                 current = None
                 i += 1
                 continue
+
+            headers.append((name, line_number))
 
             if kind == "delete":
                 deleted_sections.add(name)
@@ -475,6 +554,7 @@ def parse_ltx_document(text: str, source_path=None) -> LtxDocument:
         deleted_sections=deleted_sections,
         includes=tuple(includes),
         diagnostics=tuple(diagnostics),
+        headers=tuple(headers),
     )
 
 
@@ -482,6 +562,75 @@ def parse_ltx_file(path) -> LtxDocument:
     """Прочитать и разобрать LTX-файл."""
     path = Path(path)
     return parse_ltx_document(read_text_safe(path), source_path=path)
+
+
+def declared_sections(text) -> Tuple[str, ...]:
+    """Имена всех объявленных секций в порядке появления."""
+    document = parse_ltx_document(text)
+    result = []
+    seen = set()
+    for name, _line in document.headers:
+        if name in seen:
+            continue
+        seen.add(name)
+        result.append(name)
+    return tuple(result)
+
+
+def edit_section_text(
+    text,
+    section,
+    key,
+    action,
+    new_line=None,
+    after_key=None,
+):
+    """Точечно изменить строку секции, сохранив переводы строк.
+
+    Единая операция для UI-карточек и модулей: разбор границ секции и
+    ключа выполняется тем же LTX-парсером, что и diff/патчи.
+    """
+    original = str(text or "")
+    newline = "\r\n" if "\r\n" in original else "\n"
+    normalized = original.replace("\r\n", "\n").replace("\r", "\n")
+    document = parse_ltx_document(normalized)
+    bounds = document.section_bounds(section)
+    if bounds is None:
+        return None
+
+    lines = normalized.split("\n")
+    start, end = bounds
+    wanted = str(key or "").strip().lower()
+    found = None
+    for index in range(start, min(end - 1, len(lines))):
+        parsed = parse_key_line(strip_comments(lines[index]).strip())
+        if parsed is None:
+            continue
+        operation, line_key, _raw, _has_value = parsed
+        if operation == "set" and line_key.lower() == wanted:
+            found = index
+            break
+
+    if action == "replace":
+        line = str(new_line or "").rstrip("\r\n")
+        if found is None:
+            lines.insert(end - 1, line)
+        else:
+            lines[found] = line
+    elif action == "delete":
+        if found is None:
+            return None
+        del lines[found]
+    elif action == "insert":
+        line = str(new_line or "").rstrip("\r\n")
+        if found is None:
+            lines.insert(end - 1, line)
+        else:
+            lines.insert(found + 1, line)
+    else:
+        return None
+
+    return newline.join(lines)
 
 
 class DocumentSession:

@@ -108,7 +108,68 @@ class FakeXmlResolver:
         self.cached.add(key)
 
 
+class OverlayRecordingResolver(FakeResolver):
+    def __init__(self):
+        super().__init__(cached=[])
+        self.key_overlays = []
+        self.value_overlays = []
+
+    def overlay_for_root(self, forest, path, overlay):
+        return overlay
+
+    def resolved_key(self, path, forest, config_dir, overlay=None):
+        self.key_overlays.append(overlay)
+        return self._key(path)
+
+    def assemble_resolved(
+        self,
+        path,
+        forest,
+        config_dir,
+        log=None,
+        key=None,
+        overlay=None,
+    ):
+        self.value_overlays.append(overlay)
+        return super().assemble_resolved(
+            path,
+            forest,
+            config_dir,
+            log=log,
+            key=key,
+            overlay=overlay,
+        )
+
+
 class PrebuildServiceTest(unittest.TestCase):
+    def test_resolved_overlay_is_used_for_key_and_value(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d)
+            path = cfg / "system.ltx"
+            path.write_text("[system]\n", encoding="utf-8")
+
+            resolver = OverlayRecordingResolver()
+            service = PrebuildService(resolver, workers=1)
+            overlay = {
+                "source_files": {path: "[system]\n"},
+                "resolved_edits": {
+                    path: ("[system]\n", "[system]\nx = 1\n", ()),
+                },
+            }
+            service.start(FakeForest([path]), cfg, overlay=overlay)
+            service.wait()
+
+            self.assertEqual(len(resolver.key_overlays), 1)
+            self.assertEqual(len(resolver.value_overlays), 1)
+            self.assertIs(
+                resolver.key_overlays[0],
+                resolver.value_overlays[0],
+            )
+            self.assertEqual(
+                resolver.value_overlays[0]["resolved_edits"],
+                overlay["resolved_edits"],
+            )
+
     def test_skips_cached_and_collects_missing(self):
         with tempfile.TemporaryDirectory() as d:
             cfg = Path(d)
@@ -127,6 +188,26 @@ class PrebuildServiceTest(unittest.TestCase):
             self.assertEqual(status["total"], 2)
             self.assertEqual(status["done"], 2)
             self.assertEqual(resolver.calls, [str(b)])
+
+    def test_roots_filter_collects_only_affected(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d)
+            a = cfg / "a.ltx"
+            b = cfg / "b.ltx"
+            a.write_text("[a]\n", encoding="utf-8")
+            b.write_text("[b]\n", encoding="utf-8")
+
+            resolver = FakeResolver(cached=[])
+            service = PrebuildService(resolver, workers=1)
+            service.start(
+                FakeForest([a, b]),
+                cfg,
+                roots={a},
+            )
+            service.wait()
+
+            self.assertEqual(resolver.calls, [str(a)])
+            self.assertEqual(service.status()["total"], 1)
 
     def test_includes_xml_files(self):
         with tempfile.TemporaryDirectory() as d:

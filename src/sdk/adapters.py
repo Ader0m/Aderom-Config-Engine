@@ -36,6 +36,42 @@ from .api import (
 _SDK_API_MARKER = "_sdk_api_kind"
 
 
+def _to_item_entry(item) -> ItemEntry:
+    """Единая конверсия core/SDK-записи предмета в SDK-модель.
+
+    Используется и CoreApiAdapter, и UiApiAdapter: модуль не должен
+    получать core-модель через один API и SDK-модель через другой.
+    """
+    icon_path = getattr(item, "icon_path", None)
+    if icon_path is not None:
+        icon_path = Path(icon_path)
+
+    return ItemEntry(
+        section=str(getattr(item, "section", "")),
+        fields=tuple(
+            ItemField(
+                key=str(getattr(field, "key", "")),
+                value=str(getattr(field, "value", "")),
+                line_number=int(
+                    getattr(field, "line_number", 0) or 0
+                ),
+            )
+            for field in (getattr(item, "fields", ()) or ())
+        ),
+        icon_texture=str(getattr(item, "icon_texture", "")),
+        icon_path=icon_path,
+        icon_x=int(getattr(item, "icon_x", 0) or 0),
+        icon_y=int(getattr(item, "icon_y", 0) or 0),
+        icon_width=int(getattr(item, "icon_width", 1) or 1),
+        icon_height=int(getattr(item, "icon_height", 1) or 1),
+        line_number=int(getattr(item, "line_number", 0) or 0),
+        name_text=str(getattr(item, "name_text", "") or ""),
+        description_text=str(
+            getattr(item, "description_text", "") or ""
+        ),
+    )
+
+
 # ---------------------------------------------------------------- core
 
 
@@ -173,6 +209,48 @@ class CoreApiAdapter:
             return reader(path)
         return Path(path).read_text(encoding="utf-8", errors="replace")
 
+    def read_xml_text(self, path):
+        reader = getattr(self._provider, "read_xml_text", None)
+        if callable(reader):
+            return reader(path)
+        return Path(path).read_bytes().decode(
+            "windows-1251",
+            errors="replace",
+        )
+
+    def ltx_section_at_line(self, text, line_number):
+        return self._provider.ltx_section_at_line(text, line_number)
+
+    def ltx_section_bounds(self, text, section):
+        return self._provider.ltx_section_bounds(text, section)
+
+    def ltx_field_line(self, text, section, key):
+        return self._provider.ltx_field_line(text, section, key)
+
+    def ltx_key_from_line(self, line):
+        return self._provider.ltx_key_from_line(line)
+
+    def ltx_declared_sections(self, text):
+        return self._provider.ltx_declared_sections(text)
+
+    def ltx_edit_section(
+        self,
+        text,
+        section,
+        key,
+        action,
+        new_line=None,
+        after_key=None,
+    ):
+        return self._provider.ltx_edit_section(
+            text,
+            section,
+            key,
+            action,
+            new_line=new_line,
+            after_key=after_key,
+        )
+
     # --- фоновая предсборка ------------------------------------------------
 
     def start_prebuild(self, forest, config_dir, overlay=None):
@@ -202,8 +280,8 @@ class CoreApiAdapter:
     def prebuild_status(self):
         return self._provider.prebuild_status()
 
-    def wait_prebuild(self, log=None):
-        return self._provider.wait_prebuild(log=log)
+    def wait_prebuild(self, log=None, timeout=None):
+        return self._provider.wait_prebuild(log=log, timeout=timeout)
 
     def stop_prebuild(self):
         return self._provider.stop_prebuild()
@@ -318,7 +396,7 @@ class CoreApiAdapter:
 
         items = []
         for item in (getattr(raw, "items", ()) or ()):
-            items.append(self._item_entry(item))
+            items.append(_to_item_entry(item))
 
         sections = tuple(
             ItemSection(
@@ -347,36 +425,7 @@ class CoreApiAdapter:
             ),
         )
 
-    @staticmethod
-    def _item_entry(item) -> ItemEntry:
-        icon_path = getattr(item, "icon_path", None)
-        if icon_path is not None:
-            icon_path = Path(icon_path)
 
-        return ItemEntry(
-            section=str(getattr(item, "section", "")),
-            fields=tuple(
-                ItemField(
-                    key=str(getattr(field, "key", "")),
-                    value=str(getattr(field, "value", "")),
-                    line_number=int(
-                        getattr(field, "line_number", 0) or 0
-                    ),
-                )
-                for field in (getattr(item, "fields", ()) or ())
-            ),
-            icon_texture=str(getattr(item, "icon_texture", "")),
-            icon_path=icon_path,
-            icon_x=int(getattr(item, "icon_x", 0) or 0),
-            icon_y=int(getattr(item, "icon_y", 0) or 0),
-            icon_width=int(getattr(item, "icon_width", 1) or 1),
-            icon_height=int(getattr(item, "icon_height", 1) or 1),
-            line_number=int(getattr(item, "line_number", 0) or 0),
-            name_text=str(getattr(item, "name_text", "") or ""),
-            description_text=str(
-                getattr(item, "description_text", "") or ""
-            ),
-        )
 
     def build_item_entry(self, forest, resolved_text, section, log=None):
         raw = self._provider.build_item_entry(
@@ -387,7 +436,7 @@ class CoreApiAdapter:
         )
         if raw is None:
             return None
-        return self._item_entry(raw)
+        return _to_item_entry(raw)
 
     def build_item_entry_from_block(
         self,
@@ -406,7 +455,7 @@ class CoreApiAdapter:
         )
         if raw is None:
             return None
-        return self._item_entry(raw)
+        return _to_item_entry(raw)
 
     def read_texture_region(self, path, x, y, width, height):
         raw = self._provider.read_texture_region(path, x, y, width, height)
@@ -574,6 +623,10 @@ class CommandApiAdapter:
 
     def __init__(self, bus):
         self._bus = bus
+        self._owner = None
+
+    def bind_owner(self, owner):
+        self._owner = str(owner or "") or None
 
     @classmethod
     def wrap(cls, bus):
@@ -582,10 +635,15 @@ class CommandApiAdapter:
         return cls(bus)
 
     def register(self, name, handler):
-        return self._bus.register(name, handler)
+        if self._owner and not str(name).startswith(self._owner + "."):
+            raise ValueError(
+                "Команда модуля %s должна начинаться с '%s.': %s"
+                % (self._owner, self._owner, name)
+            )
+        return self._bus.register(name, handler, owner=self._owner)
 
     def unregister(self, name):
-        return self._bus.unregister(name)
+        return self._bus.unregister(name, owner=self._owner)
 
     def has(self, name):
         return self._bus.has(name)
@@ -624,6 +682,11 @@ class UiApiAdapter:
 
     def __init__(self, platform):
         self._platform = platform
+        self._context = None
+
+    def bind_context(self, context):
+        """Связать адаптер с ModuleContext конкретного модуля."""
+        self._context = context
 
     @classmethod
     def wrap(cls, platform):
@@ -645,8 +708,14 @@ class UiApiAdapter:
     def register_tree_context_action(self, label, handler, predicate=None):
         self._platform.register_tree_context_action(label, handler, predicate)
 
+    def register_file_action(self, label, handler, predicate=None):
+        self._platform.register_file_action(label, handler, predicate)
+
     def register_open_handler(self, handler):
-        self._platform.register_open_handler(handler)
+        self._platform.register_open_handler(
+            handler,
+            context=self._context,
+        )
 
     def register_shortcut(self, key, callback, scope="global", action=None):
         self._platform.register_shortcut(
@@ -698,6 +767,24 @@ class UiApiAdapter:
         if callable(fn):
             return fn()
         return None
+
+    def refresh_workspace(self):
+        fn = getattr(self._platform, "refresh_workspace", None)
+        if callable(fn):
+            return fn()
+        return 0, 0
+
+    def workspace_forest(self):
+        fn = getattr(self._platform, "workspace_forest", None)
+        if callable(fn):
+            return fn()
+        return None
+
+    def workspace_generation(self):
+        fn = getattr(self._platform, "workspace_generation", None)
+        if callable(fn):
+            return fn()
+        return 0
 
     def read_project_text(self, path):
         fn = getattr(self._platform, "document_text", None)
@@ -888,7 +975,10 @@ class UiApiAdapter:
         return self._platform.resolved_section_at_line(tab_id, line_number)
 
     def item_entry(self, tab_id, section):
-        return self._platform.item_entry(tab_id, section)
+        raw = self._platform.item_entry(tab_id, section)
+        if raw is None:
+            return None
+        return _to_item_entry(raw)
 
     def retain_resolved_document(self, tab_id):
         return self._platform.retain_resolved_document(tab_id)
@@ -1024,6 +1114,15 @@ class UiApiAdapter:
             return fn(name, fallback)
         return fallback
 
+    def request_window(self, window_id):
+        return self._platform.request_window(window_id)
+
+    def request_tab(self, tab_id):
+        return self._platform.request_tab(tab_id)
+
+    def request_file_open(self, path):
+        return self._platform.request_file_open(path)
+
     # --- команды платформы ------------------------------------------------
 
     def open_file(self, path):
@@ -1049,11 +1148,14 @@ class UiApiAdapter:
         self._platform.commands.execute("ui.editor_find")
 
     def sort_file_tree_by_files_desc(self):
-        window = getattr(self._platform, "window", None)
-        tree = getattr(window, "file_tree", None)
-        fn = getattr(tree, "sort_by_files_desc", None)
+        fn = getattr(
+            self._platform,
+            "sort_file_tree_by_files_desc",
+            None,
+        )
         if callable(fn):
-            fn()
+            return fn()
+        return False
 
 
 # ---------------------------------------------------------------- преобразование

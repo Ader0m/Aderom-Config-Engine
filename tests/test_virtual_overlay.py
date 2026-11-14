@@ -10,6 +10,7 @@ from tests.helpers import write_text
 
 from sdk.api import ProjectOverlay
 
+from core.resolver.prebuild import PrebuildService
 from core.resolver.service import ResolverService
 from core.tools.cache import FileCacheSystem, ResolvedCache
 from core.tree.builder import (
@@ -257,6 +258,40 @@ class VirtualOverlayTest(unittest.TestCase):
         )
         self.assertIn("kind = i_heal", text_again)
         self.assertNotIn("kind = i_med", text_again)
+
+    def test_prebuild_stores_resolved_edit_under_matching_key(self):
+        forest = TreeBuilder(FileCacheSystem()).build(
+            self.cfg,
+            self.system,
+            use_cache=False,
+        )
+        service = ResolverService(
+            cache=FileCacheSystem(),
+            resolved_cache=ResolvedCache(),
+        )
+        leaf_text, sources = service.assemble_resolved(
+            self.item_base,
+            forest,
+            self.cfg,
+        )
+        edited = leaf_text.replace("kind = i_food", "kind = i_med")
+        overlay = ProjectOverlay(
+            resolved_edits={
+                self.item_base: (leaf_text, edited, sources),
+            },
+        )
+
+        prebuild = PrebuildService(service, workers=1)
+        prebuild.start(forest, self.cfg, overlay=overlay)
+        prebuild.wait()
+
+        text, _ = service.assemble_resolved(
+            self.system,
+            forest,
+            self.cfg,
+            overlay=overlay,
+        )
+        self.assertIn("kind = i_med", text)
 
     def test_overlay_content_changes_resolved_cache_key(self):
         first_overlay = {self.mod_path: self.mod_text}

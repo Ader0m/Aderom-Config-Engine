@@ -333,6 +333,16 @@ class DiskBackedLRUCache:
         # задерживать пользовательский cache hit.
         self._save_disk(key, value)
 
+    def discard(self, predicate):
+        """Удалить из памяти записи, для которых ``predicate(key)`` истинно."""
+        with self._lock:
+            for key in list(self._data):
+                if predicate(key):
+                    value = self._data.pop(key)
+                    self._units -= self._value_size(value)
+            if self._units < 0:
+                self._units = 0
+
     def clear(self):
         """Очистить память. Дисковый кэш сохраняется."""
         with self._lock:

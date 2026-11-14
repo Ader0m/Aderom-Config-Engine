@@ -88,6 +88,8 @@ from core.patching.ltx.document import (
     LtxEntry,
     LtxSectionModel,
     SectionView,
+    declared_sections,
+    edit_section_text,
     parse_ltx_document,
     parse_ltx_file,
 )
@@ -271,6 +273,8 @@ __all__ = [
     "LtxEntry",
     "LtxSectionModel",
     "SectionView",
+    "declared_sections",
+    "edit_section_text",
     "parse_ltx_document",
     "parse_ltx_file",
     "DocumentChange",

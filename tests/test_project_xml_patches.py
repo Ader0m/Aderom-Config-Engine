@@ -9,7 +9,7 @@ from tests.support import SRC  # noqa: F401
 from core.patching.xml.generator import DxmlGenerator
 from core.patching.planner import PatchPlanner
 from core.patching.xml.verifier import XmlModelPatchVerifier
-from ui.project import ProjectService
+from app.projects import ProjectService
 
 
 BEFORE = """<root>
@@ -41,6 +41,11 @@ class Forest:
 class Services:
     def __init__(self):
         self.patch = PatchPlanner()
+
+    def plan_xml_patch(self, *args, **kwargs):
+        from core.patching.xml.service import XmlPatchService
+
+        return XmlPatchService(self).plan(*args, **kwargs)
 
     def generate_patch(self, plan):
         generated = DxmlGenerator().generate(plan)
@@ -163,7 +168,7 @@ class ProjectXmlPatchTest(unittest.TestCase):
         self.assertEqual(len(preview.items), 1)
         item = preview.items[0]
         self.assertTrue(item.ok, item.error)
-        self.assertEqual(item.plan.xml_mode, "mixed")
+        self.assertEqual(item.plan.xml_mode, "xml_fork")
 
     def test_resolved_xml_preview(self):
         self.project.set_patch_mode("on_file")

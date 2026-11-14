@@ -6,10 +6,10 @@ from types import SimpleNamespace
 
 from tests.support import SRC  # noqa: F401
 
-from sdk import ProjectSetting, ProjectSettingChoice
+from sdk import FileOpened, FileOpenFailed, ProjectSetting, ProjectSettingChoice
 from sdk.events import Events
-from ui.platform_api import PlatformApi
-from ui.project import ProjectService
+from ui.platform_api import PlatformApi, _path_key
+from app.projects import ProjectService
 
 
 class FakeEvents:
@@ -47,9 +47,12 @@ class FakeWidget:
 class FakeEditor:
     def __init__(self):
         self.widget = FakeWidget()
-        self.tabs = {}
+        self.tabs = {"ui.editor": self.widget}
         self.dirty = {}
         self.current = self.widget
+        self.busy = False
+        self.tab_busy = set()
+        self.calls = []
 
     def currentWidget(self):
         return self.current
@@ -65,6 +68,22 @@ class FakeEditor:
 
     def setCurrentWidget(self, widget):
         self.current = widget
+
+    def set_editable(self, editable):
+        self.calls.append(("editable", bool(editable)))
+
+    def set_busy(self, busy):
+        self.busy = bool(busy)
+        self.calls.append(("busy", bool(busy)))
+
+    def set_tab_busy(self, tab_id, busy):
+        if busy:
+            self.tab_busy.add(str(tab_id))
+        else:
+            self.tab_busy.discard(str(tab_id))
+
+    def clear_tab_busy(self):
+        self.tab_busy.clear()
 
 
 class FakeStatusBar:
@@ -96,7 +115,10 @@ class PublishingHandler:
         self._events = events
 
     def open(self, path, api):
-        api.events.publish(Events.FILE_OPENED, path)
+        api.events.publish(
+            Events.FILE_OPENED,
+            FileOpened(path=Path(path), tab_id="ui.editor"),
+        )
         return True
 
 
@@ -108,6 +130,27 @@ class SilentHandler:
 
 
 class PlatformApiTest(unittest.TestCase):
+    def test_file_opened_uses_tab_id_not_current_widget(self):
+        events = FakeEvents()
+        commands = FakeCommands()
+        api = PlatformApi(events, commands, None, None, None)
+        window = FakeWindow()
+        target = FakeWidget()
+        other = FakeWidget()
+        window.editor.tabs["a"] = target
+        window.editor.current = other
+        api.window = window
+
+        path = Path("a.ltx")
+        api._pending_file_actions[_path_key(path)] = ("line", 77)
+        events.publish(
+            Events.FILE_OPENED,
+            FileOpened(path=path, tab_id="a"),
+        )
+
+        self.assertEqual(target.lines, [77])
+        self.assertEqual(other.lines, [])
+
     def test_open_at_line_applies_pending_navigation(self):
         events = FakeEvents()
         commands = FakeCommands()
@@ -129,7 +172,10 @@ class PlatformApiTest(unittest.TestCase):
 
         class FailingHandler:
             def open(self, path, api):
-                api.events.publish(Events.FILE_OPEN_FAILED, path)
+                api.events.publish(
+                    Events.FILE_OPEN_FAILED,
+                    FileOpenFailed(path=Path(path)),
+                )
                 return True
 
         api.router.set_default(FailingHandler())
@@ -151,7 +197,10 @@ class PlatformApiTest(unittest.TestCase):
 
         self.assertTrue(api.request_open_file_at_line(path, 42))
         # Событие о другом файле не должно применить навигацию.
-        events.publish(Events.FILE_OPENED, other)
+        events.publish(
+            Events.FILE_OPENED,
+            FileOpened(path=other, tab_id="ui.editor"),
+        )
         self.assertEqual(api.window.editor.widget.lines, [])
         self.assertTrue(
             any(
@@ -161,7 +210,10 @@ class PlatformApiTest(unittest.TestCase):
             api._pending_file_actions,
         )
 
-        events.publish(Events.FILE_OPENED, path)
+        events.publish(
+            Events.FILE_OPENED,
+            FileOpened(path=path, tab_id="ui.editor"),
+        )
         self.assertEqual(api.window.editor.widget.lines, [42])
         self.assertEqual(api._pending_file_actions, {})
 
@@ -177,6 +229,60 @@ class PlatformApiTest(unittest.TestCase):
 
         self.assertEqual(api._pending_file_actions, {})
         self.assertEqual(api.window.editor.widget.lines, [])
+
+
+    def test_project_activation_locks_tabs_and_marks_busy(self):
+        with tempfile.TemporaryDirectory() as d:
+            paths = SimpleNamespace(
+                projects_dir=Path(d) / "projects",
+                app_dir=Path(d),
+            )
+            api = PlatformApi(
+                FakeEvents(),
+                FakeCommands(),
+                None,
+                None,
+                paths,
+            )
+            api.window = FakeWindow()
+            api.project.create("busy", save_mode="root")
+
+            api._begin_project_activation()
+            self.assertTrue(api.window.editor.busy)
+
+            api._end_project_activation()
+            self.assertFalse(api.window.editor.busy)
+            self.assertEqual(
+                api.window.editor.calls,
+                [
+                    ("editable", False),
+                    ("busy", True),
+                    ("editable", True),
+                    ("busy", False),
+                ],
+            )
+
+
+    def test_busy_marks_are_cleared_without_active_project(self):
+        with tempfile.TemporaryDirectory() as d:
+            paths = SimpleNamespace(
+                projects_dir=Path(d) / "projects",
+                app_dir=Path(d),
+            )
+            api = PlatformApi(
+                FakeEvents(),
+                FakeCommands(),
+                None,
+                None,
+                paths,
+            )
+            api.window = FakeWindow()
+            api.window.editor.set_tab_busy("stale.tab", True)
+
+            api._end_project_activation()
+
+            self.assertFalse(api.window.editor.busy)
+            self.assertEqual(api.window.editor.tab_busy, set())
 
 
 class ProjectSettingPlatformTest(unittest.TestCase):
@@ -414,10 +520,36 @@ class ResolvedDocumentPlatformTest(unittest.TestCase):
             self.assertIsNotNone(entry)
             self.assertEqual(entry.section, "sec")
 
+    def test_save_resolved_without_live_document_does_not_raise(self):
+        """Ctrl+S в осиротевшей resolved-вкладке не должен ронять приложение."""
+        with tempfile.TemporaryDirectory() as d:
+            api, _events = self._api(d)
+            tab_id = "base.resolved:system.ltx"
+            root_path = Path(d) / "system.ltx"
+
+            # Живого документа и черновика нет — сохранять нечего.
+            api.save_resolved_document(tab_id)
+
+            # Черновик есть, документ потерян (например, после смены
+            # проекта): сохраняется именно черновик, без view и без
+            # AttributeError.
+            api.project.update_resolved_draft(
+                tab_id,
+                root_path,
+                "[Res]system.ltx",
+                "[sec]\nx = 1\n",
+                "[sec]\nx = 2\n",
+                (None, None, None),
+            )
+            api.save_resolved_document(tab_id)
+
+            draft = api.project.get_resolved_draft(tab_id)
+            self.assertEqual(draft.saved_text, "[sec]\nx = 2\n")
+
     def test_write_project_texts_rolls_back_on_failure(self):
         from unittest.mock import patch
 
-        from ui.project import ProjectError
+        from app.projects import ProjectError
 
         with tempfile.TemporaryDirectory() as d:
             api, _events = self._api(d)

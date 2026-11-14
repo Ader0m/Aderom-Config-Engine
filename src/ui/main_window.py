@@ -83,6 +83,7 @@ class MainWindow(QMainWindow):
             events=self.api.events,
             commands=self.api.commands,
             can_edit=self.api.can_edit_documents,
+            file_actions=lambda: self.api.file_actions,
         )
         self.api.router.set_default(TextEditorHandler(self.editor))
 
@@ -202,20 +203,16 @@ class MainWindow(QMainWindow):
         self.project_label.setText(str(text))
 
     def _update_project_menu(self):
-        project = getattr(self.api, "project", None)
-        active = bool(getattr(project, "is_active", False))
-        has_changes = False
-
-        if active:
-            has_changes = (
-                bool(project.changed_drafts())
-                or bool(project.changed_resolved_drafts())
-                or bool(project.changed_asset_drafts())
-            )
-
+        active = bool(self.api.is_project_active())
         self.project_settings_action.setVisible(active)
         self.project_settings_action.setEnabled(active)
-        self.project_patch_action.setEnabled(active and has_changes)
+        self.project_patch_action.setEnabled(
+            active and self.api.project_has_changes()
+        )
+
+    # Публичное имя для PlatformApi: окно не обязано вызывать private.
+    def refresh_project_actions(self):
+        self._update_project_menu()
 
     def _update_prebuild(self):
         services = getattr(self.api, "services", None)

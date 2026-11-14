@@ -3,7 +3,7 @@
 
 from pathlib import Path
 
-from sdk import FileOpenHandler
+from sdk import FileOpenFailed, FileOpenHandler
 from sdk.events import Events
 
 
@@ -47,7 +47,10 @@ class LtxFileOpener:
 
     def _open_failed(self, path):
         """Сообщить платформе, что открытие этого пути не состоится."""
-        self.ctx.events.publish(Events.FILE_OPEN_FAILED, path)
+        self.ctx.events.publish(
+            Events.FILE_OPEN_FAILED,
+            FileOpenFailed(path=Path(path)),
+        )
 
     # -------------------------------------------------- сырой просмотр
     def open_raw(self, path, line_number=None) -> bool:

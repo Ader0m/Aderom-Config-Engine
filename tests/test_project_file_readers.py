@@ -7,7 +7,7 @@ from pathlib import Path
 from tests.support import SRC  # noqa: F401
 
 from sdk import FileReader, FileView
-from ui.project_readers import FileReaderError, ProjectFileReaderRegistry
+from app.projects import FileReaderError, ProjectFileReaderRegistry
 
 
 class _Reader(FileReader):

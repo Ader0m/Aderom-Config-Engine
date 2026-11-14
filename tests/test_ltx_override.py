@@ -11,13 +11,18 @@ from core.patching.ltx.override import LtxOverrideError, LtxOverrideService
 from core.patching.models import PatchOptions
 from core.patching.planner import PatchPlanner
 from core.patching.writer import PatchWriter
-from ui.project import ProjectService
+from app.projects import ProjectService
 
 
 class OverrideServices:
     def __init__(self):
         self.patch = PatchPlanner()
         self.ltx_override = LtxOverrideService()
+
+    def plan_ltx_patch(self, *args, **kwargs):
+        from core.patching.ltx.service import LtxPatchService
+
+        return LtxPatchService(self).plan(*args, **kwargs)
 
     def plan_ltx_override(self, *args, **kwargs):
         return self.ltx_override.plan(*args, **kwargs)

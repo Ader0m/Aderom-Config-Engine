@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """Граф связей секции: построение через ядро и собственное окно модуля."""
 
-import os
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -22,7 +21,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from sdk import SectionGraphRequest
+from sdk import SectionGraphRequest, path_key as _path_key
 
 # Маркеры и цвета типов связей. Цвета запрашиваются через ctx.ui,
 # чтобы модуль не импортировал внутренности UI.
@@ -162,7 +161,10 @@ class SectionGraphFeature:
                         self.session.config_dir,
                         overlay=overlay,
                     )
-                self.ctx.services.wait_prebuild(log)
+                self.ctx.services.wait_prebuild(
+                    log,
+                    timeout=120,
+                )
             graph = self.ctx.services.build_section_graph(
                 forest,
                 section_name,
@@ -817,15 +819,6 @@ def _link_key(node, match):
             raw_ref.replace("/", "\\").strip().lower(),
         )
     return _match_key(None, match)
-
-
-def _path_key(path):
-    if path is None:
-        return None
-    try:
-        return os.path.normcase(os.path.abspath(str(path)))
-    except (TypeError, ValueError):
-        return str(path)
 
 
 def _live_graph_state(graph):

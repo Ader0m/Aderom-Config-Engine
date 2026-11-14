@@ -683,3 +683,31 @@ MODULE = MyModule()
 - [ ] при `deactivate` окна и вкладки закрываются;
 - [ ] модуль не зависит от порядка загрузки других модулей;
 - [ ] ошибки не выходят наружу и не ломают платформу.
+
+
+## 9. Контракты после рефакторинга
+
+- `ctx.ui.register_file_action(label, handler, predicate=None)` — действие
+  в контекстном меню вкладки файла. Платформа не знает имён команд модуля.
+- `ctx.ui.refresh_workspace()` — пересобрать виртуальные файлы проекта в
+  текущем лесе. Модуль не вызывает `add_virtual_file` напрямую.
+- `ctx.ui.workspace_forest()` / `workspace_generation()` — актуальный лес
+  и номер его поколения; владелец — `WorkspaceService` платформы.
+- `ctx.commands.register("module.action", fn)` проверяет namespace:
+  команда должна начинаться с `<manifest.name>.`. Повторная регистрация
+  чужой команды запрещена; `unregister` снимает только свою.
+- `register_open_handler` передаёт модульному обработчику его
+  `ModuleContext`, а не `PlatformApi`.
+- `ctx.ui.request_window`, `request_tab`, `request_file_open` — стандартные
+  перехватываемые запросы между модулями.
+- `ctx.events.dispatch` разрешён только из UI-потока. Из фонового потока
+  используйте `publish` или отложенный вызов в UI-поток.
+- `PROJECT_SAVED` payload типизирован как `sdk.SavedDraft`.
+- `FILE_OPENED` payload — `sdk.FileOpened`; `FILE_OPEN_FAILED` —
+  `sdk.FileOpenFailed`. Старые строковые payload не поддерживаются.
+- Старые resolved-черновики читаются, но при сохранении переводятся в
+  компактный формат v2: уникальные `LineSource` + сжатые индексы строк.
+- LTX-разбор для навигации/правок один: `core.patching.ltx.document`.
+  Resolver4 остаётся сборщиком итогового текста, а не заменой парсеру.
+- Прикладной слой проекта и документов — `app.projects`, `app.documents`,
+  `app.workspace`; он не импортирует Qt.

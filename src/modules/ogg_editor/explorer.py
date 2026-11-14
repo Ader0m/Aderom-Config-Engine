@@ -42,6 +42,7 @@ from sdk import (
     DEFAULT_SEARCH_DELAY_MS,
     ITEM_SECTION_MIME,
     decode_item_section,
+    path_key as sdk_path_key,
 )
 
 from .ogg import (
@@ -120,11 +121,11 @@ def scan_sounds(
                 if not filename.lower().endswith(".ogg"):
                     continue
                 path = Path(dirpath) / filename
-                key = os.path.normcase(os.path.abspath(str(path)))
+                key = sdk_path_key(path)
                 found[key] = SoundEntry(path=path)
 
     for entry in extra:
-        key = os.path.normcase(os.path.abspath(str(entry.path)))
+        key = sdk_path_key(entry.path)
         found[key] = entry
 
     return sorted(found.values(), key=lambda item: str(item.path).lower())
@@ -749,7 +750,7 @@ class OggExplorerWindow(QWidget):
     # ------------------------------------------------------------ закреплённые
     @staticmethod
     def _path_key(path) -> str:
-        return os.path.normcase(os.path.abspath(str(path)))
+        return sdk_path_key(path)
 
     def _pinned_label_for(self, path) -> str:
         path = Path(path)

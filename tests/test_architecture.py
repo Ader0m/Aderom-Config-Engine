@@ -11,6 +11,7 @@ from tests.support import SRC
 ROOT = Path(SRC)
 
 KNOWN_FILES = {
+    "app": ROOT / "app" / "projects" / "service.py",
     "core": ROOT / "core" / "facade.py",
     "ui": ROOT / "ui" / "module_loader.py",
     "sdk": ROOT / "sdk" / "contracts.py",
@@ -129,6 +130,12 @@ class ArchitectureBoundaryTest(unittest.TestCase):
         for path in _files("sdk"):
             roots = _imports(path)
             self.assertNotIn("core", roots, str(path))
+            self.assertNotIn("ui", roots, str(path))
+            self.assertNotIn("modules", roots, str(path))
+
+    def test_app_does_not_import_ui_or_modules(self):
+        for path in _files("app"):
+            roots = _imports(path)
             self.assertNotIn("ui", roots, str(path))
             self.assertNotIn("modules", roots, str(path))
 

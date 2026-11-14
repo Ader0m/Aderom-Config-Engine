@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 
@@ -24,6 +23,7 @@ from sdk import (
     DEFAULT_SEARCH_DELAY_MS,
     ITEM_SECTION_MIME,
     encode_item_section,
+    same_path as sdk_same_path,
 )
 from sdk.events import Events
 
@@ -372,109 +372,6 @@ def _append_xml_strings(
     return text[:index].rstrip() + newline + block + newline + text[index:]
 
 
-def _ltx_header_name(line):
-    value = str(line or "").strip()
-    for prefix in ("!!", "!", "@"):
-        if value.startswith(prefix + "["):
-            value = value[len(prefix):]
-            break
-    if not value.startswith("["):
-        return None
-    close = value.find("]")
-    if close == -1:
-        return None
-    return value[1:close].strip().lower()
-
-
-def _ltx_section_at_line(text, line_number):
-    lines = str(text or "").split("\n")
-    index = min(max(int(line_number) - 1, 0), len(lines) - 1)
-    for current in range(index, -1, -1):
-        name = _ltx_header_name(lines[current])
-        if name:
-            return name
-    return None
-
-
-def _ltx_key_from_line(line):
-    value = str(line or "").strip()
-    if value.startswith("!") or value.startswith(">") or value.startswith("<"):
-        value = value[1:].lstrip()
-    if "=" in value:
-        value = value.split("=", 1)[0]
-    return value.strip().lower()
-
-
-def _ltx_section_bounds(lines, section):
-    target = str(section or "").strip().lower()
-    start = None
-
-    for index, line in enumerate(lines):
-        name = _ltx_header_name(line)
-        if name is None:
-            continue
-        if start is not None:
-            return start, index
-        if name == target:
-            start = index
-
-    if start is not None:
-        return start, len(lines)
-    return None
-
-
-def _edit_section_text(text, section, key, action, new_line=None,
-                       after_key=None):
-    """Точечная правка секции в тексте файла-черновика."""
-    original = str(text or "")
-    newline = "\r\n" if "\r\n" in original else "\n"
-    lines = original.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    bounds = _ltx_section_bounds(lines, section)
-    if bounds is None:
-        return None
-
-    start, end = bounds
-    key_low = str(key or "").strip().lower()
-    found = None
-    for index in range(start + 1, end):
-        if _ltx_key_from_line(lines[index]) == key_low:
-            found = index
-            break
-
-    if action == "replace":
-        line = str(new_line or "").rstrip("\r\n")
-        if found is None:
-            lines.insert(end, line)
-        else:
-            lines[found] = line
-    elif action == "delete":
-        if found is None:
-            return None
-        del lines[found]
-    elif action == "insert":
-        line = str(new_line or "").rstrip("\r\n")
-        if found is None:
-            lines.insert(end, line)
-        else:
-            lines.insert(found + 1, line)
-    else:
-        return None
-
-    return newline.join(lines)
-
-
-def _declared_sections(text: str):
-    """Имена секций LTX без учёта типа заголовка."""
-    return {
-        match.group(1).strip().lower()
-        for match in re.finditer(
-            r"^[ \t]*(?:!!|!|@)?\[([^\]]+)\]",
-            str(text or ""),
-            flags=re.MULTILINE,
-        )
-    }
-
-
 class ParentComboBox(QComboBox):
     """Поле родителя, открывающее собственный список предложений."""
 
@@ -795,14 +692,12 @@ class ItemViewerFeature:
         self._catalog = None
         self._images = {}
 
-        # Контекст редактирования system.ltx (resolved-черновик проекта).
+        # Контекст редактирования system.ltx. Текст, источники и dirty
+        # принадлежат живому resolved-документу; модуль хранит только
+        # идентификаторы и заголовок для представления.
         self._root_path = None
         self._tab_id = ""
         self._title = ""
-        self._resolved_text = ""
-        self._original_text = ""
-        self._line_sources = ()
-        self._saved_text = ""
 
         # Открытые карточки и удержанные документы.
         self._cards = {}
@@ -834,10 +729,22 @@ class ItemViewerFeature:
                 Events.UI_TAB_CLOSED,
                 self._on_tab_closed,
             )
-            self._card_req_sub = events.subscribe(
-                Events.ITEM_CARD_REQUESTED,
-                self._on_card_requested,
+            register_action = getattr(
+                self.ctx.ui,
+                "register_action_handler",
+                None,
             )
+            if callable(register_action):
+                self._card_req_sub = register_action(
+                    Events.ITEM_CARD_REQUESTED,
+                    self._on_card_requested,
+                )
+            else:
+                # Совместимость с минимальными тестовыми контекстами.
+                self._card_req_sub = events.subscribe(
+                    Events.ITEM_CARD_REQUESTED,
+                    self._on_card_requested,
+                )
 
     def _project_overlay(self):
         fn = getattr(self.ctx.ui, "project_overlay", None)
@@ -1120,10 +1027,6 @@ class ItemViewerFeature:
         self._root_path = context.get("root_path")
         self._tab_id = str(context.get("tab_id") or "")
         self._title = str(context.get("title") or "")
-        self._resolved_text = str(context.get("text") or "")
-        self._original_text = str(context.get("original_text") or "")
-        self._saved_text = str(context.get("saved_text") or "")
-        self._line_sources = tuple(context.get("line_sources") or ())
 
     # -------------------------------------------------- документ и карточки
     def _ensure_root_document(self, context, previous_tab):
@@ -1137,8 +1040,8 @@ class ItemViewerFeature:
                 tab_id,
                 root_path,
                 self._title,
-                self._resolved_text,
-                self._line_sources,
+                str(context.get("text") or ""),
+                tuple(context.get("line_sources") or ()),
             )
         if previous_tab and previous_tab != tab_id:
             self._release(previous_tab)
@@ -1206,11 +1109,6 @@ class ItemViewerFeature:
         full = bool(getattr(change, "full", False))
 
         if tab_id == self._tab_id:
-            info = self.ctx.ui.resolved_draft(tab_id)
-            if info is not None:
-                self._resolved_text = info.text
-                self._line_sources = tuple(info.line_sources or ())
-                self._saved_text = info.saved_text
             focus_line = int(getattr(change, "focus_line", 0) or 0)
             if focus_line:
                 self._pending_focus_line = focus_line
@@ -1305,14 +1203,15 @@ class ItemViewerFeature:
         tab_id = str(getattr(request, "tab_id", "") or "")
         section = str(getattr(request, "section", "") or "")
         if not tab_id or not section:
-            return
+            return False
         if self._item_entry(tab_id, section) is None:
             self.ctx.ui.set_status(
                 "Секция [%s] не является предметом" % section,
                 5000,
             )
-            return
+            return True
         self.open_card(tab_id, section)
+        return True
 
     @staticmethod
     def _card_tab_id(tab_id, section):
@@ -1410,12 +1309,7 @@ class ItemViewerFeature:
     # -------------------------------------------------- правка
     @staticmethod
     def _same_path(left, right):
-        try:
-            return os.path.normcase(
-                os.path.abspath(str(left))
-            ) == os.path.normcase(os.path.abspath(str(right)))
-        except (TypeError, ValueError, OSError):
-            return False
+        return sdk_same_path(left, right)
 
     def _snapshot(self, tab_id):
         reader = getattr(self.ctx.ui, "resolved_draft", None)
@@ -1432,14 +1326,10 @@ class ItemViewerFeature:
             return None
 
         snapshot = self._snapshot(tab_id)
-        if snapshot is not None:
-            text = snapshot.text
-            sources = tuple(snapshot.line_sources or ())
-        elif str(tab_id) == self._tab_id and self._resolved_text:
-            text = self._resolved_text
-            sources = tuple(self._line_sources or ())
-        else:
+        if snapshot is None:
             return None
+        text = snapshot.text
+        sources = tuple(snapshot.line_sources or ())
 
         new_files = {
             Path(path) for path in (overlay.new_files or ())
@@ -1456,7 +1346,7 @@ class ItemViewerFeature:
                     if self._same_path(candidate, path):
                         return candidate
 
-        section = _ltx_section_at_line(text, line_number)
+        section = self.ctx.services.ltx_section_at_line(text, line_number)
         if not section:
             return None
 
@@ -1464,8 +1354,13 @@ class ItemViewerFeature:
             candidate = Path(path)
             if candidate not in new_files:
                 continue
-            lines = str(text or "").replace("\r\n", "\n").split("\n")
-            if _ltx_section_bounds(lines, section) is not None:
+            if (
+                self.ctx.services.ltx_section_bounds(
+                    str(text or ""),
+                    section,
+                )
+                is not None
+            ):
                 return candidate
 
         return None
@@ -1476,24 +1371,21 @@ class ItemViewerFeature:
             return False
 
         snapshot = self._snapshot(tab_id)
-        if snapshot is not None:
-            text = snapshot.text
-        elif str(tab_id) == self._tab_id and self._resolved_text:
-            text = self._resolved_text
-        else:
+        if snapshot is None:
             return False
+        text = snapshot.text
 
-        section = _ltx_section_at_line(text, line_number)
+        section = self.ctx.services.ltx_section_at_line(text, line_number)
         if not section:
             return False
 
         lines = text.split("\n")
         index = int(line_number) - 1
         old_line = lines[index] if 0 <= index < len(lines) else ""
-        key = _ltx_key_from_line(old_line)
+        key = self.ctx.services.ltx_key_from_line(old_line)
 
         text = self.ctx.ui.read_project_text(path)
-        updated = _edit_section_text(
+        updated = self.ctx.services.ltx_edit_section(
             text,
             section,
             key,
@@ -1527,7 +1419,7 @@ class ItemViewerFeature:
             self.ctx.ui.is_project_active()
             and self._root_path is not None
             and self._tab_id
-            and self._resolved_text
+            and self._snapshot(self._tab_id) is not None
         )
 
     def _apply_field(self, tab_id, section, key, value):
@@ -1723,7 +1615,9 @@ class ItemViewerFeature:
         item_text = self.ctx.ui.read_project_text(item_path)
         xml_text = self.ctx.ui.read_project_text(xml_path)
 
-        known_sections = _declared_sections(item_text)
+        known_sections = set(
+            self.ctx.services.ltx_declared_sections(item_text)
+        )
         known_sections.update(
             section_info.name.lower()
             for section_info in (
@@ -1794,27 +1688,20 @@ class ItemViewerFeature:
         return True
 
     def _register_virtual_files(self, *files):
-        """Добавить созданные черновики в текущее дерево VFS."""
-        forest = self.session.forest
-        add_file = getattr(
-            self.ctx.services,
-            "add_virtual_file",
-            None,
-        )
-        if forest is None or not callable(add_file):
+        """Обновить VFS после создания файлов проекта.
+
+        Само добавление файлов в лес — ответственность WorkspaceService
+        платформы: модуль не мутирует LtxForest напрямую.
+        """
+        if self.session is None or not getattr(
+            self.session,
+            "has_tree",
+            False,
+        ):
             return
-
-        added = False
-        for path, text in files:
-            try:
-                added = add_file(forest, path, text) or added
-            except Exception as exc:
-                self.ctx.ui.log(
-                    "VFS: не удалось добавить %s: %s" % (path, exc)
-                )
-
-        if added:
-            self.ctx.events.publish(Events.TREE_READY, forest)
+        refresh = getattr(self.ctx.ui, "refresh_workspace", None)
+        if callable(refresh):
+            refresh()
         self.show()
 
 
@@ -1917,8 +1804,10 @@ class ItemCardView(QWidget):
         top.addWidget(self.open_tab_btn)
 
         self.open_doc_btn = QToolButton()
-        self.open_doc_btn.setText("Документ")
-        self.open_doc_btn.setToolTip("Открыть документ в редакторе")
+        self.open_doc_btn.setText("Перейти к объявлению")
+        self.open_doc_btn.setToolTip(
+            "Перейти к объявлению секции в документе"
+        )
         self.open_doc_btn.setAutoRaise(True)
         self.open_doc_btn.clicked.connect(self._open_document)
         self.open_doc_btn.setVisible(

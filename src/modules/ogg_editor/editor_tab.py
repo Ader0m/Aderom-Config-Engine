@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-import os
 import tempfile
 import wave
 from pathlib import Path
@@ -25,6 +24,7 @@ from PyQt5.QtWidgets import (
 )
 
 from sdk.events import Events
+from sdk.paths import path_key
 
 from .ogg import (
     CommentFormatError,
@@ -179,7 +179,9 @@ class OggEditorTab(QWidget):
         controls = QHBoxLayout()
         controls.setSpacing(6)
 
-        green = self.ctx.ui.theme_color("accent_green", "#3FA34D")
+        # Собственный акцент модуля: платформа не обязана знать
+        # OGG-специфичные токены.
+        green = "#3FA34D"
         self.play_button = QPushButton("▶  Слушать")
         self.play_button.setToolTip("Воспроизвести звук с начала")
         self.play_button.setStyleSheet(
@@ -708,9 +710,7 @@ class OggEditorTab(QWidget):
             path = getattr(event, "path", None)
             if path is None:
                 return
-            if os.path.normcase(os.path.abspath(str(path))) != os.path.normcase(
-                os.path.abspath(str(self.path))
-            ):
+            if path_key(path) != path_key(self.path):
                 return
             self.ctx.ui.set_editor_tab_dirty(self.tab_id, False)
             self._update_status("Сохранено в проекте")

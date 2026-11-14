@@ -37,8 +37,8 @@ class _Prebuild:
     def status(self):
         return {"state": self.state}
 
-    def start(self, forest, config_dir, overlay=None):
-        self.starts.append((forest, config_dir, overlay))
+    def start(self, forest, config_dir, overlay=None, roots=None):
+        self.starts.append((forest, config_dir, overlay, roots))
         self.state = "running"
 
 
@@ -79,6 +79,19 @@ class PrebuildCoordinationTest(unittest.TestCase):
         # Пока сборка идёт и кеш не менялся, второй запуск не нужен.
         self.assertFalse(services.ensure_prebuild())
         self.assertEqual(len(services.prebuild.starts), 1)
+
+    def test_invalidate_paths_prebuilds_only_affected_roots(self):
+        services = self._services()
+        root = Path("configs") / "system.ltx"
+
+        services.invalidate_paths({root})
+        self.assertTrue(services.ensure_prebuild())
+
+        self.assertEqual(len(services.prebuild.starts), 1)
+        self.assertEqual(
+            services.prebuild.starts[0][3],
+            {root},
+        )
 
     def test_ensure_restarts_running_prebuild_when_stale(self):
         services = self._services()

@@ -30,7 +30,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from .project import ProjectPatchPreview
+from app.projects import ProjectPatchPreview
 
 try:
     from .theme import PALETTE

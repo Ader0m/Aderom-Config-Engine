@@ -87,6 +87,8 @@ class CoreServices:
         self._prebuild_config_dir = None
         self._prebuild_overlay = {}
         self._prebuild_stale = False
+        # None — вся предсборка; иначе только затронутые корни.
+        self._prebuild_roots = None
 
         # Кэш каталога и иконок переживает перезапуск приложения:
         # ключи включают снимок LTX-поддерева и подписи DDS-атласов.
@@ -128,6 +130,7 @@ class CoreServices:
     def invalidate_cache(self):
         """Очистить общий кэш ядра и пометить предсборку устаревшей."""
         self._prebuild_stale = True
+        self._prebuild_roots = None
         self.cache.clear()
         if hasattr(self.resolver, "invalidate_cache"):
             self.resolver.invalidate_cache()
@@ -147,27 +150,55 @@ class CoreServices:
         кеши при каждом изменении текста пересоздавать не нужно.
         """
         self._prebuild_stale = True
+        self._prebuild_roots = None
         if hasattr(self.resolver, "invalidate_cache"):
             self.resolver.invalidate_cache()
         if hasattr(self.xml, "clear"):
             self.xml.clear()
 
+    def invalidate_paths(self, roots):
+        """Инвалидировать кэш только для заданных корней."""
+        roots = {Path(path) for path in (roots or ())}
+        self._prebuild_stale = True
+        self._prebuild_roots = roots or None
+        invalidate_roots = getattr(self.resolver, "invalidate_roots", None)
+        if callable(invalidate_roots) and roots:
+            invalidate_roots(roots)
+        elif hasattr(self.resolver, "invalidate_cache"):
+            self.resolver.invalidate_cache()
+
     # -------------------------------------------------- фоновая предсборка
 
-    def start_prebuild(self, forest, config_dir, overlay=None):
-        """Запустить фоновую сборку всех LTX после построения дерева."""
+    def start_prebuild(self, forest, config_dir, overlay=None, roots=None):
+        """Запустить фоновую сборку LTX после построения дерева.
+
+        ``roots=None`` — весь лес; набор корней — точечная пересборка.
+        """
         self._prebuild_forest = forest
         self._prebuild_config_dir = config_dir
         self._prebuild_overlay = overlay or {}
         self._prebuild_stale = False
-        self.prebuild.start(forest, config_dir, overlay=overlay)
+        self._prebuild_roots = (
+            {Path(path) for path in roots}
+            if roots is not None
+            else None
+        )
+        self.prebuild.start(
+            forest,
+            config_dir,
+            overlay=overlay,
+            roots=self._prebuild_roots,
+        )
 
-    def ensure_prebuild(self, forest=None, config_dir=None, overlay=None):
+    def ensure_prebuild(self, forest=None, config_dir=None, overlay=None,
+                        roots=None):
         """Гарантировать актуальную предсборку перед чтением кеша."""
         forest = forest or self._prebuild_forest
         config_dir = config_dir or self._prebuild_config_dir
         if overlay is None:
             overlay = self._prebuild_overlay
+        if roots is None:
+            roots = self._prebuild_roots
         if forest is None or config_dir is None:
             return False
 
@@ -175,15 +206,20 @@ class CoreServices:
         running = status.get("state") == "running"
         if self._prebuild_stale or not running:
             if self._prebuild_stale or status.get("state") != "done":
-                self.start_prebuild(forest, config_dir, overlay=overlay)
+                self.start_prebuild(
+                    forest,
+                    config_dir,
+                    overlay=overlay,
+                    roots=roots,
+                )
                 return True
         return False
 
     def prebuild_status(self):
         return self.prebuild.status()
 
-    def wait_prebuild(self, log=None):
-        self.prebuild.wait(log=log)
+    def wait_prebuild(self, log=None, timeout=None):
+        self.prebuild.wait(log=log, timeout=timeout)
 
     def stop_prebuild(self):
         self.prebuild.stop()
@@ -252,6 +288,68 @@ class CoreServices:
     def read_text(self, path):
         """Прочитать текстовый файл с автоопределением кодировки."""
         return read_text_safe(path)
+
+    def read_xml_text(self, path):
+        """Прочитать XML строго как windows-1251 (правило X-Ray)."""
+        from core.tools.fs import read_xml_text
+
+        return read_xml_text(path)
+
+    # -------------------------------------------------- разбор LTX
+    def ltx_section_at_line(self, text, line_number):
+        """Секция, в которой находится строка (1-based), или None."""
+        from core.patching.ltx.document import parse_ltx_document
+
+        return parse_ltx_document(text).section_at_line(line_number)
+
+    def ltx_section_bounds(self, text, section):
+        """Границы секции (start, end) в 1-based нумерации."""
+        from core.patching.ltx.document import parse_ltx_document
+
+        return parse_ltx_document(text).section_bounds(section)
+
+    def ltx_field_line(self, text, section, key):
+        """Номер строки поля (последнее set-вхождение) или 0."""
+        from core.patching.ltx.document import parse_ltx_document
+
+        return parse_ltx_document(text).field_line(section, key)
+
+    def ltx_key_from_line(self, line):
+        """Ключ строки LTX без учёта DLTX-префикса и значения."""
+        from core.patching.ltx.document import parse_key_line
+        from core.tools.fs import strip_comments
+
+        parsed = parse_key_line(strip_comments(str(line or "")).strip())
+        if parsed is None:
+            return ""
+        return parsed[1].strip().lower()
+
+    def ltx_declared_sections(self, text):
+        """Все имена секций в порядке появления."""
+        from core.patching.ltx.document import declared_sections
+
+        return declared_sections(text)
+
+    def ltx_edit_section(
+        self,
+        text,
+        section,
+        key,
+        action,
+        new_line=None,
+        after_key=None,
+    ):
+        """Точечно изменить строку секции, сохранив переводы строк."""
+        from core.patching.ltx.document import edit_section_text
+
+        return edit_section_text(
+            text,
+            section,
+            key,
+            action,
+            new_line=new_line,
+            after_key=after_key,
+        )
 
     # -------------------------------------------------- резолвер (прокси для обратной совместимости)
 
@@ -624,6 +722,7 @@ class CoreServices:
         forest=None,
         options=None,
         resolved=False,
+        analysis=None,
     ):
         """Единый вход LTX: root / on_file / override."""
         return self.ltx_patch.plan(
@@ -635,6 +734,7 @@ class CoreServices:
             forest=forest,
             options=options,
             resolved=resolved,
+            analysis=analysis,
         )
 
     def plan_xml_patch(

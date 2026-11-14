@@ -54,7 +54,17 @@ class ModuleContext:
     сам оборачивает их в SDK-адаптеры.
     """
 
-    def __init__(self, sdk_version, events, commands, ui, tasks, services, paths):
+    def __init__(
+        self,
+        sdk_version,
+        events,
+        commands,
+        ui,
+        tasks,
+        services,
+        paths,
+        module_name=None,
+    ):
         from .adapters import (
             CommandApiAdapter,
             CoreApiAdapter,
@@ -70,6 +80,14 @@ class ModuleContext:
         self.tasks = TaskApiAdapter.wrap(tasks)
         self.services = CoreApiAdapter.wrap(services)
         self.paths = paths
+
+        binder = getattr(self.ui, "bind_context", None)
+        if callable(binder):
+            binder(self)
+
+        owner_binder = getattr(self.commands, "bind_owner", None)
+        if callable(owner_binder):
+            owner_binder(module_name)
 
     def log(self, msg):
         self.ui.log(msg)

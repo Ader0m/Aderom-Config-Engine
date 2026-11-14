@@ -175,11 +175,31 @@ class EventBus:
         """Разослать перехватываемое UI-действие.
 
         Возвращает ``True``, если обработчик перехватил действие.
+
+        ``dispatch`` синхронный и обязан выполняться в UI-потоке: его
+        обработчики возвращают результат перехвата и обычно трогают
+        виджеты. Из фонового потока используйте ``publish`` или
+        отложенный вызов в UI-поток.
         """
+        if not self._is_ui_thread():
+            log.error(
+                "dispatch(%s) вызван не из UI-потока; действие отклонено",
+                name,
+            )
+            return False
         for entry in self._snapshot(name):
             if self._call(entry, name, payload):
                 return True
         return False
+
+    @staticmethod
+    def _is_ui_thread():
+        if QCoreApplication is None:
+            return True
+        app = QCoreApplication.instance()
+        if app is None:
+            return True
+        return QThread.currentThread() == app.thread()
 
     def _call(self, entry, name, payload):
         if not entry.active:
@@ -212,20 +232,43 @@ class CommandBus:
 
     def __init__(self):
         self._handlers = {}
+        self._lock = threading.RLock()
 
-    def register(self, name, handler):
-        if name in self._handlers:
-            log.warning("Команда перерегистрирована: %s", name)
-        self._handlers[name] = handler
+    def register(self, name, handler, owner=None, replace=False):
+        with self._lock:
+            existing = self._handlers.get(name)
+            if existing is not None and not replace:
+                existing_owner = existing[1]
+                if owner is not None and existing_owner != owner:
+                    raise CommandError(
+                        "Команда уже зарегистрирована другим владельцем: %s"
+                        % name
+                    )
+                if owner is None and existing_owner is not None:
+                    raise CommandError(
+                        "Команда принадлежит модулю: %s" % name
+                    )
+                log.warning("Команда перерегистрирована: %s", name)
+            self._handlers[name] = (handler, owner)
 
-    def unregister(self, name):
-        return self._handlers.pop(name, None) is not None
+    def unregister(self, name, owner=None):
+        with self._lock:
+            existing = self._handlers.get(name)
+            if existing is None:
+                return False
+            if owner is not None and existing[1] != owner:
+                return False
+            self._handlers.pop(name, None)
+            return True
 
     def has(self, name):
-        return name in self._handlers
+        with self._lock:
+            return name in self._handlers
 
     def execute(self, name, *args, **kwargs):
-        h = self._handlers.get(name)
-        if h is None:
+        with self._lock:
+            entry = self._handlers.get(name)
+            handler = entry[0] if entry is not None else None
+        if handler is None:
             raise CommandError("Команда не зарегистрирована: %s" % name)
-        return h(*args, **kwargs)
+        return handler(*args, **kwargs)

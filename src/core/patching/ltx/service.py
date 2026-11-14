@@ -43,6 +43,7 @@ class LtxPatchService:
         forest=None,
         options: Optional[PatchOptions] = None,
         resolved: bool = False,
+        analysis=None,
     ) -> PatchResult:
         mode = (mode or "root").lower().replace("-", "_")
         if mode == "in_place":
@@ -81,6 +82,7 @@ class LtxPatchService:
                 line_sources=line_sources,
                 forest=forest,
                 options=options,
+                analysis=analysis,
             )
         else:
             plan = self.planner.plan_document_change(

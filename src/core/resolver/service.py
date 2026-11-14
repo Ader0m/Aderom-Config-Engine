@@ -61,51 +61,91 @@ def _accepts_overlay(func) -> bool:
 
 
 def _filter_overlay(forest, root_path, overlay):
-    """Оставить resolved-правки, входящие в поддерево root_path."""
+    """Оставить в overlay только правки, входящие в поддерево root_path.
+
+    Ключ resolved-кэша считается по overlay. Если не отфильтровать
+    ``source_files``, правка одного файла меняет ключ **всех** корней, и
+    кэш пересобирается целиком даже при точечной инвалидации.
+    """
     if overlay is None:
         return None
 
-    resolved = getattr(overlay, "resolved_edits", None)
-    if not resolved:
-        return overlay
+    has_attrs = hasattr(overlay, "source_files") or hasattr(
+        overlay,
+        "resolved_edits",
+    )
+    source_files = getattr(overlay, "source_files", None)
+    if source_files is None and not has_attrs:
+        # Плоский словарь {path: text} (overlay сборки/тестов).
+        source_files = overlay
+        resolved = {}
+    else:
+        source_files = source_files or {}
+        resolved = getattr(overlay, "resolved_edits", None) or {}
 
     root_key = path_key(root_path)
-    parent_map = {
-        path_key(node): parent
-        for node, parent in (
-            getattr(forest, "node_parent", {}) or {}
-        ).items()
+    include_parents = getattr(forest, "include_parents", {}) or {}
+    node_parent = getattr(forest, "node_parent", {}) or {}
+
+    memo = {}
+
+    def belongs(path):
+        key = path_key(path)
+        if key == root_key:
+            return True
+        cached = memo.get(key)
+        if cached is not None:
+            return cached
+
+        stack = [Path(path)]
+        seen = set()
+        found = False
+        while stack:
+            node = stack.pop()
+            node_key = path_key(node)
+            if node_key == root_key:
+                found = True
+                break
+            if node_key in seen:
+                continue
+            seen.add(node_key)
+
+            parents = include_parents.get(node)
+            if not parents:
+                parents = include_parents.get(node_key)
+            if parents:
+                stack.extend(Path(parent) for parent in parents)
+                continue
+
+            parent = node_parent.get(node)
+            if parent is None:
+                parent = node_parent.get(node_key)
+            if parent is not None:
+                stack.append(Path(parent))
+
+        memo[key] = found
+        return found
+
+    filtered_sources = {
+        Path(path): text
+        for path, text in source_files.items()
+        if belongs(path)
+    }
+    filtered_resolved = {
+        Path(path): value
+        for path, value in resolved.items()
+        if belongs(path)
     }
 
-    result = {}
-    for candidate, value in resolved.items():
-        node = Path(candidate)
-        seen = set()
-        while True:
-            key = path_key(node)
-            if key == root_key:
-                result[Path(candidate)] = value
-                break
-            if key in seen:
-                break
-            seen.add(key)
-            parent = parent_map.get(key)
-            if parent is None:
-                break
-            node = Path(parent)
+    if not filtered_sources and not filtered_resolved:
+        return None
 
-    if not result:
-        return SimpleNamespace(
-            source_files=getattr(overlay, "source_files", {}) or {},
-            resolved_edits={},
-        )
-
-    if len(result) == len(resolved):
-        return overlay
+    if not has_attrs:
+        return filtered_sources
 
     return SimpleNamespace(
-        source_files=getattr(overlay, "source_files", {}) or {},
-        resolved_edits=result,
+        source_files=filtered_sources,
+        resolved_edits=filtered_resolved,
     )
 
 
@@ -139,8 +179,37 @@ class ResolverService:
         with self._key_lock:
             self._key_cache.clear()
 
+    def invalidate_roots(self, roots):
+        """Точечно сбросить ключи/значения для набора корней."""
+        wanted = {path_key(path) for path in (roots or ())}
+        if not wanted:
+            return
+        with self._key_lock:
+            for identity in list(self._key_cache):
+                # identity = (id(forest), kind, root_key, overlay_key)
+                if len(identity) > 2 and identity[2] in wanted:
+                    self._key_cache.pop(identity, None)
+        discard = getattr(self._resolved_cache, "discard", None)
+        if callable(discard):
+            discard(
+                lambda key: (
+                    isinstance(key, tuple)
+                    and len(key) > 2
+                    and key[2] in wanted
+                )
+            )
+
     def cache_stats(self):
         return self._resolved_cache.stats()
+
+    def overlay_for_root(self, forest, root_path, overlay):
+        """Overlay, относящийся к поддереву конкретного корня.
+
+        Один и тот же снимок должен использоваться и для ключа кэша, и
+        для вычисления значения. Иначе resolved-правки, не входящие в
+        поддерево, меняют ключ, но не результат (или наоборот).
+        """
+        return _filter_overlay(forest, root_path, overlay)
 
     # -------------------------------------------------- адаптер
 
@@ -429,7 +498,7 @@ class ResolverService:
         if adapter is None:
             raise RuntimeError("Resolver4.py не найден")
 
-        overlay = _filter_overlay(forest, root_path, overlay)
+        overlay = self.overlay_for_root(forest, root_path, overlay)
         supports_overlay = overlay is not None and _accepts_overlay(
             adapter.assemble_text
         )
@@ -465,7 +534,7 @@ class ResolverService:
         if adapter is None:
             raise RuntimeError("Resolver4.py не найден")
 
-        overlay = _filter_overlay(forest, root_path, overlay)
+        overlay = self.overlay_for_root(forest, root_path, overlay)
         supports_overlay = overlay is not None and _accepts_overlay(
             adapter.assemble_resolved
         )

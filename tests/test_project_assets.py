@@ -10,8 +10,8 @@ from tests.support import SRC  # noqa: F401
 
 from core.patching.writer import PatchWriter
 from sdk.api import ProjectAssetType
-from ui.project import ProjectService
-from ui.project_assets import ProjectAssetRegistry
+from app.projects import ProjectService
+from app.projects import ProjectAssetRegistry
 
 
 def _registry():

@@ -5,8 +5,10 @@ import logging
 from pathlib import Path
 
 from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QColor, QIcon, QPainter, QPalette, QPen, QPixmap
 from PyQt5.QtWidgets import QMenu, QTabWidget, QWidget
 
+from sdk.api import FileOpened
 from sdk.events import Events
 
 from .editor import CodeEditor
@@ -23,15 +25,26 @@ class EditorTabs(QTabWidget):
     save_requested = pyqtSignal(str, str)
     lexer_status = pyqtSignal(str)
 
-    def __init__(self, events=None, commands=None, parent=None, can_edit=None):
+    def __init__(self, events=None, commands=None, parent=None, can_edit=None,
+                 file_actions=None):
         super().__init__(parent)
 
         self._events = events
         self._commands = commands
+        self._file_actions = file_actions or (lambda: ())
         self._tab_ids = {}
         self._tab_source_paths = {}
         self._default_editor = None
         self._can_edit = can_edit or (lambda: False)
+        # Иконка «часики» на время загрузки проекта: редактирование в
+        # это время запрещено, а после разблокировки иконка снимается.
+        self._busy = False
+        self._busy_icon_cache = None
+        self._busy_icons = {}
+        # Вкладки, которые остаются неготовыми после загрузки проекта
+        # (например, осиротевший resolved-документ). Их «часики» не
+        # снимаются общей разблокировкой.
+        self._tab_busy = set()
 
         self.setTabsClosable(True)
         self.tabCloseRequested.connect(self._on_close_requested)
@@ -110,6 +123,98 @@ class EditorTabs(QTabWidget):
             if callable(setter):
                 setter(editable)
 
+    def set_busy(self, busy):
+        """Показать/снять «часики» загрузки проекта на всех вкладках.
+
+        Иконка — только индикатор: сам запрет правки задаётся через
+        :meth:`set_editable`. Вкладки, открытые во время загрузки, тоже
+        получают часики. Индивидуально помеченные вкладки
+        (:meth:`set_tab_busy`) сохраняют иконку после общей разблокировки.
+        """
+        busy = bool(busy)
+        if busy == self._busy:
+            return
+        self._busy = busy
+        for index in range(self.count()):
+            self._apply_busy(index)
+        if not busy:
+            for tab_id in list(self._busy_icons):
+                if tab_id not in self._tab_busy:
+                    self._busy_icons.pop(tab_id, None)
+
+    @property
+    def is_busy(self):
+        return self._busy
+
+    def set_tab_busy(self, tab_id, busy):
+        """Индивидуальные «часики»: вкладка ещё не готова к правке."""
+        tab_id = str(tab_id or "")
+        widget = self._tab_ids.get(tab_id)
+        if widget is None:
+            return False
+
+        if busy:
+            self._tab_busy.add(tab_id)
+        else:
+            self._tab_busy.discard(tab_id)
+
+        index = self.indexOf(widget)
+        if index >= 0:
+            self._apply_busy(index)
+        return True
+
+    def is_tab_busy(self, tab_id):
+        return str(tab_id or "") in self._tab_busy
+
+    def clear_tab_busy(self):
+        """Снять индивидуальные «часики» со всех вкладок."""
+        for tab_id in list(self._tab_busy):
+            self.set_tab_busy(tab_id, False)
+
+    def _apply_busy(self, index):
+        widget = self.widget(index)
+        if widget is None:
+            return
+        tab_id = self._tab_id_for_widget(widget)
+        if tab_id is None:
+            return
+
+        busy = self._busy or tab_id in self._tab_busy
+        if busy:
+            if tab_id not in self._busy_icons:
+                self._busy_icons[tab_id] = self.tabIcon(index)
+            self.setTabIcon(index, self._busy_icon())
+            return
+
+        previous = self._busy_icons.pop(tab_id, None)
+        self.setTabIcon(
+            index,
+            previous if previous is not None else QIcon(),
+        )
+
+    def _busy_icon(self):
+        if self._busy_icon_cache is not None:
+            return self._busy_icon_cache
+
+        size = 16
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.transparent)
+
+        painter = QPainter(pixmap)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            color = self.palette().color(QPalette.WindowText)
+            painter.setPen(QPen(color, 1.6))
+            painter.drawEllipse(2, 2, size - 4, size - 4)
+            center = size // 2
+            painter.drawLine(center, center, center, 4)
+            painter.drawLine(center, center, size - 5, center + 2)
+        finally:
+            painter.end()
+
+        self._busy_icon_cache = QIcon(pixmap)
+        return self._busy_icon_cache
+
     def mark_clean(self, path, text=None):
         """Снять признак несохранённых изменений у вкладки файла."""
         path = str(path)
@@ -179,7 +284,7 @@ class EditorTabs(QTabWidget):
             self.setCurrentIndex(index)
             self._tab_source_paths[tab_id] = source_path
             self._publish(Events.UI_TAB_OPENED, tab_id)
-            self._publish_file_opened(source_path)
+            self._publish_file_opened(source_path, tab_id)
             return
 
         if existing is not None:
@@ -188,11 +293,13 @@ class EditorTabs(QTabWidget):
         self._add_tab(tab_id, title, widget)
         self._tab_source_paths[tab_id] = source_path
         self._publish(Events.UI_TAB_OPENED, tab_id)
-        self._publish_file_opened(source_path)
+        self._publish_file_opened(source_path, tab_id)
 
     def close_tab(self, tab_id):
         widget = self._tab_ids.pop(tab_id, None)
         self._tab_source_paths.pop(tab_id, None)
+        self._tab_busy.discard(tab_id)
+        self._busy_icons.pop(tab_id, None)
         if widget is None:
             return False
 
@@ -265,7 +372,8 @@ class EditorTabs(QTabWidget):
         self._tab_source_paths[DEFAULT_TAB_ID] = source_path
         self._publish(Events.UI_TAB_OPENED, DEFAULT_TAB_ID)
         self._publish_file_opened(
-            source_path if source_path is not None else tooltip
+            source_path if source_path is not None else tooltip,
+            DEFAULT_TAB_ID,
         )
 
     def goto_line(self, line_number):
@@ -297,6 +405,8 @@ class EditorTabs(QTabWidget):
         index = self.addTab(widget, title)
         self._tab_ids[tab_id] = widget
         self.setCurrentIndex(index)
+        if self._busy:
+            self._apply_busy(index)
         return widget
 
     def _active_editor(self):
@@ -342,7 +452,10 @@ class EditorTabs(QTabWidget):
         chosen = menu.exec_(tab_bar.mapToGlobal(pos))
 
         if chosen in file_actions:
-            self._run_file_action(file_actions[chosen], path)
+            try:
+                file_actions[chosen](path)
+            except Exception:
+                log.exception("Не удалось выполнить файловое действие")
         elif chosen is close_right:
             self._close_tabs_by_indices(
                 range(index + 1, self.count())
@@ -365,40 +478,35 @@ class EditorTabs(QTabWidget):
         return str(path) if path is not None else None
 
     def _add_file_actions(self, menu, path):
-        """Действия с файлом вкладки: те же команды, что и в дереве VFS."""
-        if path is None or self._commands is None:
+        """Действия с файлом вкладки из общего реестра платформы.
+
+        Платформа не знает имён команд конкретного модуля: модули сами
+        регистрируют действия через ``ctx.ui.register_file_action``.
+        """
+        if path is None:
             return {}
 
-        suffix = Path(path).suffix.lower()
-        resolved_external = (
-            "base.open_xml_resolved_notepad"
-            if suffix == ".xml"
-            else "base.assemble_open"
-        )
-
-        entries = (
-            ("Открыть исходный", "base.open_raw"),
-            ("Открыть resolved", "ui.open_file"),
-            ("Открыть resolved в Notepad++", resolved_external),
-            ("Открыть исходный в Notepad++", "base.open_notepad"),
-        )
-
         actions = {}
-        for label, command in entries:
-            if not self._has_command(command):
+        for entry in self._file_actions() or ():
+            try:
+                label, handler = entry[0], entry[1]
+                predicate = entry[2] if len(entry) > 2 else None
+            except (TypeError, IndexError):
+                log.warning("Некорректная запись file action: %r", entry)
                 continue
-            actions[menu.addAction(label)] = command
+            try:
+                if predicate is not None and not predicate(path):
+                    continue
+            except Exception:
+                log.exception(
+                    "Ошибка predicate файлового действия: %s", label
+                )
+                continue
+
+            action = menu.addAction(label)
+            actions[action] = handler
+
         return actions
-
-    def _has_command(self, name):
-        has = getattr(self._commands, "has", None)
-        return bool(has(name)) if callable(has) else True
-
-    def _run_file_action(self, command, path):
-        try:
-            self._commands.execute(command, path)
-        except Exception:
-            log.exception("Не удалось выполнить команду вкладки: %s", command)
 
     def _close_tabs_by_indices(self, indices):
         """Закрыть вкладки по индексам, не сбивая нумерацию при удалении."""
@@ -425,9 +533,12 @@ class EditorTabs(QTabWidget):
         if self._events is not None:
             self._events.publish(name, payload)
 
-    def _publish_file_opened(self, path):
+    def _publish_file_opened(self, path, tab_id=""):
         if path is not None:
-            self._publish(Events.FILE_OPENED, str(path))
+            self._publish(
+                Events.FILE_OPENED,
+                FileOpened(path=Path(path), tab_id=str(tab_id or "")),
+            )
 
 
 def _short_title(text, limit=40):

@@ -17,6 +17,7 @@ from .contracts import (
     FileReader,
 )
 from .events import Events
+from .paths import path_key, same_path
 from .api import (
     CoreApi,
     UiApi,
@@ -47,6 +48,9 @@ from .api import (
     ResolvedLineEdit,
     ResolvedDocumentChange,
     ItemCardRequest,
+    SavedDraft,
+    FileOpened,
+    FileOpenFailed,
     TextureRegion,
 )
 from .adapters import (
@@ -70,6 +74,8 @@ __all__ = [
     "ModuleBase",
     "ModuleContext",
     "Events",
+    "path_key",
+    "same_path",
     "FileOpenHandler",
     "FileReader",
     "CoreApi",
@@ -101,6 +107,9 @@ __all__ = [
     "ResolvedLineEdit",
     "ResolvedDocumentChange",
     "ItemCardRequest",
+    "SavedDraft",
+    "FileOpened",
+    "FileOpenFailed",
     "TextureRegion",
     "CoreApiAdapter",
     "EventApiAdapter",

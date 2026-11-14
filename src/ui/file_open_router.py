@@ -45,11 +45,11 @@ class FileOpenRouter:
     """
 
     def __init__(self):
-        self._handlers = []
+        self._handlers = []  # (handler, module_context|None)
         self.default = None
 
-    def register(self, handler):
-        self._handlers.append(handler)
+    def register(self, handler, context=None):
+        self._handlers.append((handler, context))
 
     def set_default(self, handler):
         self.default = handler
@@ -57,13 +57,27 @@ class FileOpenRouter:
     def open(self, path, api):
         p = Path(path)
 
-        for h in sorted(self._handlers, key=lambda x: -x.priority):
+        for handler, context in sorted(
+            self._handlers,
+            key=lambda item: -item[0].priority,
+        ):
             try:
-                if h.can_open(p):
-                    h.open(p, api)
-                    return True
+                if not handler.can_open(p):
+                    continue
+                # Модульный обработчик получает свой ModuleContext, а не
+                # сырой PlatformApi. Платформенный default — PlatformApi.
+                result = handler.open(
+                    p,
+                    context if context is not None else api,
+                )
+                # False означает «обработчик выбран, но открытие не
+                # удалось». Не подменяем ошибку открытием сырого файла.
+                return bool(result)
             except Exception:
-                log.exception("Обработчик открытия файла упал: %r", h)
+                log.exception("Обработчик открытия файла упал: %r", handler)
+                # Обработчик уже выбран по типу файла; не подменяем его
+                # ошибку открытием сырого файла по умолчанию.
+                return False
 
         return self.open_default(p, api)
 
@@ -72,5 +86,8 @@ class FileOpenRouter:
         p = Path(path)
         if self.default is None:
             return False
-        self.default.open(p, api)
-        return True
+        try:
+            return bool(self.default.open(p, api))
+        except Exception:
+            log.exception("Обработчик открытия по умолчанию упал")
+            return False

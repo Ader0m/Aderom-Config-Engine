@@ -11,9 +11,9 @@ from core.patching.writer import PatchWriter
 from sdk import FileReader, FileView
 from sdk.api import ProjectAssetType
 from tests.helpers import FakeForest
-from ui.project import ProjectService
-from ui.project_assets import ProjectAssetRegistry, ProjectAssetTypeError
-from ui.project_readers import ProjectFileReaderRegistry
+from app.projects import ProjectService
+from app.projects import ProjectAssetRegistry, ProjectAssetTypeError
+from app.projects import ProjectFileReaderRegistry
 
 
 def _type(key, root, extensions):

@@ -70,9 +70,20 @@ class FileOpenRouterTest(unittest.TestCase):
         # Маршрутизатор считает файл обработанным, если выбранный
         # обработчик согласился его открыть; false не запускает цепочку
         # заново. Фиксируем текущий контракт, чтобы не потерять его.
-        self.assertTrue(router.open(Path("a.ltx"), self.api))
+        self.assertFalse(router.open(Path("a.ltx"), self.api))
         self.assertEqual(first.calls, [Path("a.ltx")])
         self.assertEqual(second.calls, [])
+
+    def test_module_handler_receives_module_context(self):
+        router = FileOpenRouter()
+        handler = _Handler("module")
+        context = object()
+        router.register(handler, context=context)
+
+        seen = []
+        handler.open = lambda path, api: seen.append(api) or True
+        self.assertTrue(router.open(Path("a.ltx"), self.api))
+        self.assertEqual(seen, [context])
 
     def test_default_handler_is_used_when_nobody_can_open(self):
         router = FileOpenRouter()

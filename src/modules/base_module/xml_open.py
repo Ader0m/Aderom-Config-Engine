@@ -3,7 +3,7 @@
 
 from pathlib import Path
 
-from sdk import FileOpenHandler
+from sdk import FileOpenFailed, FileOpenHandler
 from sdk.events import Events
 
 
@@ -24,9 +24,9 @@ class XmlFileOpener:
         ):
             if self.open_resolved(path):
                 return True
-        return self.open(path)
+        return self.open_raw(path)
 
-    def open(self, path) -> bool:
+    def open_raw(self, path) -> bool:
         path = Path(path)
 
         self.ctx.ui.set_status("XML (без резолва): %s…" % path.name)
@@ -113,14 +113,20 @@ class XmlFileOpener:
     # -------------------------------------------------- служебное
     def _check_session(self, path):
         if self.session is None or not getattr(self.session, "has_tree", False):
-            self.ctx.events.publish(Events.FILE_OPEN_FAILED, path)
+            self.ctx.events.publish(
+                Events.FILE_OPEN_FAILED,
+                FileOpenFailed(path=Path(path)),
+            )
             self.ctx.ui.show_error(
                 "Дерево не построено: сначала «Пересобрать VFS»."
             )
             return False
 
         if getattr(self.session, "config_dir", None) is None:
-            self.ctx.events.publish(Events.FILE_OPEN_FAILED, path)
+            self.ctx.events.publish(
+                Events.FILE_OPEN_FAILED,
+                FileOpenFailed(path=Path(path)),
+            )
             self.ctx.ui.show_error(
                 "Не определён каталог configs — XML-резолв невозможен."
             )
