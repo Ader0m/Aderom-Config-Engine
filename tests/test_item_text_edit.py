@@ -10,6 +10,8 @@ from tests.helpers import write_text
 from tests.support import SRC  # noqa: F401
 
 from tests.qt_support import qapp
+from PyQt5.QtCore import QPoint, Qt
+from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QLineEdit
 from sdk.api import ItemEntry, ItemField, LocalizationString, ProjectOverlay
 from core.items.catalog import ItemCatalogService
@@ -394,6 +396,87 @@ class ItemCardTextEditTest(unittest.TestCase):
             calls,
             [("item", "description", "Новое описание")],
         )
+
+    def test_name_save_button_appears_only_while_editing(self):
+        card = ItemCardView(
+            get_entry=self._entry,
+            get_image=lambda section: None,
+            can_edit=lambda: True,
+            on_text_edit=lambda *args: True,
+        )
+        card.refresh()
+
+        self.assertTrue(card.name_save_btn.isHidden())
+        self.assertTrue(card.name_label.begin_editing())
+        self.assertFalse(card.name_save_btn.isHidden())
+        card.name_label.end_editing()
+        self.assertTrue(card.name_save_btn.isHidden())
+
+    def test_name_save_button_applies_name(self):
+        calls = []
+        card = ItemCardView(
+            get_entry=self._entry,
+            get_image=lambda section: None,
+            can_edit=lambda: True,
+            on_text_edit=lambda section, field, value: (
+                calls.append((section, field, value)) or True
+            ),
+        )
+        card.refresh()
+
+        card.name_label.begin_editing()
+        card.name_label.setText("Новое имя")
+        card.name_save_btn.click()
+
+        self.assertEqual(calls, [("item", "name", "Новое имя")])
+
+    def test_double_click_activates_text_editing(self):
+        card = ItemCardView(
+            get_entry=self._entry,
+            get_image=lambda section: None,
+            can_edit=lambda: True,
+            on_text_edit=lambda *args: True,
+        )
+        card.refresh()
+        card.show()
+        _app.processEvents()
+
+        position = QPoint(5, 5)
+        QTest.mouseClick(
+            card.name_label,
+            Qt.LeftButton,
+            Qt.NoModifier,
+            position,
+        )
+        self.assertFalse(card.name_label.is_editing())
+
+        QTest.mouseDClick(
+            card.name_label,
+            Qt.LeftButton,
+            Qt.NoModifier,
+            position,
+        )
+        self.assertTrue(card.name_label.is_editing())
+        card.name_label.end_editing()
+
+        viewport = card.description_label.viewport()
+        QTest.mouseClick(
+            viewport,
+            Qt.LeftButton,
+            Qt.NoModifier,
+            position,
+        )
+        self.assertFalse(card.description_label.is_editing())
+
+        QTest.mouseDClick(
+            viewport,
+            Qt.LeftButton,
+            Qt.NoModifier,
+            position,
+        )
+        self.assertTrue(card.description_label.is_editing())
+        card.description_label.end_editing()
+        card.close()
 
     def test_click_activates_edit_and_focus_out_returns_label_look(self):
         card = ItemCardView(

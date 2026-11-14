@@ -211,9 +211,10 @@ def main():
     loader = ModuleLoader(make_context)
     loader.discover_and_load(log=api.log)
 
-    # 4) Главное окно.
+    # 4) Главное окно. Сразу разворачиваем: рабочая среда рассчитана
+    # на широкий экран (дерево + редактор + диагностика).
     window = MainWindow(api)
-    window.show()
+    window.showMaximized()
 
     # 5) Активация модулей и старт.
     loader.activate_all(log=api.log)

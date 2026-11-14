@@ -2,12 +2,16 @@
 """Хостинг окон, которые создают модули.
 
 Платформа не знает, что именно показывает модуль. Она отвечает только за:
-- родительское окно;
 - показ, подъём и активацию;
 - закрытие окон модуля при необходимости.
+
+Окна модулей намеренно не делаются дочерними (owned) для главного окна:
+на Windows owned-окно всегда рисуется поверх владельца, из-за чего клик
+по главному окну не мог поднять его над открытым окном модуля. Поэтому
+каждое окно модуля — самостоятельное top-level окно, а его жизненным
+циклом управляет этот менеджер.
 """
 
-from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QWidget
 
 
@@ -30,9 +34,6 @@ class ModuleWindowManager:
             if previous is not None and previous is not window:
                 previous.close()
             self._windows[key] = window
-
-        if self._main_window is not None and window.parent() is None:
-            window.setParent(self._main_window, window.windowFlags() | Qt.Window)
 
         window.show()
         window.raise_()

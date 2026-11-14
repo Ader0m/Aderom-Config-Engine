@@ -26,7 +26,10 @@ class ModuleWindowManagerTest(unittest.TestCase):
         self.manager.show("test.window", window)
 
         self.assertTrue(window.isVisible())
-        self.assertIs(window.parent(), self.main)
+        # Окно модуля не должно быть owned-окном главного: иначе оно
+        # всегда остаётся поверх него в оконном менеджере Windows.
+        self.assertIsNone(window.parent())
+        self.assertTrue(window.isWindow())
 
         self.manager.close("test.window")
         self.assertFalse(window.isVisible())

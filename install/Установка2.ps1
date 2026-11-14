@@ -13,7 +13,11 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$RequiredVersion = '3.10.6'
+# Any Python 3.10.x starting from this patch version is accepted.
+$MinimumVersion = '3.10.6'
+$PythonSeries = '3.10'
+# Version installed when no suitable Python is found (last 3.10 release with an installer).
+$InstallerVersion = '3.10.11'
 $VenvDirName = '.venv'
 
 function Write-Info {
@@ -115,6 +119,25 @@ function Get-PythonVersion {
     return Get-LastLine -Text $raw
 }
 
+function Test-PythonVersion {
+    param([string]$Version)
+
+    if ([string]::IsNullOrWhiteSpace($Version)) {
+        return $false
+    }
+
+    if (-not $Version.StartsWith("$PythonSeries.")) {
+        return $false
+    }
+
+    try {
+        return ([version]$Version -ge [version]$MinimumVersion)
+    }
+    catch {
+        return $false
+    }
+}
+
 function Test-PythonPath {
     param([string]$Path)
 
@@ -123,7 +146,7 @@ function Test-PythonPath {
     }
 
     $version = Get-PythonVersion -Exe $Path
-    return ($version -eq $RequiredVersion)
+    return (Test-PythonVersion -Version $version)
 }
 
 function Get-PythonExecutable {
@@ -132,7 +155,7 @@ function Get-PythonExecutable {
             return $PythonExe
         }
 
-        throw "Specified Python executable is not Python $RequiredVersion : $PythonExe"
+        throw "Specified Python executable is not Python $MinimumVersion or newer (3.10.x): $PythonExe"
     }
 
     foreach ($entry in Get-CommandList) {
@@ -151,7 +174,7 @@ function Get-PythonExecutable {
         $versionRaw = Invoke-External -Command $entry.Command -Arguments $versionArgs
         $version = Get-LastLine -Text $versionRaw
 
-        if ($version -eq $RequiredVersion) {
+        if (Test-PythonVersion -Version $version) {
             $exeArgs = $entry.Args + @('-c', 'import sys; print(sys.executable)')
             $exeRaw = Invoke-External -Command $entry.Command -Arguments $exeArgs
             $exePath = Get-LastLine -Text $exeRaw
@@ -206,14 +229,14 @@ function Get-Any310Version {
     return $null
 }
 
-function Install-Python3106 {
-    Write-Info "Python $RequiredVersion not found. Installing..."
+function Install-Python310 {
+    Write-Info "Python $MinimumVersion or newer (3.10.x) not found. Installing Python $InstallerVersion..."
 
     $is64 = [Environment]::Is64BitOperatingSystem
-    $fileName = if ($is64) { 'python-3.10.6-amd64.exe' } else { 'python-3.10.6.exe' }
-    $url = "https://www.python.org/ftp/python/3.10.6/$fileName"
+    $fileName = if ($is64) { "python-$InstallerVersion-amd64.exe" } else { "python-$InstallerVersion.exe" }
+    $url = "https://www.python.org/ftp/python/$InstallerVersion/$fileName"
 
-    $tempDir = Join-Path $env:TEMP 'python-3.10.6-setup'
+    $tempDir = Join-Path $env:TEMP "python-$InstallerVersion-setup"
 
     if (-not (Test-Path -LiteralPath $tempDir)) {
         New-Item -ItemType Directory -Path $tempDir | Out-Null
@@ -286,18 +309,18 @@ try {
         throw "requirements.txt not found: $RequirementsFile"
     }
 
-    Write-Info "Checking Python $RequiredVersion..."
+    Write-Info "Checking Python $MinimumVersion or newer (3.10.x)..."
 
     $python = Get-PythonExecutable
 
     if (-not $python) {
         $other310 = Get-Any310Version
 
-        if ($other310 -and $other310 -ne $RequiredVersion -and -not $ForceInstallPython) {
-            throw "Found Python $other310, but required version is $RequiredVersion. Run again with -ForceInstallPython if you really want to install Python $RequiredVersion."
+        if ($other310 -and -not (Test-PythonVersion -Version $other310) -and -not $ForceInstallPython) {
+            throw "Found Python $other310, but version $MinimumVersion or newer (3.10.x) is required. Run again with -ForceInstallPython to install Python $InstallerVersion."
         }
 
-        Install-Python3106
+        Install-Python310
 
         $python = Get-PythonExecutable
 
@@ -311,10 +334,10 @@ try {
     }
 
     if (-not $python) {
-        throw "Could not find or install Python $RequiredVersion."
+        throw "Could not find or install Python $MinimumVersion or newer (3.10.x)."
     }
 
-    Write-Info "Using Python $RequiredVersion : $python"
+    Write-Info "Using Python $((Get-PythonVersion -Exe $python)) : $python"
 
     if ($ForceVenv -and (Test-Path -LiteralPath $venvDir)) {
         Write-Info 'Removing existing .venv because -ForceVenv was specified.'
@@ -324,8 +347,8 @@ try {
     if (Test-Path -LiteralPath $venvPython -PathType Leaf) {
         $venvVersion = Get-PythonVersion -Exe $venvPython
 
-        if ($venvVersion -ne $RequiredVersion) {
-            throw "Existing .venv uses Python $venvVersion, but required version is $RequiredVersion. Run again with -ForceVenv to recreate .venv."
+        if (-not (Test-PythonVersion -Version $venvVersion)) {
+            throw "Existing .venv uses Python $venvVersion, but version $MinimumVersion or newer (3.10.x) is required. Run again with -ForceVenv to recreate .venv."
         }
 
         Write-Info "Using existing virtual environment: $venvDir"

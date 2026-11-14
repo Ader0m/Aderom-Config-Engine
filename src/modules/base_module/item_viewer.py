@@ -2536,7 +2536,9 @@ class ItemViewerFeature:
 
 
 class ClickToEditLineEdit(QLineEdit):
-    """Название выглядит как подпись, пока пользователь не кликнул."""
+    """Название выглядит как подпись, пока не кликнули двойным кликом."""
+
+    editing_changed = pyqtSignal(bool)
 
     _IDLE_STYLE = (
         "QLineEdit { background: transparent; border: none; "
@@ -2612,21 +2614,25 @@ class ClickToEditLineEdit(QLineEdit):
         self.setReadOnly(False)
         self.setStyleSheet(self._edit_style)
         self.setFocus(Qt.MouseFocusReason)
+        self.editing_changed.emit(True)
         return True
 
     def end_editing(self):
+        was_editing = self._editing
         self._editing = False
         self.setReadOnly(True)
         self.setStyleSheet(self._IDLE_STYLE)
+        if was_editing:
+            self.editing_changed.emit(False)
 
-    def mousePressEvent(self, event):
+    def mouseDoubleClickEvent(self, event):
         if (
             not self._editing
             and event.button() == Qt.LeftButton
             and self._is_edit_allowed()
         ):
             self.begin_editing()
-        super().mousePressEvent(event)
+        super().mouseDoubleClickEvent(event)
 
     def focusOutEvent(self, event):
         super().focusOutEvent(event)
@@ -2635,7 +2641,7 @@ class ClickToEditLineEdit(QLineEdit):
 
 
 class LocalizedDescriptionEdit(QPlainTextEdit):
-    """Описание выглядит как подпись, пока пользователь не кликнул.
+    """Описание выглядит как подпись, пока не кликнули двойным кликом.
 
     ``QPlainTextEdit`` не имеет ``editingFinished``; карточке нужно
     зафиксировать правку при потере фокуса или по Ctrl+Enter, не записывая
@@ -2901,14 +2907,14 @@ class LocalizedDescriptionEdit(QPlainTextEdit):
             self.editing_changed.emit(False)
         self.viewport().update()
 
-    def mousePressEvent(self, event):
+    def mouseDoubleClickEvent(self, event):
         if (
             not self._editing
             and event.button() == Qt.LeftButton
             and self._is_edit_allowed()
         ):
             self.begin_editing()
-        super().mousePressEvent(event)
+        super().mouseDoubleClickEvent(event)
 
     def focusOutEvent(self, event):
         was_editing = self._editing
@@ -3112,6 +3118,9 @@ class ItemCardView(QWidget):
         self.name_label.editingFinished.connect(
             self._schedule_pending_entry_apply
         )
+        self.name_label.editing_changed.connect(
+            self._on_name_editing_changed
+        )
         self.name_label.set_theme_colors(
             self._palette("border", "#3C3F41"),
             self._palette("accent", "#3592E4"),
@@ -3121,6 +3130,21 @@ class ItemCardView(QWidget):
             self._on_name_context_menu
         )
         text_block.addWidget(self.name_label)
+
+        self.name_save_btn = QPushButton("Сохранить")
+        self.name_save_btn.setAutoDefault(False)
+        self.name_save_btn.setDefault(False)
+        self.name_save_btn.setFocusPolicy(Qt.NoFocus)
+        self.name_save_btn.setToolTip(
+            "Применить изменения названия (Enter)"
+        )
+        self.name_save_btn.setVisible(False)
+        self.name_save_btn.clicked.connect(self._apply_name_text)
+        name_save_row = QHBoxLayout()
+        name_save_row.setContentsMargins(0, 0, 0, 0)
+        name_save_row.addStretch(1)
+        name_save_row.addWidget(self.name_save_btn)
+        text_block.addLayout(name_save_row)
 
         self.meta_label = QLabel()
         self.meta_label.setWordWrap(True)
@@ -3143,7 +3167,8 @@ class ItemCardView(QWidget):
         self.description_label = LocalizedDescriptionEdit()
         self.description_label.setPlaceholderText("Описание предмета")
         self.description_label.setToolTip(
-            "Клик — редактировать. Потеря фокуса или Ctrl+Enter — применить."
+            "Двойной клик — редактировать. "
+            "Потеря фокуса или Ctrl+Enter — применить."
         )
         self.description_label.editing_finished.connect(
             self._apply_description_text
@@ -3542,7 +3567,10 @@ class ItemCardView(QWidget):
         key = str(getattr(source, "key", "") or "")
         if path is None:
             return str(text or "")
-        return "%s\n\nXML: %s\nid: %s" % (text, path, key)
+        return (
+            "%s\n\nДвойной клик — редактировать.\nXML: %s\nid: %s"
+            % (text, path, key)
+        )
 
     def set_saving(self, saving):
         """Заблокировать ввод и показать «часы» на время записи XML."""
@@ -3552,6 +3580,7 @@ class ItemCardView(QWidget):
             self.description_label.end_editing()
         widgets = (
             self.name_label,
+            self.name_save_btn,
             self.description_label,
             self.description_save_btn,
             self.fields_table,
@@ -3601,6 +3630,10 @@ class ItemCardView(QWidget):
         else:
             self.refresh()
 
+    def _on_name_editing_changed(self, editing):
+        self.name_save_btn.setVisible(bool(editing))
+        self.name_save_btn.setEnabled(bool(editing) and not self._saving)
+
     def _on_description_editing_changed(self, editing):
         self.description_save_btn.setVisible(bool(editing))
         self.description_save_btn.setEnabled(
@@ -3639,6 +3672,7 @@ class ItemCardView(QWidget):
             self.section_label.setText("—")
             self.name_label.clear()
             self.name_label.set_edit_allowed(False)
+            self.name_save_btn.setVisible(False)
             self.meta_label.clear()
             self.description_label.clear()
             self.description_label.set_edit_allowed(False)

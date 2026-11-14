@@ -308,6 +308,15 @@ class MainWindow(QMainWindow):
 
     # -------------------------------------------------- завершение
     def closeEvent(self, event):
+        # Окна модулей теперь самостоятельные top-level окна, поэтому
+        # приложение не завершится, пока хотя бы одно из них открыто.
+        close_windows = getattr(self.api, "close_module_windows", None)
+        if callable(close_windows):
+            try:
+                close_windows()
+            except Exception:
+                pass
+
         self._tree_ready_sub.unsubscribe()
         if hasattr(self, "_prebuild_timer"):
             self._prebuild_timer.stop()

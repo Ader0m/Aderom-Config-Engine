@@ -421,6 +421,10 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         self._window_manager.close(key)
         self.events.publish(Events.UI_WINDOW_CLOSED, key)
 
+    def close_module_windows(self):
+        """Закрыть все окна, открытые модулями."""
+        self._window_manager.close_all()
+
     # -------------------------------------------------- вкладки редактора
     def open_editor_tab(self, tab_id, title, widget):
         """Открыть вкладку, созданную модулем."""
