@@ -320,6 +320,50 @@ class ItemCardTextEditTest(unittest.TestCase):
 
         self.assertEqual(calls, [])
 
+    def test_color_completion_filters_after_color_tag(self):
+        raw = r"Текст\n%c[ui"
+        entry = ItemEntry(
+            section="item",
+            fields=(),
+            name_text="Имя",
+            description_text="Текст",
+            description_source=LocalizationString(
+                "st_desc",
+                "Текст",
+                Path("ru.xml"),
+                raw_text=raw,
+            ),
+        )
+        card = ItemCardView(
+            get_entry=lambda: entry,
+            get_image=lambda section: None,
+            can_edit=lambda: True,
+            on_text_edit=lambda *args: True,
+            color_defs={
+                "ui_gray_3": (170, 170, 170, 255),
+                "d_blue": (80, 120, 220, 255),
+            },
+        )
+        card.refresh()
+        card.description_label.begin_editing()
+
+        text = card.description_label.toPlainText()
+        cursor = card.description_label.textCursor()
+        cursor.setPosition(text.index("%c[ui") + len("%c[ui"))
+        card.description_label.setTextCursor(cursor)
+        card.description_label._update_color_completion()
+
+        self.assertEqual(
+            card.description_label._completer.completionPrefix(),
+            "ui",
+        )
+        model = card.description_label._completer.completionModel()
+        self.assertEqual(model.rowCount(), 1)
+        self.assertEqual(model.index(0, 0).data(), "ui_gray_3")
+
+        card.description_label._insert_color_completion("ui_gray_3")
+        self.assertIn("%c[ui_gray_3]", card.description_label.raw_text())
+
     def test_save_button_appears_only_while_editing(self):
         card = ItemCardView(
             get_entry=self._entry,

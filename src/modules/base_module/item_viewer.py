@@ -35,6 +35,7 @@ from sdk.events import Events
 from PyQt5.QtCore import (
     QEvent,
     QMimeData,
+    QModelIndex,
     QPoint,
     QRect,
     QRectF,
@@ -782,6 +783,7 @@ class ItemViewerFeature:
         self._tab_sub = None
         self._card_req_sub = None
         self._project_sub = None
+        self._project_saved_sub = None
         if events is not None:
             self._doc_sub = events.subscribe(
                 Events.RESOLVED_DOCUMENT_CHANGED,
@@ -795,6 +797,10 @@ class ItemViewerFeature:
                 Events.PROJECT_CHANGED,
                 self._on_project_changed,
                 priority=-100,
+            )
+            self._project_saved_sub = events.subscribe(
+                Events.PROJECT_SAVED,
+                self._on_project_saved,
             )
             register_action = getattr(
                 self.ctx.ui,
@@ -1039,6 +1045,7 @@ class ItemViewerFeature:
             getattr(self, "_tab_sub", None),
             getattr(self, "_card_req_sub", None),
             getattr(self, "_project_sub", None),
+            getattr(self, "_project_saved_sub", None),
         ):
             if sub is not None and hasattr(sub, "unsubscribe"):
                 try:
@@ -1174,6 +1181,18 @@ class ItemViewerFeature:
         self._title = str(context.get("title") or "")
         self._root_text = str(context.get("text") or "")
         self._root_sources = tuple(context.get("line_sources") or ())
+
+    def _on_project_saved(self, _event):
+        """Обновить список цветов после сохранения XML-файлов проекта."""
+        self._color_defs_cache = None
+        cards = []
+        if self._window is not None:
+            cards.append(getattr(self._window, "card", None))
+        cards.extend(card for _tab, _section, card in self._cards.values())
+        for card in cards:
+            refresh = getattr(card, "refresh_color_suggestions", None)
+            if callable(refresh):
+                refresh()
 
     def _on_project_changed(self, _project):
         """Перепривязать корневой документ каталога к новому проекту.
@@ -2400,6 +2419,23 @@ class LocalizedDescriptionEdit(QPlainTextEdit):
         self._raw_text = ""
         self._engine_colors = {}
         self._engine_default = None
+        self._color_names = ["default"]
+
+        self._completer = QCompleter(self)
+        self._completer.setWidget(self)
+        self._completer.setCompletionMode(QCompleter.PopupCompletion)
+        self._completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self._completer.setFilterMode(Qt.MatchContains)
+        self._completer.activated[QModelIndex].connect(
+            self._on_color_activated
+        )
+        self._color_model = QStandardItemModel(self)
+        self._completer.setModel(self._color_model)
+        self.set_color_suggestions({})
+
+        self.textChanged.connect(self._update_color_completion)
+        self.cursorPositionChanged.connect(self._update_color_completion)
+
         self.setFrameShape(QFrame.NoFrame)
         self.setReadOnly(True)
         self.setStyleSheet(self._IDLE_STYLE)
@@ -2411,8 +2447,8 @@ class LocalizedDescriptionEdit(QPlainTextEdit):
         применяются только к отрисованному виду.
         """
         self._raw_text = engine_source_text(raw_text)
-        self._engine_colors = dict(colors or {})
         self._engine_default = default_color
+        self.set_color_suggestions(colors)
 
         if self._editing:
             QPlainTextEdit.setPlainText(
@@ -2421,6 +2457,125 @@ class LocalizedDescriptionEdit(QPlainTextEdit):
             )
         else:
             self._render_engine_text()
+
+    def set_color_suggestions(self, colors=None):
+        """Обновить список цветов для подсказки после ``%c[``."""
+        palette = dict(colors or {})
+        names = sorted(
+            (
+                str(name)
+                for name in palette
+                if str(name).lower() != "default"
+            ),
+            key=str.lower,
+        )
+        self._color_names = ["default"] + names
+        self._engine_colors = palette
+
+        model = self._color_model
+        model.clear()
+        default_color = self._default_engine_color()
+        for name in self._color_names:
+            item = QStandardItem(name)
+            color = None
+            if name.lower() == "default":
+                color = default_color
+            else:
+                value = palette.get(name)
+                if value is None:
+                    for key, candidate in palette.items():
+                        if str(key).lower() == name.lower():
+                            value = candidate
+                            break
+                if value is not None:
+                    color = QColor(
+                        int(value[0]) & 0xFF,
+                        int(value[1]) & 0xFF,
+                        int(value[2]) & 0xFF,
+                    )
+            if color is not None and color.isValid():
+                swatch = QPixmap(12, 12)
+                swatch.fill(color)
+                item.setIcon(QIcon(swatch))
+            model.appendRow(item)
+
+        self._completer.popup().hide()
+
+    def _color_prefix_context(self):
+        """Контекст ``%c[...`` под курсором: (начало содержимого, prefix)."""
+        if not self._editing:
+            return None
+
+        text = self.toPlainText()
+        position = self.textCursor().position()
+        start = text.lower().rfind("%c[", 0, position)
+        if start < 0:
+            return None
+
+        content_start = start + 3
+        if "]" in text[content_start:position]:
+            return None
+
+        prefix = text[content_start:position]
+        if "\n" in prefix or "\r" in prefix:
+            return None
+        return content_start, prefix
+
+    def _update_color_completion(self):
+        if not self._editing:
+            self._completer.popup().hide()
+            return
+
+        context = self._color_prefix_context()
+        if context is None:
+            self._completer.popup().hide()
+            return
+
+        _content_start, prefix = context
+        self._completer.setCompletionPrefix(prefix)
+        model = self._completer.completionModel()
+        if model.rowCount() == 0:
+            self._completer.popup().hide()
+            return
+
+        popup = self._completer.popup()
+        popup.setCurrentIndex(model.index(0, 0))
+        rect = self.cursorRect()
+        rect.moveTopLeft(self.viewport().mapTo(self, rect.topLeft()))
+        rect.setWidth(
+            max(180, popup.sizeHintForColumn(0) + 28)
+        )
+        self._completer.complete(rect)
+
+    def _on_color_activated(self, index):
+        if index is not None and index.isValid():
+            self._insert_color_completion(index.data(Qt.DisplayRole))
+
+    def _insert_color_completion(self, completion):
+        completion = str(completion or "").strip()
+        if not completion:
+            return
+
+        context = self._color_prefix_context()
+        if context is None:
+            return
+
+        content_start, _prefix = context
+        text = self.toPlainText()
+        cursor = self.textCursor()
+        position = cursor.position()
+
+        end = text.find("]", position)
+        if end >= 0 and "\n" not in text[position:end]:
+            replace_end = end + 1
+        else:
+            replace_end = position
+
+        cursor.setPosition(content_start)
+        cursor.setPosition(replace_end, QTextCursor.KeepAnchor)
+        cursor.insertText(completion + "]")
+        self.setTextCursor(cursor)
+        self._completer.popup().hide()
 
     def raw_text(self):
         """Текст в том виде, в котором его нужно записать в XML."""
@@ -2624,6 +2779,7 @@ class LocalizedDescriptionEdit(QPlainTextEdit):
         if was_editing:
             self._raw_text = self._editor_text_to_raw(self.toPlainText())
         self._editing = False
+        self._completer.popup().hide()
         self.setReadOnly(True)
         self.setStyleSheet(self._IDLE_STYLE)
         if was_editing:
@@ -2652,9 +2808,49 @@ class LocalizedDescriptionEdit(QPlainTextEdit):
             event.key() in (Qt.Key_Return, Qt.Key_Enter)
             and event.modifiers() & Qt.ControlModifier
         ):
+            self._completer.popup().hide()
             self.editing_finished.emit()
             event.accept()
             return
+
+        popup = self._completer.popup()
+        if popup.isVisible():
+            if event.key() == Qt.Key_Escape:
+                popup.hide()
+                event.accept()
+                return
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab):
+                index = popup.currentIndex()
+                if index.isValid():
+                    self._insert_color_completion(
+                        index.data(Qt.DisplayRole)
+                    )
+                    event.accept()
+                    return
+            if event.key() in (Qt.Key_Up, Qt.Key_Down):
+                model = popup.model()
+                row = popup.currentIndex().row()
+                if event.key() == Qt.Key_Up:
+                    row = max(0, row - 1)
+                else:
+                    row = min(model.rowCount() - 1, row + 1)
+                if row >= 0:
+                    popup.setCurrentIndex(model.index(row, 0))
+                event.accept()
+                return
+            if event.key() in (Qt.Key_PageUp, Qt.Key_PageDown):
+                model = popup.model()
+                row = popup.currentIndex().row()
+                step = max(1, popup.viewport().height() // 20)
+                if event.key() == Qt.Key_PageUp:
+                    row = max(0, row - step)
+                else:
+                    row = min(model.rowCount() - 1, row + step)
+                if row >= 0:
+                    popup.setCurrentIndex(model.index(row, 0))
+                event.accept()
+                return
+
         super().keyPressEvent(event)
 
 
@@ -3153,6 +3349,15 @@ class ItemCardView(QWidget):
             except Exception:
                 return {}
         return value or {}
+
+    def refresh_color_suggestions(self):
+        """Перечитать цвета из XML и обновить подсказку в редакторе."""
+        try:
+            self.description_label.set_color_suggestions(
+                self._engine_color_defs()
+            )
+        except RuntimeError:
+            pass
 
     @staticmethod
     def _text_source_editable(source):
