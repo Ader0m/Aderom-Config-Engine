@@ -730,6 +730,7 @@ class ProjectPreviewMixin:
                         draft=draft,
                         resolved=resolved,
                         notes=notes,
+                        plans=tuple(getattr(result, "plans", ()) or ()),
                     )
                 )
 
@@ -856,6 +857,11 @@ class ProjectPreviewMixin:
 
         items: List[PreviewItem] = []
         groups = {}
+        # DLTX-планы, которые XML-форк собрал для чужого корня. Они
+        # должны попасть в общий патч этого корня, иначе два элемента
+        # предпросмотра создадут один и тот же файл.
+        extra_plans = {}
+        extra_notes = {}
 
         for item in base.items:
             if (
@@ -872,28 +878,48 @@ class ProjectPreviewMixin:
                 continue
 
             if item.plan.is_xml:
-                key = "xml:project"
-            else:
-                key = str(item.plan.target.root_path).lower()
+                groups.setdefault("xml:project", []).append(item)
+                for plan in item.plans:
+                    if (
+                        plan.is_xml
+                        or plan.target.root_path is None
+                        or not plan.changes
+                    ):
+                        continue
+                    root_key = str(Path(plan.target.root_path)).lower()
+                    extra_plans.setdefault(root_key, []).append(plan)
+                    extra_notes.setdefault(root_key, []).extend(item.notes)
+                continue
+
+            key = str(item.plan.target.root_path).lower()
             groups.setdefault(key, []).append(item)
+
+        # Корень может быть затронут только ссылками из XML-форка.
+        for key in extra_plans:
+            groups.setdefault(key, [])
 
         for key in sorted(groups):
             group = groups[key]
-            is_xml = group[0].plan.is_xml
-            root_path = (
-                group[0].source_path
-                if is_xml
-                else group[0].plan.target.root_path
-            )
-            title = (
-                "XML проекта (Root)"
-                if is_xml
-                else "%s (Root)" % Path(root_path).name
-            )
+            is_xml = key == "xml:project"
+            if is_xml:
+                root_path = group[0].source_path
+                title = "XML проекта (Root)"
+            else:
+                plan = next(
+                    (item.plan for item in group if item.plan is not None),
+                    None,
+                )
+                if plan is None:
+                    plan = extra_plans[key][0]
+                root_path = plan.target.root_path
+                title = "%s (Root)" % Path(root_path).name
 
             notes = ["Режим: Root", "Файлов: %d" % len(group)]
             for item in group:
                 notes.extend(item.notes)
+            for note in extra_notes.get(key, ()):
+                if note not in notes:
+                    notes.append(note)
 
             try:
                 if is_xml:
@@ -902,9 +928,18 @@ class ProjectPreviewMixin:
                         group,
                     )
                 else:
+                    plans = [
+                        item.plan for item in group
+                        if item.plan is not None and item.plan.changes
+                    ]
+                    plans.extend(extra_plans.get(key, ()))
                     merged = merge_patch_plans(
-                        [item.plan for item in group],
-                        patch_mod=group[0].plan.patch_mod,
+                        plans,
+                        patch_mod=(
+                            group[0].plan.patch_mod
+                            if group and group[0].plan is not None
+                            else plans[0].patch_mod
+                        ),
                     )
                     generated = (
                         services.generate_patch(merged)
@@ -997,7 +1032,13 @@ class ProjectPreviewMixin:
 
         files = []
         for _item, generated in generated_items:
-            files.extend(generated.files)
+            for file in generated.files:
+                if Path(file.relative_path).suffix.lower() == ".ltx":
+                    # DLTX перепривязок уже объединён с патчем своего
+                    # корня в _build_preview_root: второй файл с тем же
+                    # именем писать нельзя.
+                    continue
+                files.append(file)
 
         preview_parts = []
         for file in files:

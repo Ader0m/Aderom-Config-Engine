@@ -37,7 +37,6 @@ from core.tools.cache import ObjectCache
 from core.tools.cache import (
     file_stamp,
     path_key,
-    project_overlay_signature,
 )
 
 
@@ -194,11 +193,10 @@ class LocalizationService:
         overlay_files = _overlay_source_files(overlay)
         digest = hashlib.sha1()
         digest.update(
-            ("%s|%s|%s|%s" % (
+            ("%s|%s|%s" % (
                 LOCALIZATION_VERSION,
                 plan.target,
                 plan.configured,
-                project_overlay_signature(overlay),
             )).encode("utf-8", "replace")
         )
 
@@ -222,6 +220,29 @@ class LocalizationService:
                     )
                 else:
                     digest.update(file_stamp(path).encode("ascii"))
+
+        # Include-фрагменты и новые файлы могли не попасть в план по
+        # glob'у, но всё ещё влиять на таблицу. Учитываем любые
+        # XML-черновики проекта внутри ``text``.
+        cfg = self.config_dir(forest, config_dir)
+        if cfg is not None:
+            text_dir = Path(cfg) / "text"
+            for key, (path, text) in sorted(
+                overlay_files.items(),
+                key=lambda item: item[0],
+            ):
+                try:
+                    Path(path).relative_to(text_dir)
+                except (TypeError, ValueError):
+                    continue
+                digest.update(b"\2")
+                digest.update(key.encode("utf-8", "replace"))
+                digest.update(b"=")
+                digest.update(
+                    hashlib.sha1(
+                        str(text).encode("utf-8", "replace")
+                    ).hexdigest().encode("ascii")
+                )
 
         return digest.hexdigest()
 

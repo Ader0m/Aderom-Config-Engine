@@ -403,6 +403,15 @@ def parse_section_header(line: str):
 
 
 def parse_key_line(line: str):
+    """Публичная обёртка разбора ключевой строки LTX/DLTX.
+
+    Возвращает ``(operation, key, raw_value, has_value)`` или ``None``.
+    Нужна каталогам и подсказкам, чтобы не дублировать правила DLTX.
+    """
+    return _parse_key_line(line)
+
+
+def parse_key_line(line: str):
     """Публичная обёртка разбора строки ключа."""
     return _parse_key_line(line)
 

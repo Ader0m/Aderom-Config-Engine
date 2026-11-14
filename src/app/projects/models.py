@@ -201,6 +201,9 @@ class PreviewItem:
     resolved: Optional[ProjectResolvedDraft] = None
     notes: Tuple[str, ...] = ()
     text: str = ""
+    # DLTX-планы, которые несёт XML-форк: уровень проекта в режиме Root
+    # объединяет их с планами того же корня.
+    plans: Tuple[PatchPlan, ...] = ()
 
     @property
     def is_patch(self) -> bool:

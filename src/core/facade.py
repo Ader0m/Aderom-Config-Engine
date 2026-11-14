@@ -22,6 +22,12 @@ from core.tree.builder import add_virtual_file, remove_virtual_file
 from core.items.catalog import ItemCatalogService
 from core.items.icons import ItemIconService
 from core.items.localization import LocalizationService
+from core.catalogs import (
+    ColorCatalog,
+    IncludeCatalog,
+    LocalizationIndex,
+    SectionCatalog,
+)
 from core.tree.query import search_nodes, sort_nodes
 from core.xml.service import XmlResolveService
 from core.resolver.prebuild import PrebuildService
@@ -108,6 +114,13 @@ class CoreServices:
             max_disk_bytes=256_000_000,
         )
 
+        # Каталоги для подсказок и других потребителей. Они не зависят
+        # от UI и читают только VFS/overlay.
+        self.colors = ColorCatalog()
+        self.sections = SectionCatalog()
+        self.includes = IncludeCatalog()
+        self.localization_index = LocalizationIndex()
+
         # Патч-конвейер: планирование, генерация, проверка и запись.
         # Запись по умолчанию требует успешной проверки.
         self.patch = PatchPlanner(resolver_service, cache)
@@ -149,6 +162,16 @@ class CoreServices:
             self.item_icons.clear_memory()
         if hasattr(self.localization, "clear_memory"):
             self.localization.clear_memory()
+        for name in (
+            "colors",
+            "sections",
+            "includes",
+            "localization_index",
+        ):
+            catalog = getattr(self, name, None)
+            clear = getattr(catalog, "clear", None)
+            if callable(clear):
+                clear()
 
     def invalidate_resolver_cache(self):
         """Сбросить только резолвер/XML и пометить предсборку устаревшей.
@@ -301,6 +324,42 @@ class CoreServices:
         from core.tools.fs import read_xml_text
 
         return read_xml_text(path)
+
+    # -------------------------------------------------- каталоги данных
+    def color_definitions(self, forest, overlay=None, config_dir=None):
+        """Цвета ``%c[name]`` как ``{name: (r, g, b, a)}``."""
+        value = self.colors.load(
+            forest,
+            overlay=overlay,
+            config_dir=config_dir,
+        )
+        return {item.name: item.rgba for item in value.entries}
+
+    def color_set(self, forest, overlay=None, config_dir=None):
+        return self.colors.load(
+            forest,
+            overlay=overlay,
+            config_dir=config_dir,
+        )
+
+    def section_set(self, forest, overlay=None, deadline=None):
+        return self.sections.build(
+            forest,
+            overlay=overlay,
+            deadline=deadline,
+        )
+
+    def include_set(self, forest, overlay=None):
+        return self.includes.load(forest, overlay=overlay)
+
+    def localization_set(self, forest, overlay=None, log=None):
+        table = self.localization.load(
+            forest,
+            config_dir=(getattr(forest, "scan_dir", None) if forest else None),
+            overlay=overlay,
+            log=log,
+        )
+        return self.localization_index.build(table)
 
     # -------------------------------------------------- разбор LTX
     def ltx_section_at_line(self, text, line_number):

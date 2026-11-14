@@ -422,12 +422,50 @@ def _added_change_nodes(changes: Sequence[XmlChange]) -> List[XmlNode]:
     return nodes
 
 
+def _source_root_tag(plan: PatchPlan) -> str:
+    """Имя корневого элемента исходного XML."""
+    diff = plan.diff
+    if not isinstance(diff, XmlDocumentDiff):
+        return ""
+    for node in diff.before.roots():
+        if node.tag:
+            return node.tag
+    return ""
+
+
+def _xml_declaration(plan: PatchPlan, root_tag: str) -> str:
+    """XML declaration для нового файла с правильной кодировкой."""
+    if not root_tag:
+        return ""
+
+    encoding = str(plan.encoding or "windows-1251").strip().lower()
+    if encoding in ("utf-8-sig", "utf8"):
+        encoding = "utf-8"
+
+    standalone = ""
+    diff = plan.diff
+    if isinstance(diff, XmlDocumentDiff):
+        declaration = str(diff.before.declaration or "").strip()
+        match = re.search(
+            r"standalone\s*=\s*[\"'](yes|no)[\"']",
+            declaration,
+            re.IGNORECASE,
+        )
+        if match:
+            standalone = ' standalone="%s"' % match.group(1).lower()
+
+    return (
+        '<?xml version="1.0" encoding="%s"%s?>' % (encoding, standalone)
+    )
+
+
 def render_new_xml(plan: PatchPlan, root_tag: str = "") -> str:
     """Создать новый XML-файл с добавленными элементами.
 
-    В файл попадают только изменённые блоки (ключ + значения). Никаких
-    служебных комментариев или XML declaration не добавляется, если
-    пользователь не запросил обёртку ``root_tag``.
+    Файл должен быть самостоятельным XML-документом: declaration и
+    корневой элемент берутся у исходного файла (или из ``root_tag``),
+    а добавленные блоки становятся их содержимым. Без обёртки игра не
+    загрузит строки/узлы нового файла.
     """
     nodes = _added_change_nodes(plan.changes)
     if not nodes:
@@ -439,13 +477,29 @@ def render_new_xml(plan: PatchPlan, root_tag: str = "") -> str:
     for node in nodes:
         body.append(serialize_node(node))
 
-    if root_tag:
-        lines = ["<%s>" % root_tag]
-        lines.extend("    " + line for line in "\n".join(body).split("\n"))
-        lines.append("</%s>" % root_tag)
-        return "\n".join(lines).rstrip() + "\n"
+    if not root_tag:
+        root_tag = _source_root_tag(plan)
 
-    return "\n".join(body).rstrip() + "\n"
+    if not root_tag:
+        # Фрагмент без единого корня: оборачивать не во что.
+        return "\n".join(body).rstrip() + "\n"
+
+    lines: List[str] = []
+    declaration = _xml_declaration(plan, root_tag)
+    if declaration:
+        lines.append(declaration)
+    lines.append("<%s>" % root_tag)
+    for block in body:
+        # Отступ только у структурных строк: переводы строк и пробелы
+        # внутри <text> значимы. Текст экранирован, поэтому строка
+        # текста не может начинаться с "<".
+        for line in block.split("\n"):
+            if line.lstrip().startswith("<"):
+                lines.append("\t" + line)
+            else:
+                lines.append(line)
+    lines.append("</%s>" % root_tag)
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def render_full_xml(plan: PatchPlan) -> str:

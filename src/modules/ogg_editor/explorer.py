@@ -51,12 +51,13 @@ from .ogg import (
     parse_xray_comment,
     read_comments_prefix,
 )
-from .sections import extract_sound_paths
+from .sections import extract_sound_paths, make_section_resolver
 from .sound_types import sound_type_short, sound_type_tooltip
 from .sound_types_ui import SoundTypeField, SoundTypePicker
 
 CHANGED_COLOR = "#6A9955"
 NEW_COLOR = "#4FC1FF"
+MISSING_STATE = "нет файла"
 
 _NODE_ROLE = Qt.UserRole + 2
 _LOADED_ROLE = Qt.UserRole + 3
@@ -484,6 +485,7 @@ class OggExplorerWindow(QWidget):
 
         self._scan_generation = 0
         self._filter_generation = 0
+        self._drop_generation = 0
 
         self._fields_generation = 0
         self._fields_cache = {}
@@ -797,6 +799,37 @@ class OggExplorerWindow(QWidget):
             for column in FIELD_COLUMNS:
                 item.setText(column, "…")
 
+            available = self.is_available(path)
+            if not available:
+                item.setText(STATE_COLUMN, MISSING_STATE)
+                item.setForeground(
+                    NAME_COLUMN,
+                    QBrush(
+                        QColor(
+                            self.ctx.ui.theme_color(
+                                "accent_red",
+                                "#F14C4C",
+                            )
+                        )
+                    ),
+                )
+                item.setToolTip(
+                    NAME_COLUMN,
+                    "%s\nФайл не найден в VFS (возможно, упакован "
+                    "в игровой архив)" % path,
+                )
+                self._fields_cache[str(path)] = (
+                    None,
+                    "Файл не найден в VFS: %s" % path,
+                )
+            else:
+                cached = self._fields_cache.get(str(path))
+                if (
+                    cached is not None
+                    and str(cached[1] or "").startswith("Файл не найден")
+                ):
+                    self._fields_cache.pop(str(path), None)
+
             cached = self._fields_cache.get(str(path))
             if cached is not None:
                 self._apply_fields_to_item(
@@ -973,24 +1006,233 @@ class OggExplorerWindow(QWidget):
             )
             return True
 
-        paths = extract_sound_paths(
-            payload.fields,
-            Path(self._game_root) / "sounds",
-        )
-        if not paths:
-            self.ctx.ui.set_status(
-                "В секции %s не найдены .ogg" % payload.section,
-                5000,
-            )
-            return True
+        sounds_root = Path(self._game_root) / "sounds"
+        self._drop_generation += 1
+        generation = self._drop_generation
 
-        added = self.pin_paths(paths)
+        # Лес и оверлей проекта читаются в UI-потоке; резолв секций —
+        # в фоновой задаче, потому что system.ltx может быть большим.
+        forest = self._workspace_forest()
+        overlay = self._project_overlay()
         self.ctx.ui.set_status(
-            "Из секции %s закреплено файлов: %d"
-            % (payload.section, added),
-            5000,
+            "Разбор звуков секции %s…" % payload.section,
+            3000,
         )
+
+        def work(log):
+            resolver = self._sound_section_resolver(
+                forest,
+                payload.section,
+                overlay,
+                log,
+            )
+            return extract_sound_paths(
+                payload.fields,
+                sounds_root,
+                resolve_section=resolver,
+                include_missing=True,
+            )
+
+        def done(paths, error):
+            if generation != self._drop_generation:
+                return
+            if error is not None:
+                self.ctx.ui.set_status(
+                    "Не удалось разобрать секцию %s: %s"
+                    % (payload.section, error),
+                    7000,
+                )
+                self.ctx.log(
+                    "ogg_editor: ошибка разбора секции %s: %s"
+                    % (payload.section, error)
+                )
+                return
+            paths = list(paths or ())
+            if not paths:
+                self.ctx.ui.set_status(
+                    "В секции %s не найдены .ogg" % payload.section,
+                    5000,
+                )
+                return
+
+            added = self.pin_paths(paths)
+            missing = sum(1 for path in paths if not self.is_available(path))
+            self.splitter.setSizes(
+                [420, max(160, self.splitter.sizes()[1])]
+            )
+            if missing:
+                self.ctx.ui.set_status(
+                    "Секция %s: ссылок %d, закреплено %d, "
+                    "не найдено в VFS %d"
+                    % (payload.section, len(paths), added, missing),
+                    7000,
+                )
+            else:
+                self.ctx.ui.set_status(
+                    "Из секции %s закреплено файлов: %d"
+                    % (payload.section, added),
+                    5000,
+                )
+
+        tasks = getattr(self.ctx, "tasks", None)
+        if tasks is None:
+            done(work(None), None)
+        else:
+            tasks.run(
+                work,
+                on_done=done,
+                on_log=getattr(self.ctx, "log", None),
+            )
         return True
+
+    def _workspace_forest(self):
+        getter = getattr(self.ctx.ui, "workspace_forest", None)
+        if not callable(getter):
+            return None
+        try:
+            return getter()
+        except Exception:
+            return None
+
+    def _project_overlay(self):
+        getter = getattr(self.ctx.ui, "project_overlay", None)
+        if not callable(getter):
+            return None
+        try:
+            return getter()
+        except Exception:
+            return None
+
+    def _sound_section_resolver(self, forest, section, overlay, log=None):
+        """Функция «секция → поля» по итоговому system.ltx.
+
+        Поля предмета могут ссылаться на звуковые секции
+        (``snd_shoot = wpn_bm16full_snd_shoot``), поэтому одного
+        payload-а недостаточно: нужен resolved-текст конфигов.
+        """
+        services = getattr(self.ctx, "services", None)
+        if forest is None or services is None:
+            return None
+
+        try:
+            config_dir = services.forest_scan_dir(forest)
+        except Exception:
+            config_dir = None
+        if config_dir is None:
+            return None
+
+        root_paths = []
+        catalog_root = self._catalog_root(services, forest, log)
+        if catalog_root is not None:
+            root_paths.append(catalog_root)
+
+        resolver = self._resolver_for_roots(
+            services,
+            forest,
+            config_dir,
+            root_paths,
+            overlay,
+            log,
+        )
+        if resolver is not None:
+            return resolver
+
+        # Запасной путь: файл, где объявлена сама секция. Нужен для
+        # урезанных VFS, где нет общего system.ltx.
+        section_root = self._section_root(
+            services,
+            forest,
+            section,
+            overlay,
+            log,
+        )
+        if section_root is None:
+            return None
+        return self._resolver_for_roots(
+            services,
+            forest,
+            config_dir,
+            [section_root],
+            overlay,
+            log,
+        )
+
+    @staticmethod
+    def _resolver_for_roots(
+        services,
+        forest,
+        config_dir,
+        root_paths,
+        overlay,
+        log=None,
+    ):
+        for root_path in root_paths:
+            root_path = Path(root_path)
+            try:
+                text, _sources = services.assemble_resolved(
+                    root_path,
+                    forest,
+                    config_dir,
+                    log=log,
+                    overlay=overlay,
+                )
+            except Exception as exc:
+                if log is not None:
+                    log(
+                        "ogg_editor: не удалось собрать %s: %s"
+                        % (root_path.name, exc)
+                    )
+                continue
+            if str(text or "").strip():
+                return make_section_resolver(text)
+        return None
+
+    @staticmethod
+    def _catalog_root(services, forest, log=None):
+        getter = getattr(services, "item_catalog_root", None)
+        if not callable(getter):
+            return None
+        try:
+            return getter(forest)
+        except Exception as exc:
+            if log is not None:
+                log("ogg_editor: не определён корень предметов: %s" % exc)
+            return None
+
+    @staticmethod
+    def _section_root(services, forest, section, overlay, log=None):
+        """Запасной корень: файл, где объявлена сама секция."""
+        if not section:
+            return None
+        getter = getattr(services, "build_section_graph", None)
+        if not callable(getter):
+            return None
+        try:
+            graph = getter(
+                forest,
+                section,
+                log=log,
+                overlay=overlay,
+            )
+        except Exception as exc:
+            if log is not None:
+                log("ogg_editor: граф секции %s: %s" % (section, exc))
+            return None
+        root = getattr(graph, "root", None)
+        return getattr(root, "file_path", None)
+
+    def is_available(self, path) -> bool:
+        """Есть файл на диске или его двоичный черновик в проекте."""
+        path = Path(path)
+        try:
+            if path.is_file():
+                return True
+        except OSError:
+            pass
+        try:
+            return self.ctx.ui.read_project_asset(path) is not None
+        except Exception:
+            return False
 
     def _open_section_clicked(self):
         if self._on_open_section is None:
@@ -1422,6 +1664,13 @@ class OggExplorerWindow(QWidget):
             return
 
         if not self._require_project():
+            return
+
+        if not self.is_available(node.path):
+            self.ctx.ui.show_error(
+                "Файл не найден в VFS, изменить его нельзя:\n%s"
+                % node.path
+            )
             return
 
         params = item.data(0, _PARAMS_ROLE) or XraySoundComment()

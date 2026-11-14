@@ -224,6 +224,7 @@ deactivate  — закрыть окна, остановить свою акти�
 | Закрытие окна | `ctx.ui.close_module_window(key)` |
 | Вкладка редактора | `ctx.ui.open_editor_tab(tab_id, title, widget)` |
 | Закрытие вкладки | `ctx.ui.close_editor_tab(tab_id)` |
+| Подсказки в текстовом поле | `ctx.ui.attach_text_hints(widget, target=...)` |
 | Каталог предметов | `ctx.services.build_item_catalog(forest)` |
 | Иконки каталога | `ctx.services.load_item_icons(catalog)` |
 | Иконка из DDS | `ctx.services.read_texture_region(path, x, y, w, h)` |
@@ -238,6 +239,30 @@ deactivate  — закрыть окна, остановить свою акти�
 экспортируется как `sdk.DEFAULT_SEARCH_DELAY_MS`; модули используют это
 значение, а не собственные интервалы, чтобы поведение поиска было
 одинаковым во всех окнах.
+
+### Подсказки в текстовых полях
+
+Модуль не создаёт собственный popup и не обрабатывает клавиши
+автодополнения. Он только подключает платформенный движок к своему
+текстовому полю:
+
+```python
+handle = ctx.ui.attach_text_hints(
+    text_widget,
+    target=HintTargetInfo(
+        surface=SURFACE_ENGINE_TEXT,
+        language=LANGUAGE_LOCALIZATION_TEXT,
+        role="item.description",
+    ),
+)
+```
+
+`target` описывает поверхность (сырой файл, resolved-текст, текст
+движка) и язык; это единственное, что должен знать модуль. Провайдеры,
+каталоги и popup живут в платформе. `handle.detach()` вызывается при
+закрытии окна; если платформа старая и метода нет, модуль работает без
+подсказок. В частности, карточка предмета подключает движок к описанию,
+но не знает ни о цветах, ни о `%c[`, ни о правилах вставки.
 
 ### Двоичные ресурсы проекта
 

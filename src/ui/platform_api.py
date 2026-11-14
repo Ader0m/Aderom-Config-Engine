@@ -40,12 +40,13 @@ def _path_key(path):
 
 
 class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
-    def __init__(self, events, commands, tasks, services, paths):
+    def __init__(self, events, commands, tasks, services, paths, hints=None):
         self.events = events
         self.commands = commands
         self.tasks = tasks
         self.services = services
         self.paths = paths
+        self.hints = hints
 
         self.router = FileOpenRouter()
         self._window_manager = ModuleWindowManager()
@@ -75,7 +76,9 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         # Корни, которые нужно пересобрать после последней точечной
         # инвалидации. ``None`` — сборка всего леса.
         self._project_prebuild_roots = None
-        self._override_theme_enabled = None
+        # На старте действует обычная тема. ``False`` (а не ``None``)
+        # избавляет первую правку от повторной установки stylesheet.
+        self._override_theme_enabled = False
 
         # Отложенная навигация: ключ — нормализованный путь файла.
         # Запрос живёт до события FILE_OPENED ровно для этого пути.
@@ -83,6 +86,10 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
 
         # Живые resolved-документы: один владелец текста на tab_id.
         self._resolved_documents = {}
+
+        # Очереди фоновых правок resolved-документов по tab_id.
+        self._resolved_edit_queues = {}
+        self._resolved_edit_active = set()
 
         # Фоновые записи текстовых черновиков: не более одной на файл.
         # ``_text_save_pending`` хранит последний текст, пришедший во
@@ -347,6 +354,30 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         from .theme import PALETTE
 
         return getattr(PALETTE, str(name), fallback)
+
+    def workspace_forest(self):
+        return self.workspace.forest
+
+    def workspace_generation(self):
+        return self.workspace.generation
+
+    def attach_text_hints(
+        self,
+        widget,
+        target=None,
+        providers=None,
+        enabled=True,
+    ):
+        if self.hints is None:
+            from sdk.hints import NullHintsHandle
+
+            return NullHintsHandle()
+        return self.hints.attach(
+            widget,
+            target=target,
+            providers=providers,
+            enabled=enabled,
+        )
 
     def request_window(self, window_id):
         return self.dispatch_action(

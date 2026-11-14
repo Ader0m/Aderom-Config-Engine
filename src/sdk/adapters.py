@@ -253,6 +253,16 @@ class CoreApiAdapter:
             errors="replace",
         )
 
+    def color_definitions(self, forest, overlay=None, config_dir=None):
+        provider = getattr(self._provider, "color_definitions", None)
+        if callable(provider):
+            return provider(
+                forest,
+                overlay=overlay,
+                config_dir=config_dir,
+            )
+        return {}
+
     def ltx_section_at_line(self, text, line_number):
         return self._provider.ltx_section_at_line(text, line_number)
 
@@ -1050,6 +1060,48 @@ class UiApiAdapter:
             value,
         )
 
+    def apply_resolved_field_edit_async(
+        self,
+        tab_id,
+        section,
+        key,
+        value,
+        on_done=None,
+    ):
+        fn = getattr(
+            self._platform,
+            "apply_resolved_field_edit_async",
+            None,
+        )
+        if not callable(fn):
+            return False
+        return fn(tab_id, section, key, value, on_done=on_done)
+
+    def rename_resolved_field_async(
+        self,
+        tab_id,
+        section,
+        old_key,
+        new_key,
+        value,
+        on_done=None,
+    ):
+        fn = getattr(
+            self._platform,
+            "rename_resolved_field_async",
+            None,
+        )
+        if not callable(fn):
+            return False
+        return fn(
+            tab_id,
+            section,
+            old_key,
+            new_key,
+            value,
+            on_done=on_done,
+        )
+
     def undo_resolved_document(self, tab_id):
         return self._platform.undo_resolved_document(tab_id)
 
@@ -1192,6 +1244,20 @@ class UiApiAdapter:
 
     def copy_to_clipboard(self, text):
         self._platform.clipboard_set(text)
+
+    def attach_text_hints(self, widget, target=None, providers=None,
+                          enabled=True):
+        fn = getattr(self._platform, "attach_text_hints", None)
+        if callable(fn):
+            return fn(
+                widget,
+                target=target,
+                providers=providers,
+                enabled=enabled,
+            )
+        from .hints import NullHintsHandle
+
+        return NullHintsHandle()
 
     def theme_color(self, name, fallback=None):
         fn = getattr(self._platform, "theme_color", None)

@@ -74,6 +74,7 @@ class XmlPatchService:
                 notes=tuple(
                     issue.message for issue in result.plan.warnings
                 ),
+                plans=tuple(result.ltx_plans),
                 keys=result.keys,
                 references=result.references,
             )

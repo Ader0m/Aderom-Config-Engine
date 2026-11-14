@@ -18,7 +18,7 @@ from sdk import (
     path_key as sdk_path_key,
 )
 
-from .sections import extract_sound_references
+from .sections import extract_sound_references, make_section_resolver
 
 
 class OggSectionGraphContributor:
@@ -122,6 +122,7 @@ class OggSectionGraphContributor:
             request.section_name,
             sounds_root,
             source_path=root_path,
+            resolve_section=make_section_resolver(text),
         )
 
     def _vfs_references(self, services, graph, section_name, sounds_root):
@@ -164,6 +165,7 @@ class OggSectionGraphContributor:
                     section_name,
                     sounds_root,
                     source_path=path,
+                    resolve_section=make_section_resolver(text),
                 )
             )
         return references

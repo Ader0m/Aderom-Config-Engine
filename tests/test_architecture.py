@@ -150,6 +150,24 @@ class ArchitectureBoundaryTest(unittest.TestCase):
         self.assertFalse((ROOT / "sdk" / "loader.py").exists())
         self.assertTrue((ROOT / "ui" / "module_loader.py").exists())
 
+    def test_hint_contracts_are_qt_free(self):
+        path = ROOT / "sdk" / "hints.py"
+        self.assertTrue(path.exists())
+        roots = _imports(path)
+        self.assertNotIn("PyQt5", roots)
+        self.assertNotIn("core", roots)
+        self.assertNotIn("ui", roots)
+        self.assertNotIn("modules", roots)
+
+    def test_ltx_syntax_is_pure_core(self):
+        path = ROOT / "core" / "patching" / "ltx" / "syntax.py"
+        self.assertTrue(path.exists())
+        roots = _imports(path)
+        self.assertNotIn("PyQt5", roots)
+        self.assertNotIn("ui", roots)
+        self.assertNotIn("sdk", roots)
+        self.assertNotIn("modules", roots)
+
     def test_relative_import_resolution_catches_escape(self):
         # Проверяем сам алгоритм на искусственном пути: из
         # modules/base_module/x.py уровень 3 выходит в корень src.

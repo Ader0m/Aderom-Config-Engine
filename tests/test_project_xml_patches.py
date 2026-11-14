@@ -244,5 +244,113 @@ class ProjectXmlPatchTest(unittest.TestCase):
         self.assertIn('id="y"', second_new.text)
 
 
+class ProjectRootMergeTest(unittest.TestCase):
+    """DLTX-ссылки XML-форка входят в общий патч своего корня."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name) / "projects"
+
+        from core.tools.cache import FileCacheSystem
+        from core.tree.builder import TreeBuilder
+        from tests.helpers import write_text
+
+        config = Path(self.temp.name) / "gamedata" / "configs"
+        write_text(
+            config / "system.ltx",
+            '[system]\n#include "items/items_food.ltx"\n',
+        )
+        self.ltx = write_text(
+            config / "items" / "items_food.ltx",
+            "[salmon]\n"
+            "description = st_salmon_descr\n"
+            "inv_name = st_salmon\n",
+        )
+        self.xml = write_text(
+            config / "text" / "rus" / "st_items_consumable.xml",
+            '<string_table>\n'
+            '\t<string id="st_salmon_descr"><text>old</text></string>\n'
+            "</string_table>\n",
+        )
+        self.forest = TreeBuilder(FileCacheSystem()).build(
+            config,
+            config / "system.ltx",
+            use_cache=False,
+        )
+
+    def test_fork_dltx_merges_into_root_patch(self):
+        from core.patching.ltx.generator import DltxGenerator
+        from core.patching.ltx.service import LtxPatchService
+        from core.patching.models import VerificationResult
+        from core.patching.xml.service import XmlPatchService
+
+        class Services:
+            def __init__(self):
+                self.patch = PatchPlanner()
+                self.verifier = XmlModelPatchVerifier()
+
+            def plan_xml_patch(self, *args, **kwargs):
+                return XmlPatchService(self).plan(*args, **kwargs)
+
+            def plan_ltx_patch(self, *args, **kwargs):
+                return LtxPatchService(self).plan(*args, **kwargs)
+
+            def generate_patch(self, plan):
+                if plan.is_xml:
+                    generated = DxmlGenerator().generate(plan)
+                    return replace(
+                        generated,
+                        verification=self.verifier.verify(generated),
+                    )
+                generated = DltxGenerator().generate(plan)
+                return replace(
+                    generated,
+                    verification=VerificationResult(ok=True),
+                )
+
+        project = ProjectService(self.base)
+        project.create("proj")
+
+        before = self.xml.read_text(encoding="utf-8")
+        project.update_draft(
+            self.xml,
+            before.replace(">old<", ">new<"),
+        )
+        ltx_text = self.ltx.read_text(encoding="utf-8")
+        project.update_draft(
+            self.ltx,
+            ltx_text.replace(
+                "description = st_salmon_descr\n",
+                "description = st_salmon_descr\nallow_repair = true\n",
+            ),
+        )
+
+        preview = project.build_preview(Services(), self.forest)
+        ltx_files = [
+            file
+            for item in preview.items if item.generated is not None
+            for file in item.generated.files
+            if file.relative_path.suffix.lower() == ".ltx"
+        ]
+        self.assertEqual(len(ltx_files), 1, ltx_files)
+        text = ltx_files[0].text
+        self.assertEqual(text.count("![salmon]"), 1)
+        self.assertIn("description = st_salmon_descr_ace_proj", text)
+        self.assertIn("allow_repair = true", text)
+
+        xml_items = [
+            item for item in preview.items
+            if item.title.startswith("XML проекта")
+        ]
+        self.assertTrue(xml_items)
+        self.assertFalse(
+            any(
+                file.relative_path.suffix.lower() == ".ltx"
+                for file in xml_items[0].generated.files
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

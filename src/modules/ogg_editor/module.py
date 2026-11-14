@@ -41,8 +41,8 @@ from .reader import OggCommentReader
 from .section_links import OggSectionGraphContributor
 from .sections import (
     extract_sound_paths,
+    make_section_resolver,
     normalize_section_name,
-    parse_section_fields,
     section_label,
 )
 from .sound_types_ui import configure_theme as configure_sound_type_theme
@@ -446,13 +446,23 @@ class OggEditorModule(ModuleBase):
                 config_dir,
                 overlay=overlay,
             )
-            fields = parse_section_fields(text, section)
+            resolver = make_section_resolver(text)
+            refs = resolver.field_refs(section)
+            fields = [
+                (key, value)
+                for key, value, _line_number, _line_text in refs
+            ]
             sounds_root = (
                 Path(game_root) / "sounds"
                 if game_root is not None
                 else None
             )
-            paths = extract_sound_paths(fields, sounds_root)
+            paths = extract_sound_paths(
+                fields,
+                sounds_root,
+                resolve_section=resolver,
+                include_missing=True,
+            )
             return label, fields, paths
 
         def done(result, error):
@@ -480,12 +490,24 @@ class OggEditorModule(ModuleBase):
 
             if self._window is not None:
                 added = self._window.pin_paths(paths)
-                self._window.splitter.setSizes([400, 240])
-                self.ctx.ui.set_status(
-                    "Секция %s: закреплено файлов %d"
-                    % (section_name, added),
-                    6000,
+                missing = sum(
+                    1 for path in paths
+                    if not self._window.is_available(path)
                 )
+                self._window.splitter.setSizes([400, 240])
+                if missing:
+                    self.ctx.ui.set_status(
+                        "Секция %s: ссылок %d, закреплено %d, "
+                        "не найдено в VFS %d"
+                        % (section_name, len(paths), added, missing),
+                        7000,
+                    )
+                else:
+                    self.ctx.ui.set_status(
+                        "Секция %s: закреплено файлов %d"
+                        % (section_name, added),
+                        6000,
+                    )
 
         self.ctx.tasks.run(
             work,

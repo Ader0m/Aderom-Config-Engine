@@ -26,7 +26,7 @@ class EditorTabs(QTabWidget):
     lexer_status = pyqtSignal(str)
 
     def __init__(self, events=None, commands=None, parent=None, can_edit=None,
-                 file_actions=None):
+                 file_actions=None, hint_attach=None):
         super().__init__(parent)
 
         self._events = events
@@ -36,6 +36,7 @@ class EditorTabs(QTabWidget):
         self._tab_source_paths = {}
         self._default_editor = None
         self._can_edit = can_edit or (lambda: False)
+        self._hint_attach = hint_attach
         # Иконка «часики» на время загрузки проекта: редактирование в
         # это время запрещено, а после разблокировки иконка снимается.
         self._busy = False
@@ -61,7 +62,7 @@ class EditorTabs(QTabWidget):
         if self._default_editor is not None:
             return self._default_editor
 
-        editor = CodeEditor()
+        editor = CodeEditor(hint_attach=self._hint_attach)
         editor.set_editable(self._can_edit())
         editor.content_changed.connect(
             lambda text, e=editor: self._on_editor_changed(e, text)

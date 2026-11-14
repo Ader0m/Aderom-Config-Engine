@@ -7,8 +7,9 @@ import inspect
 import time
 from pathlib import Path
 
-from app.documents import ResolvedDocument
+from app.documents import ResolvedDocument, prepare_field_edit
 from app.projects import ProjectError
+from PyQt5.QtCore import QTimer
 from sdk.api import ItemCardRequest, ResolvedDraftInfo
 from sdk.events import Events
 
@@ -44,6 +45,7 @@ class ResolvedDocumentMixin:
         # Любая смена проекта (создание, загрузка, удаление) делает
         # старые живые документы недействительными. Иначе вкладка могла
         # продолжать писать в проект, который уже закрыт.
+        self._cancel_resolved_edits()
         for document in list(self._resolved_documents.values()):
             if self.window is not None:
                 view = self.window.editor.get_tab(document.tab_id)
@@ -53,6 +55,19 @@ class ResolvedDocumentMixin:
             document.unbind_view()
         self._resolved_documents.clear()
         self._pending_file_actions.clear()
+
+    def _cancel_resolved_edits(self):
+        queues = getattr(self, "_resolved_edit_queues", {})
+        self._resolved_edit_queues = {}
+        self._resolved_edit_active = set()
+        for jobs in list(queues.values()):
+            for job in jobs:
+                callback = job.get("on_done")
+                if callable(callback):
+                    try:
+                        callback(False, "Проект изменён")
+                    except Exception:
+                        pass
 
     def _on_tab_closed(self, tab_id):
         document = self._resolved_documents.get(str(tab_id))
@@ -537,6 +552,229 @@ class ResolvedDocumentMixin:
             )
         return ok
 
+    # -------------------------------------------------- фоновые правки полей
+    def apply_resolved_field_edit_async(
+        self,
+        tab_id,
+        section,
+        key,
+        value,
+        on_done=None,
+    ):
+        """Поставить правку поля в фоновую очередь.
+
+        Тяжёлый разбор LTX и вычисление нового текста выполняются в
+        рабочем потоке; в UI-потоке остаётся только короткая фиксация
+        результата в документе и представлении.
+        """
+        return self._enqueue_resolved_edit(
+            tab_id,
+            {
+                "kind": "field",
+                "section": str(section or ""),
+                "key": str(key or ""),
+                "value": str(value),
+            },
+            on_done,
+        )
+
+    def rename_resolved_field_async(
+        self,
+        tab_id,
+        section,
+        old_key,
+        new_key,
+        value,
+        on_done=None,
+    ):
+        return self._enqueue_resolved_edit(
+            tab_id,
+            {
+                "kind": "rename",
+                "section": str(section or ""),
+                "old_key": str(old_key or ""),
+                "new_key": str(new_key or ""),
+                "value": str(value),
+            },
+            on_done,
+        )
+
+    def _enqueue_resolved_edit(self, tab_id, job, on_done=None):
+        tab_id = str(tab_id or "")
+        if not tab_id:
+            return False
+        job = dict(job)
+        job["attempts"] = 0
+        job["on_done"] = on_done
+        self._resolved_edit_queues.setdefault(tab_id, []).append(job)
+        self._pump_resolved_edit_queue(tab_id)
+        return True
+
+    def _pump_resolved_edit_queue(self, tab_id):
+        if tab_id in self._resolved_edit_active:
+            return
+        queue = self._resolved_edit_queues.get(tab_id)
+        if not queue:
+            self._resolved_edit_queues.pop(tab_id, None)
+            return
+
+        self._resolved_edit_active.add(tab_id)
+        self._start_resolved_edit_job(tab_id, queue.pop(0))
+
+    def _start_resolved_edit_job(self, tab_id, job):
+        self._flush_resolved_view(tab_id)
+        document = self._get_or_restore_document(tab_id)
+        if document is None:
+            self._finish_resolved_edit(
+                tab_id,
+                job,
+                False,
+                "Resolved-документ не найден",
+            )
+            return
+
+        if document.is_xml:
+            # Карточка предмета работает с LTX; для XML-документа
+            # сохраняем прежнее синхронное поведение.
+            self._apply_resolved_edit_sync(document, job)
+            return
+
+        text = document.current_text
+        sources = tuple(document.line_sources)
+        revision = document.revision
+        parsed = document.parsed_document()
+
+        run = getattr(self.tasks, "run", None)
+        if not callable(run):
+            self._apply_resolved_edit_sync(document, job)
+            return
+
+        if job.get("kind") == "rename":
+            section = job.get("section", "")
+            key = job.get("new_key", "")
+            old_key = job.get("old_key", "")
+        else:
+            section = job.get("section", "")
+            key = job.get("key", "")
+            old_key = None
+        value = job.get("value", "")
+
+        def work(_log):
+            return prepare_field_edit(
+                text,
+                sources,
+                section,
+                key,
+                value,
+                old_key=old_key,
+                parsed=parsed,
+            )
+
+        def done(prepared, error):
+            self._on_resolved_edit_prepared(
+                tab_id,
+                job,
+                document,
+                revision,
+                prepared,
+                error,
+            )
+
+        try:
+            run(work, on_done=done)
+        except Exception as exc:
+            self._finish_resolved_edit(tab_id, job, False, str(exc))
+
+    def _apply_resolved_edit_sync(self, document, job):
+        tab_id = document.tab_id
+        if job.get("kind") == "rename":
+            ok = document.rename_field(
+                job.get("section", ""),
+                job.get("old_key", ""),
+                job.get("new_key", ""),
+                job.get("value", ""),
+            )
+        else:
+            ok = document.apply_field_edit(
+                job.get("section", ""),
+                job.get("key", ""),
+                job.get("value", ""),
+            )
+        if ok and self.window is not None:
+            self.window.editor.set_tab_dirty(
+                document.tab_id,
+                document.is_dirty,
+            )
+        self._finish_resolved_edit(tab_id, job, bool(ok), None)
+
+    def _on_resolved_edit_prepared(
+        self,
+        tab_id,
+        job,
+        document,
+        revision,
+        prepared,
+        error,
+    ):
+        if error is not None:
+            self._finish_resolved_edit(tab_id, job, False, str(error))
+            return
+
+        # Если пользователь печатал в resolved-вкладке, пока считалась
+        # правка, сначала фиксируем его текст. Ревизия изменится, и
+        # правка будет пересчитана по актуальному состоянию.
+        self._flush_resolved_view(tab_id)
+
+        current = self._resolved_documents.get(tab_id)
+        if current is not document or document.revision != revision:
+            job["attempts"] = int(job.get("attempts", 0)) + 1
+            if job["attempts"] <= 5:
+                self._start_resolved_edit_job(tab_id, job)
+                return
+            self._finish_resolved_edit(
+                tab_id,
+                job,
+                False,
+                "Документ изменился во время фоновой правки",
+            )
+            return
+
+        try:
+            ok = document.apply_line_edit(
+                prepared.action,
+                prepared.line_number,
+                prepared.body,
+                section=prepared.section,
+                prepared=(prepared.new_text, prepared.new_sources),
+                parsed=prepared.parsed,
+            )
+        except Exception as exc:
+            self._finish_resolved_edit(tab_id, job, False, str(exc))
+            return
+
+        if ok and self.window is not None:
+            self.window.editor.set_tab_dirty(
+                document.tab_id,
+                document.is_dirty,
+            )
+        self._finish_resolved_edit(tab_id, job, bool(ok), None)
+
+    def _finish_resolved_edit(self, tab_id, job, ok, error):
+        self._resolved_edit_active.discard(tab_id)
+        callback = job.get("on_done")
+        if callable(callback):
+            try:
+                callback(bool(ok), None if ok else error)
+            except Exception:
+                try:
+                    self.log("Resolved: ошибка обработчика фоновой правки")
+                except Exception:
+                    pass
+        QTimer.singleShot(
+            0,
+            lambda: self._pump_resolved_edit_queue(tab_id),
+        )
+
     def undo_resolved_document(self, tab_id):
         document = self._get_or_restore_document(tab_id)
         return bool(document is not None and document.undo())
@@ -807,7 +1045,7 @@ class ResolvedDocumentMixin:
             return
 
         started = time.perf_counter()
-        view = ResolvedView()
+        view = ResolvedView(hint_attach=self.attach_text_hints)
         view.set_editable(self.can_edit_documents())
         view.set_content(
             document.current_text,
@@ -974,7 +1212,7 @@ class ResolvedDocumentMixin:
                 existing_widget.goto_line(int(line_number))
             return
 
-        view = ResolvedView()
+        view = ResolvedView(hint_attach=self.attach_text_hints)
         view.set_editable(self.can_edit_documents())
         view.set_content(
             document.current_text,

@@ -14,6 +14,7 @@ resolved-файла: текста, карты источников, ревизи
 from __future__ import annotations
 
 import bisect
+import copy
 import logging
 import re
 import traceback
@@ -143,6 +144,105 @@ def apply_line_edit(
         raise ValueError("Неизвестное действие правки: %r" % (action,))
 
     return "\n".join(lines), tuple(sources)
+
+
+@dataclass(frozen=True)
+class PreparedFieldEdit:
+    """Результат фоновой подготовки правки поля.
+
+    Не содержит ссылок на Qt и живой документ: его можно безопасно
+    вычислить в рабочем потоке, а затем только зафиксировать в UI.
+    """
+
+    action: str
+    line_number: int
+    body: str
+    new_text: str
+    new_sources: tuple
+    parsed: object
+    section: str
+
+
+def prepare_field_edit(
+    text,
+    line_sources,
+    section,
+    key,
+    value,
+    old_key=None,
+    parsed=None,
+):
+    """Подготовить правку поля/переименование без изменения документа.
+
+    Тяжёлый разбор ``system.ltx`` выполняется здесь, поэтому функцию
+    можно вызывать в фоновом потоке. Если у документа уже есть
+    разобранная структура, она переиспользуется для замены значения:
+    номера строк при ``replace`` не меняются.
+    """
+    text = normalize_text(text)
+    section = str(section or "").strip()
+    if not section:
+        raise ValueError("Не задана секция")
+
+    searched_key = old_key if old_key is not None else key
+    if parsed is not None and getattr(parsed, "text", None) != text:
+        parsed = None
+    base = parsed if parsed is not None else parse_ltx_document(text)
+    if base.section_bounds(section) is None:
+        raise ValueError("Секция [%s] не найдена" % section)
+
+    line_number = base.field_line(section, searched_key)
+    if old_key is not None and line_number <= 0:
+        # Семантика rename_field: если старого ключа нет, поле
+        # добавляется под новым именем.
+        line_number = base.field_line(section, key)
+
+    body = "%s = %s" % (str(key), str(value).rstrip("\r\n"))
+    if line_number > 0:
+        action = "replace"
+    else:
+        action = "insert"
+        block = base.section_block(section)
+        if block is None:
+            raise ValueError("Секция [%s] не найдена" % section)
+        block_text, offset = block
+        line_number = offset + 1
+        for index, line in enumerate(block_text.split("\n"), 1):
+            if line.strip():
+                line_number = offset + index
+
+    new_text, new_sources = apply_line_edit(
+        text,
+        line_sources,
+        action,
+        line_number,
+        body,
+    )
+
+    if (
+        action == "insert"
+        or str(key).strip().lower() != str(searched_key).strip().lower()
+    ):
+        # Вставка или переименование меняют структуру/ключи секции:
+        # разбираем новый текст в этом же рабочем потоке.
+        new_parsed = parse_ltx_document(new_text)
+    else:
+        # Структура секций и номера строк не изменились: копируем
+        # разобранное представление и подменяем текст. Полный повторный
+        # разбор не нужен.
+        new_parsed = copy.copy(base)
+        new_parsed.text = new_text
+        new_parsed._line_offsets_cache = None
+
+    return PreparedFieldEdit(
+        action=action,
+        line_number=int(line_number),
+        body=body,
+        new_text=new_text,
+        new_sources=new_sources,
+        parsed=new_parsed,
+        section=section,
+    )
 
 
 @dataclass
@@ -275,6 +375,14 @@ class ResolvedDocument:
             line_sources=tuple(self._line_sources),
         )
 
+    def parsed_document(self):
+        """Разобранная структура текущего текста или ``None``.
+
+        Может быть передана в фоновую подготовку правки: объект
+        рассматривается как read-only снимок.
+        """
+        return self._parsed
+
     # -------------------------------------------------- подписки
     def subscribe(self, callback) -> DocumentSubscription:
         self._subscribers.append(callback)
@@ -403,24 +511,34 @@ class ResolvedDocument:
         text="",
         section=None,
         persist=True,
+        prepared=None,
+        parsed=None,
     ) -> bool:
         """Точечная правка строки с транзакционной семантикой.
 
         Сначала вычисляется новое состояние, затем оно фиксируется.
         Если запись черновика не удалась, состояние и представление
         остаются прежними.
+
+        ``prepared`` — готовые ``(new_text, new_sources)``, вычисленные
+        в фоновом потоке. ``parsed`` — разобранная структура нового
+        текста: она позволяет не разбирать весь ``system.ltx`` повторно
+        в UI-потоке.
         """
-        try:
-            new_text, new_sources = apply_line_edit(
-                self._text,
-                self._line_sources,
-                action,
-                line_number,
-                text,
-            )
-        except ValueError as exc:
-            self._log_fn(str(exc))
-            return False
+        if prepared is None:
+            try:
+                new_text, new_sources = apply_line_edit(
+                    self._text,
+                    self._line_sources,
+                    action,
+                    line_number,
+                    text,
+                )
+            except ValueError as exc:
+                self._log_fn(str(exc))
+                return False
+        else:
+            new_text, new_sources = prepared
 
         if section is None:
             if action == "insert":
@@ -433,12 +551,13 @@ class ResolvedDocument:
         old_revision = self.revision
         old_spans = self._spans
         old_by_name = self._span_by_name
+        old_parsed = self._parsed
 
         self._text = new_text
         self._line_sources = new_sources
         self._spans = None
         self._span_by_name = None
-        self._parsed = None
+        self._parsed = parsed
         self.revision += 1
 
         if persist and not self._persist_state(atomic=True):
@@ -447,7 +566,7 @@ class ResolvedDocument:
             self.revision = old_revision
             self._spans = old_spans
             self._span_by_name = old_by_name
-            self._parsed = None
+            self._parsed = old_parsed
             return False
 
         view = self._view
@@ -461,7 +580,7 @@ class ResolvedDocument:
                 self.revision = old_revision
                 self._spans = old_spans
                 self._span_by_name = old_by_name
-                self._parsed = None
+                self._parsed = old_parsed
                 self._persist_state(atomic=False)
                 return False
             view.set_dirty_state(self.is_dirty)

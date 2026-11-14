@@ -242,7 +242,8 @@ class XmlForkTest(unittest.TestCase):
             if file.relative_path.name == "source_ace_proj.xml"
         )
         document = parse_xml_document(new_file.text)
-        button = document.find((("button", 0),))
+        self.assertEqual(document.root().tag, "root")
+        button = document.find((("root", 0), ("button", 0)))
         self.assertIsNotNone(button)
         self.assertEqual(button.attrs["id"], "old_key_ace_proj")
         self.assertEqual(button.attrs["width"], "12")
@@ -308,6 +309,10 @@ class XmlForkTest(unittest.TestCase):
         self.assertIn('<string id="ui_key_ace_proj">', text)
         self.assertIn("новое", text)
         self.assertNotIn('id="ui_key"', text)
+        # Локализация должна остаться валидной строковой таблицей.
+        self.assertTrue(text.startswith("<?xml"))
+        self.assertIn("<string_table>", text)
+        self.assertIn("</string_table>", text)
         self.assertIn("locale", result.plan.warnings[0].code)
 
     def test_script_reference_found_outside_gamedata_scripts(self):
@@ -345,7 +350,39 @@ class XmlForkTest(unittest.TestCase):
         self.assertEqual(result.keys[0].new_key, "ace_proj")
         text = result.generated.files[0].text
         self.assertIn('<label id="ace_proj">new</label>', text)
-        self.assertNotIn("<root>", text)
+        # Новый файл — самостоятельный XML: declaration + корень исходника.
+        self.assertTrue(text.startswith("<?xml"))
+        self.assertIn("<root>", text)
+        self.assertIn("</root>", text)
+        self.assertTrue(result.generated.verification.ok)
+
+    def test_multiline_text_is_not_corrupted_by_wrapper(self):
+        before = (
+            '<string_table>\n'
+            '\t<string id="st_key"><text>old</text></string>\n'
+            "</string_table>\n"
+        )
+        after = (
+            '<string_table>\n'
+            '\t<string id="st_key"><text>line1\\n'
+            "\n\t\talpha\\n"
+            "\n\t\tomega</text></string>\n"
+            "</string_table>\n"
+        )
+        result = XmlForkService(self.services).plan(
+            self.source,
+            before,
+            after,
+            forest=self.forest,
+            options=PatchOptions(project_tag="proj"),
+        )
+        text = result.generated.files[0].text
+        self.assertTrue(result.generated.verification.ok)
+        self.assertIn("<string_table>", text)
+        # Переводы строк и пробелы внутри <text> — часть значения.
+        self.assertIn("\n\t\talpha\\n", text)
+        self.assertIn("\n\t\tomega", text)
+        self.assertNotIn("\n\t\t\talpha", text)
 
     def test_explicit_new_key_is_used(self):
         after = (

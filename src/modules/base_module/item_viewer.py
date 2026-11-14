@@ -23,9 +23,11 @@ from pathlib import Path
 from sdk import (
     DEFAULT_SEARCH_DELAY_MS,
     ITEM_SECTION_MIME,
+    HintTargetInfo,
+    LANGUAGE_LOCALIZATION_TEXT,
+    SURFACE_ENGINE_TEXT,
     encode_item_section,
     engine_source_text,
-    parse_color_definitions,
     parse_engine_text,
     path_key as sdk_path_key,
     same_path as sdk_same_path,
@@ -35,7 +37,6 @@ from sdk.events import Events
 from PyQt5.QtCore import (
     QEvent,
     QMimeData,
-    QModelIndex,
     QPoint,
     QRect,
     QRectF,
@@ -103,6 +104,9 @@ PLACEHOLDER_SIZE = 50
 ENTRY_ROLE = Qt.UserRole + 1
 SEARCH_ROLE = Qt.UserRole + 2
 KIND_ROLE = Qt.UserRole + 3
+
+_MISSING = object()
+_PENDING_FETCH = object()
 
 
 class KindListWidget(QListWidget):
@@ -753,8 +757,6 @@ class ItemViewerFeature:
         self._title = ""
         self._root_text = ""
         self._root_sources = ()
-        # Цвета ``%c[name]`` из ``ui/color_defs.xml`` (с overlay проекта).
-        self._color_defs_cache = None
 
         # Открытые карточки и удержанные документы.
         self._cards = {}
@@ -765,6 +767,20 @@ class ItemViewerFeature:
         self._text_save_jobs = {}
         self._text_save_seq = 0
         self._disposed = False
+
+        # Очередь правок полей карточки. Пользователь может менять
+        # следующие поля, пока предыдущая транзакция применяется:
+        # документ обновляется по одному заданию, а тяжёлая пересборка
+        # проекции идёт в фоне.
+        self._field_jobs = []
+        self._field_job_active = False
+        self._field_pump_scheduled = False
+
+        # Пересборки карточки: не более одной задачи на (вкладка,
+        # секция) и всегда применяется результат последнего запроса.
+        self._entry_refresh_seq = 0
+        self._entry_refresh_tokens = {}
+        self._entry_refresh_inflight = set()
 
         self._pending_sections = set()
         self._pending_cards = set()
@@ -832,58 +848,25 @@ class ItemViewerFeature:
             return None
 
     def _color_definitions(self):
-        """Цвета ``%c[name]`` из ``configs/ui/color_defs.xml``."""
-        if self._color_defs_cache is not None:
-            return self._color_defs_cache
-
+        """Цвета ``%c[name]`` из общего каталога ядра."""
+        services = getattr(self.ctx, "services", None)
+        getter = getattr(services, "color_definitions", None)
+        if not callable(getter):
+            return {}
         session = self.session
+        forest = getattr(session, "forest", None) if session else None
+        if forest is None:
+            return {}
         config_dir = getattr(session, "config_dir", None) if session else None
-        if not config_dir and session is not None:
-            config_dir = getattr(session.forest, "scan_dir", None)
-        if not config_dir:
-            self._color_defs_cache = {}
-            return self._color_defs_cache
-
-        path = Path(config_dir) / "ui" / "color_defs.xml"
-        text = self._overlay_text(path)
-
-        if text is None:
-            services = getattr(self.ctx, "services", None)
-            reader = getattr(services, "read_text", None)
-            if callable(reader):
-                try:
-                    text = reader(path)
-                except Exception:
-                    text = None
-
-        if text is None:
-            try:
-                raw = path.read_bytes()
-                try:
-                    text = raw.decode("utf-8")
-                except UnicodeDecodeError:
-                    text = raw.decode("windows-1251", errors="replace")
-            except OSError:
-                text = ""
-
-        self._color_defs_cache = parse_color_definitions(text)
-        return self._color_defs_cache
-
-    def _overlay_text(self, path):
-        overlay = self._project_overlay()
-        sources = getattr(overlay, "source_files", None)
-        if sources is None and isinstance(overlay, dict):
-            sources = overlay
-        if not sources:
-            return None
         try:
-            wanted = sdk_path_key(path)
-            for source_path, source_text in sources.items():
-                if sdk_path_key(source_path) == wanted:
-                    return str(source_text or "")
-        except Exception:
-            return None
-        return None
+            return getter(
+                forest,
+                overlay=self._project_overlay(),
+                config_dir=config_dir,
+            ) or {}
+        except Exception as exc:
+            self.ctx.ui.log("Цвета движка недоступны: %s" % exc)
+            return {}
 
     # -------------------------------------------------- жизненный цикл
     def show(self):
@@ -901,7 +884,6 @@ class ItemViewerFeature:
         self._running = True
         self._request_seq += 1
         token = self._request_seq
-        self._color_defs_cache = None
         forest = self.session.forest
 
         root = self.ctx.services.item_catalog_root(forest)
@@ -1012,6 +994,11 @@ class ItemViewerFeature:
 
     def close(self):
         self._disposed = True
+        self._field_jobs.clear()
+        self._field_job_active = False
+        self._field_pump_scheduled = False
+        self._entry_refresh_tokens.clear()
+        self._entry_refresh_inflight.clear()
         for job in list(self._text_save_jobs.values()):
             self._set_save_busy(job, False)
         self._text_save_jobs.clear()
@@ -1108,6 +1095,11 @@ class ItemViewerFeature:
             self._window = ItemViewerWindow(
                 theme_color=self.ctx.ui.theme_color,
                 color_defs=self._color_definitions,
+                attach_hints=getattr(
+                    self.ctx.ui,
+                    "attach_text_hints",
+                    None,
+                ),
                 on_refresh=self.show,
                 can_edit=self._can_edit,
                 on_replace_line=lambda line, text: self._replace_line(
@@ -1169,6 +1161,7 @@ class ItemViewerFeature:
                     self._tab_id
                 ),
                 document_title=self._title,
+                defer_field_refresh=True,
             )
 
         self._window.set_catalog(catalog, images)
@@ -1183,8 +1176,7 @@ class ItemViewerFeature:
         self._root_sources = tuple(context.get("line_sources") or ())
 
     def _on_project_saved(self, _event):
-        """Обновить список цветов после сохранения XML-файлов проекта."""
-        self._color_defs_cache = None
+        """Обновить отрисовку цветов после сохранения XML-файлов проекта."""
         cards = []
         if self._window is not None:
             cards.append(getattr(self._window, "card", None))
@@ -1204,7 +1196,6 @@ class ItemViewerFeature:
         """
         # Удержания относились к освобождённым документам.
         self._retained.clear()
-        self._color_defs_cache = None
         if self._disposed or not self._tab_id or self._root_path is None:
             return
         if not self.ctx.ui.is_project_active():
@@ -1270,6 +1261,135 @@ class ItemViewerFeature:
                 % (section, exc)
             )
             return None
+
+    def _request_entry_refresh(self, tab_id, section):
+        """Пересобрать проекцию предмета без блокировки UI-потока.
+
+        На пару (вкладка, секция) одновременно выполняется не больше
+        одной фоновой сборки. Если за время неё запросили новую версию,
+        результат старой отбрасывается, а сборка повторяется по свежему
+        тексту документа.
+        """
+        tab_id = str(tab_id or "")
+        section = str(section or "")
+        if not tab_id or not section or self._disposed:
+            return
+
+        key = (tab_id, section.lower())
+        self._entry_refresh_seq += 1
+        token = self._entry_refresh_seq
+        self._entry_refresh_tokens[key] = token
+
+        if key in self._entry_refresh_inflight:
+            return
+
+        if self._start_entry_build(key, token, tab_id, section):
+            return
+
+        # Платформа не даёт фоновых задач: остаёмся на синхронном пути,
+        # чтобы поведение в минимальных контекстах не менялось.
+        entry = self._item_entry(tab_id, section)
+        self._entry_refresh_tokens.pop(key, None)
+        self._apply_entry_refresh(tab_id, section, entry)
+
+    def _start_entry_build(self, key, token, tab_id, section):
+        run = getattr(getattr(self.ctx, "tasks", None), "run", None)
+        forest = getattr(self.session, "forest", None) if self.session else None
+        builder = getattr(self.ctx.services, "build_item_entry", None)
+        snapshot = self._snapshot(tab_id)
+        if (
+            snapshot is None
+            or forest is None
+            or not callable(run)
+            or not callable(builder)
+        ):
+            return False
+
+        text = snapshot.text
+        overlay = self._project_overlay()
+
+        def work(_log):
+            return _call_with_overlay(
+                builder,
+                forest,
+                text,
+                section,
+                overlay=overlay,
+            )
+
+        def done(entry, error):
+            self._entry_refresh_inflight.discard(key)
+            self._on_entry_refreshed(
+                key,
+                token,
+                tab_id,
+                section,
+                entry,
+                error,
+            )
+
+        self._entry_refresh_inflight.add(key)
+        try:
+            run(work, on_done=done)
+        except Exception as exc:
+            self._entry_refresh_inflight.discard(key)
+            self.ctx.ui.log(
+                "Предметы: фоновая пересборка карточки недоступна: %s"
+                % exc
+            )
+            return False
+        return True
+
+    def _on_entry_refreshed(
+        self,
+        key,
+        token,
+        tab_id,
+        section,
+        entry,
+        error,
+    ):
+        if self._disposed:
+            return
+
+        if self._entry_refresh_tokens.get(key) != token:
+            # Пока считалась старая проекция, документ изменился ещё
+            # раз. Запускаем сборку по актуальному тексту.
+            self._request_entry_refresh(tab_id, section)
+            return
+
+        if error is not None:
+            self.ctx.ui.log(
+                "Предметы: не удалось обновить карточку [%s]: %s"
+                % (section, error)
+            )
+            entry = self._item_entry(tab_id, section)
+
+        self._entry_refresh_tokens.pop(key, None)
+        self._apply_entry_refresh(tab_id, section, entry)
+
+    def _apply_entry_refresh(self, tab_id, section, entry):
+        if self._disposed:
+            return
+
+        tab_id = str(tab_id or "")
+        section = str(section or "")
+        if self._window is not None:
+            try:
+                self._window.update_section(section, entry)
+            except Exception:
+                pass
+
+        for record in list(self._cards.values()):
+            root_tab, card_section, card = record
+            if (
+                root_tab == tab_id
+                and str(card_section).lower() == section.lower()
+            ):
+                try:
+                    card.refresh(entry)
+                except Exception:
+                    pass
 
     def _image(self, section):
         return self._images.get(section)
@@ -1350,6 +1470,8 @@ class ItemViewerFeature:
             if section:
                 sections.add(section.lower())
 
+        requested = set()
+
         if self._window is not None and self._tab_id:
             if full:
                 if self._window.isVisible():
@@ -1357,22 +1479,26 @@ class ItemViewerFeature:
                 else:
                     section = self._window.card.section()
                     if section:
-                        self._window.update_section(
+                        requested.add(
+                            (self._tab_id, str(section).lower())
+                        )
+                        self._request_entry_refresh(
+                            self._tab_id,
                             section,
-                            self._item_entry(self._tab_id, section),
                         )
             else:
                 for section in sections:
-                    self._window.update_section(
+                    requested.add((self._tab_id, section.lower()))
+                    self._request_entry_refresh(
+                        self._tab_id,
                         section,
-                        self._item_entry(self._tab_id, section),
                     )
 
         for card_tab_id in cards:
             record = self._cards.get(card_tab_id)
             if record is None:
                 continue
-            _root_tab, section, card = record
+            root_tab, section, _card = record
             if (
                 not full
                 and sections
@@ -1381,7 +1507,13 @@ class ItemViewerFeature:
                 continue
             if not full and not sections:
                 continue
-            card.refresh()
+            key = (root_tab, str(section).lower())
+            if key in requested:
+                continue
+            requested.add(key)
+            # Пересборка идёт в фоне; карточка получит готовую
+            # проекцию через _apply_entry_refresh.
+            self._request_entry_refresh(root_tab, section)
 
     def _on_tab_closed(self, tab_id):
         record = self._cards.pop(str(tab_id), None)
@@ -1493,9 +1625,15 @@ class ItemViewerFeature:
             on_open_text_source=self._open_text_source,
             theme_color=self.ctx.ui.theme_color,
             color_defs=self._color_definitions,
+            attach_hints=getattr(
+                self.ctx.ui,
+                "attach_text_hints",
+                None,
+            ),
             section=section,
             document_title=self._document_title(tab_id),
             preview=False,
+            defer_field_refresh=True,
         )
         self._cards[card_tab_id] = (tab_id, section, card)
         self.ctx.ui.open_editor_tab(card_tab_id, title, card)
@@ -1627,28 +1765,232 @@ class ItemViewerFeature:
         )
 
     def _apply_field(self, tab_id, section, key, value):
+        """Поставить правку поля в очередь, не блокируя карточку."""
+        return self._queue_field_job(
+            {
+                "kind": "field",
+                "tab_id": str(tab_id or ""),
+                "section": str(section or ""),
+                "key": str(key or ""),
+                "value": str(value),
+            }
+        )
+
+    def _rename_field(self, tab_id, section, old_key, new_key, value):
+        """Поставить переименование поля в очередь."""
+        return self._queue_field_job(
+            {
+                "kind": "rename",
+                "tab_id": str(tab_id or ""),
+                "section": str(section or ""),
+                "key": str(old_key or ""),
+                "new_key": str(new_key or ""),
+                "value": str(value),
+            }
+        )
+
+    def _queue_field_job(self, job):
+        """Добавить транзакцию в FIFO-очередь правок.
+
+        Одинаковые правки одного поля до начала выполнения схлопываются:
+        пользователь может несколько раз поправить ячейку, и в документ
+        уйдёт только последнее значение.
+        """
+        if self._disposed:
+            return False
+
+        tab_id = job.get("tab_id", "")
+        section = job.get("section", "")
+        key = job.get("key", "")
+        if not tab_id or not section or not key:
+            return False
+        if job.get("kind") == "rename":
+            fn = getattr(self.ctx.ui, "rename_resolved_field", None)
+        else:
+            fn = getattr(self.ctx.ui, "apply_resolved_field_edit", None)
+        if not callable(fn):
+            return False
+
+        pending = self._find_pending_field_job(job)
+        if pending is not None:
+            pending.update(
+                {
+                    "new_key": job.get("new_key", pending.get("new_key", "")),
+                    "value": job.get("value", pending.get("value", "")),
+                }
+            )
+            return True
+
+        self._field_jobs.append(job)
+        if len(self._field_jobs) > 1:
+            self.ctx.ui.set_status(
+                "Изменения: %d в очереди…" % len(self._field_jobs)
+            )
+        if self._field_job_active:
+            self._schedule_field_pump()
+        else:
+            # Запускаем транзакцию: платформа подготовит новый текст в
+            # фоне, а в UI-потоке останется только короткая фиксация.
+            self._pump_field_jobs()
+        return True
+
+    def _find_pending_field_job(self, job):
+        wanted_section = str(job.get("section") or "").lower()
+        wanted_key = str(job.get("key") or "").lower()
+        wanted_kind = str(job.get("kind") or "")
+        for pending in self._field_jobs:
+            if (
+                pending.get("kind") == wanted_kind
+                and pending.get("tab_id") == job.get("tab_id")
+                and str(pending.get("section") or "").lower()
+                == wanted_section
+                and str(pending.get("key") or "").lower() == wanted_key
+            ):
+                return pending
+        return None
+
+    def _schedule_field_pump(self):
+        if self._field_job_active or self._field_pump_scheduled:
+            return
+        self._field_pump_scheduled = True
+        try:
+            QTimer.singleShot(0, self._pump_field_jobs)
+        except Exception:
+            self._field_pump_scheduled = False
+            self._pump_field_jobs()
+
+    def _pump_field_jobs(self):
+        """Запустить одну транзакцию и уступить очередь интерфейсу."""
+        self._field_pump_scheduled = False
+        if self._disposed:
+            self._field_jobs.clear()
+            return
+        if self._field_job_active or not self._field_jobs:
+            return
+
+        job = self._field_jobs.pop(0)
+        self._field_job_active = True
+        try:
+            self._start_field_job(job)
+        except Exception as exc:
+            self._finish_field_job(job, False, str(exc))
+
+    def _start_field_job(self, job):
+        """Запустить фоновую правку (или синхронный fallback)."""
+        if job.get("kind") == "rename":
+            async_name = "rename_resolved_field_async"
+        else:
+            async_name = "apply_resolved_field_edit_async"
+
+        async_fn = getattr(self.ctx.ui, async_name, None)
+        if callable(async_fn):
+            def done(ok, error=None):
+                self._finish_field_job(job, bool(ok), error)
+
+            try:
+                if job.get("kind") == "rename":
+                    started = async_fn(
+                        job["tab_id"],
+                        job["section"],
+                        job.get("key", ""),
+                        job.get("new_key", ""),
+                        job.get("value", ""),
+                        on_done=done,
+                    )
+                else:
+                    started = async_fn(
+                        job["tab_id"],
+                        job["section"],
+                        job.get("key", ""),
+                        job.get("value", ""),
+                        on_done=done,
+                    )
+            except Exception as exc:
+                started = False
+                self.ctx.ui.log(
+                    "Предметы: не удалось запустить фоновую правку [%s]: %s"
+                    % (job.get("section", ""), exc)
+                )
+            if started:
+                return
+
+        ok = self._execute_field_job(job)
+        self._finish_field_job(job, ok)
+
+    def _finish_field_job(self, job, ok, error=None):
+        if job.get("finished"):
+            return
+        job["finished"] = True
+        self._field_job_active = False
+
+        if self._disposed:
+            return
+
+        if not ok:
+            if error:
+                self.ctx.ui.log(
+                    "Предметы: правка [%s] не применена: %s"
+                    % (job.get("section", ""), error)
+                )
+            self._report_field_job_failed(job)
+        else:
+            # Документ уже изменён; проекция пересобирается в фоне.
+            self._request_entry_refresh(
+                job.get("tab_id", ""),
+                job.get("section", ""),
+            )
+
+        if self._field_jobs:
+            self._schedule_field_pump()
+        else:
+            self.ctx.ui.set_status(
+                "Изменения применены" if ok else "Изменения не применены",
+                4000,
+            )
+
+    def _execute_field_job(self, job):
+        if job.get("kind") == "rename":
+            fn = getattr(self.ctx.ui, "rename_resolved_field", None)
+            if not callable(fn):
+                return False
+            return bool(
+                fn(
+                    job["tab_id"],
+                    job["section"],
+                    job["key"],
+                    job.get("new_key", ""),
+                    job.get("value", ""),
+                )
+            )
+
         fn = getattr(self.ctx.ui, "apply_resolved_field_edit", None)
         if not callable(fn):
             return False
-        ok = bool(fn(tab_id, section, key, value))
-        if not ok:
-            self.ctx.ui.show_error(
-                "Не удалось изменить поле %s в секции [%s]."
-                % (key, section)
+        return bool(
+            fn(
+                job["tab_id"],
+                job["section"],
+                job["key"],
+                job.get("value", ""),
             )
-        return ok
+        )
 
-    def _rename_field(self, tab_id, section, old_key, new_key, value):
-        fn = getattr(self.ctx.ui, "rename_resolved_field", None)
-        if not callable(fn):
-            return False
-        ok = bool(fn(tab_id, section, old_key, new_key, value))
-        if not ok:
+    def _report_field_job_failed(self, job):
+        if job.get("kind") == "rename":
             self.ctx.ui.show_error(
                 "Не удалось переименовать поле %s в секции [%s]."
-                % (old_key, section)
+                % (job.get("key", ""), job.get("section", ""))
             )
-        return ok
+        else:
+            self.ctx.ui.show_error(
+                "Не удалось изменить поле %s в секции [%s]."
+                % (job.get("key", ""), job.get("section", ""))
+            )
+        # Вернуть отрисованное значение: правка не попала в документ.
+        self._request_entry_refresh(
+            job.get("tab_id", ""),
+            job.get("section", ""),
+        )
 
     def _apply_item_text(self, tab_id, section, field, value):
         """Изменить название/описание через XML строковой таблицы.
@@ -1884,11 +2226,11 @@ class ItemViewerFeature:
                 "Ошибка сохранения текста: %s" % path.name,
                 5000,
             )
-            self._apply_item_text_entry(
-                job,
-                self._item_entry(job["tab_id"], job["section"]),
-            )
             self._finish_item_text_save(job)
+            self._request_entry_refresh(
+                job["tab_id"],
+                job["section"],
+            )
             return
 
         self.ctx.ui.log(
@@ -1903,91 +2245,8 @@ class ItemViewerFeature:
 
     def _refresh_item_text_async(self, job):
         """Пересобрать карточку без блокировки UI-потока."""
-        tab_id = job["tab_id"]
-        section = job["section"]
-
-        forest = None
-        if self.session is not None:
-            forest = getattr(self.session, "forest", None)
-
-        draft = None
-        try:
-            draft = self.ctx.ui.resolved_draft(tab_id)
-        except Exception:
-            draft = None
-
-        run = getattr(getattr(self.ctx, "tasks", None), "run", None)
-        overlay = self._project_overlay()
-
-        if (
-            forest is not None
-            and draft is not None
-            and callable(run)
-        ):
-            text = draft.text
-            builder = getattr(
-                self.ctx.services,
-                "build_item_entry",
-                None,
-            )
-
-            def work(_log):
-                return _call_with_overlay(
-                    builder,
-                    forest,
-                    text,
-                    section,
-                    overlay=overlay,
-                )
-
-            try:
-                run(
-                    work,
-                    on_done=lambda entry, error: (
-                        self._on_item_text_refreshed(job, entry, error)
-                    ),
-                )
-                return
-            except Exception as exc:
-                self.ctx.ui.log(
-                    "Предметы: фоновая пересборка карточки недоступна: %s"
-                    % exc
-                )
-
-        self._apply_item_text_entry(
-            job,
-            self._item_entry(tab_id, section),
-        )
         self._finish_item_text_save(job)
-
-    def _on_item_text_refreshed(self, job, entry, error):
-        if self._disposed:
-            return
-
-        if error is not None:
-            self.ctx.ui.log(
-                "Предметы: не удалось обновить карточку после сохранения: %s"
-                % error
-            )
-            entry = self._item_entry(job["tab_id"], job["section"])
-
-        self._apply_item_text_entry(job, entry)
-        self._finish_item_text_save(job)
-
-    def _apply_item_text_entry(self, job, entry):
-        section = job["section"]
-        if self._window is not None:
-            try:
-                self._window.update_section(section, entry)
-            except Exception:
-                pass
-
-        for _card_tab_id, card in job.get("cards", ()):
-            try:
-                if card.section().lower() == str(section).lower():
-                    card.refresh(entry)
-            except Exception:
-                pass
+        self._request_entry_refresh(job["tab_id"], job["section"])
 
     def _finish_item_text_save(self, job):
         path_key = sdk_path_key(job["path"])
@@ -1997,16 +2256,7 @@ class ItemViewerFeature:
             self._set_save_busy(job, False)
 
     def _refresh_item_text(self, tab_id, section):
-        entry = self._item_entry(tab_id, section)
-        if self._window is not None:
-            self._window.update_section(section, entry)
-        for record in list(self._cards.values()):
-            root_tab, card_section, card = record
-            if (
-                root_tab == tab_id
-                and card_section.lower() == str(section).lower()
-            ):
-                card.refresh()
+        self._request_entry_refresh(tab_id, section)
 
     def _replace_line(self, tab_id, line_number, new_line):
         if self._new_file_for_line(tab_id, line_number) is not None:
@@ -2419,22 +2669,6 @@ class LocalizedDescriptionEdit(QPlainTextEdit):
         self._raw_text = ""
         self._engine_colors = {}
         self._engine_default = None
-        self._color_names = ["default"]
-
-        self._completer = QCompleter(self)
-        self._completer.setWidget(self)
-        self._completer.setCompletionMode(QCompleter.PopupCompletion)
-        self._completer.setCaseSensitivity(Qt.CaseInsensitive)
-        self._completer.setFilterMode(Qt.MatchContains)
-        self._completer.activated[QModelIndex].connect(
-            self._on_color_activated
-        )
-        self._color_model = QStandardItemModel(self)
-        self._completer.setModel(self._color_model)
-        self.set_color_suggestions({})
-
-        self.textChanged.connect(self._update_color_completion)
-        self.cursorPositionChanged.connect(self._update_color_completion)
 
         self.setFrameShape(QFrame.NoFrame)
         self.setReadOnly(True)
@@ -2448,7 +2682,7 @@ class LocalizedDescriptionEdit(QPlainTextEdit):
         """
         self._raw_text = engine_source_text(raw_text)
         self._engine_default = default_color
-        self.set_color_suggestions(colors)
+        self._engine_colors = dict(colors or {})
 
         if self._editing:
             QPlainTextEdit.setPlainText(
@@ -2457,125 +2691,6 @@ class LocalizedDescriptionEdit(QPlainTextEdit):
             )
         else:
             self._render_engine_text()
-
-    def set_color_suggestions(self, colors=None):
-        """Обновить список цветов для подсказки после ``%c[``."""
-        palette = dict(colors or {})
-        names = sorted(
-            (
-                str(name)
-                for name in palette
-                if str(name).lower() != "default"
-            ),
-            key=str.lower,
-        )
-        self._color_names = ["default"] + names
-        self._engine_colors = palette
-
-        model = self._color_model
-        model.clear()
-        default_color = self._default_engine_color()
-        for name in self._color_names:
-            item = QStandardItem(name)
-            color = None
-            if name.lower() == "default":
-                color = default_color
-            else:
-                value = palette.get(name)
-                if value is None:
-                    for key, candidate in palette.items():
-                        if str(key).lower() == name.lower():
-                            value = candidate
-                            break
-                if value is not None:
-                    color = QColor(
-                        int(value[0]) & 0xFF,
-                        int(value[1]) & 0xFF,
-                        int(value[2]) & 0xFF,
-                    )
-            if color is not None and color.isValid():
-                swatch = QPixmap(12, 12)
-                swatch.fill(color)
-                item.setIcon(QIcon(swatch))
-            model.appendRow(item)
-
-        self._completer.popup().hide()
-
-    def _color_prefix_context(self):
-        """Контекст ``%c[...`` под курсором: (начало содержимого, prefix)."""
-        if not self._editing:
-            return None
-
-        text = self.toPlainText()
-        position = self.textCursor().position()
-        start = text.lower().rfind("%c[", 0, position)
-        if start < 0:
-            return None
-
-        content_start = start + 3
-        if "]" in text[content_start:position]:
-            return None
-
-        prefix = text[content_start:position]
-        if "\n" in prefix or "\r" in prefix:
-            return None
-        return content_start, prefix
-
-    def _update_color_completion(self):
-        if not self._editing:
-            self._completer.popup().hide()
-            return
-
-        context = self._color_prefix_context()
-        if context is None:
-            self._completer.popup().hide()
-            return
-
-        _content_start, prefix = context
-        self._completer.setCompletionPrefix(prefix)
-        model = self._completer.completionModel()
-        if model.rowCount() == 0:
-            self._completer.popup().hide()
-            return
-
-        popup = self._completer.popup()
-        popup.setCurrentIndex(model.index(0, 0))
-        rect = self.cursorRect()
-        rect.moveTopLeft(self.viewport().mapTo(self, rect.topLeft()))
-        rect.setWidth(
-            max(180, popup.sizeHintForColumn(0) + 28)
-        )
-        self._completer.complete(rect)
-
-    def _on_color_activated(self, index):
-        if index is not None and index.isValid():
-            self._insert_color_completion(index.data(Qt.DisplayRole))
-
-    def _insert_color_completion(self, completion):
-        completion = str(completion or "").strip()
-        if not completion:
-            return
-
-        context = self._color_prefix_context()
-        if context is None:
-            return
-
-        content_start, _prefix = context
-        text = self.toPlainText()
-        cursor = self.textCursor()
-        position = cursor.position()
-
-        end = text.find("]", position)
-        if end >= 0 and "\n" not in text[position:end]:
-            replace_end = end + 1
-        else:
-            replace_end = position
-
-        cursor.setPosition(content_start)
-        cursor.setPosition(replace_end, QTextCursor.KeepAnchor)
-        cursor.insertText(completion + "]")
-        self.setTextCursor(cursor)
-        self._completer.popup().hide()
 
     def raw_text(self):
         """Текст в том виде, в котором его нужно записать в XML."""
@@ -2779,7 +2894,6 @@ class LocalizedDescriptionEdit(QPlainTextEdit):
         if was_editing:
             self._raw_text = self._editor_text_to_raw(self.toPlainText())
         self._editing = False
-        self._completer.popup().hide()
         self.setReadOnly(True)
         self.setStyleSheet(self._IDLE_STYLE)
         if was_editing:
@@ -2808,49 +2922,9 @@ class LocalizedDescriptionEdit(QPlainTextEdit):
             event.key() in (Qt.Key_Return, Qt.Key_Enter)
             and event.modifiers() & Qt.ControlModifier
         ):
-            self._completer.popup().hide()
             self.editing_finished.emit()
             event.accept()
             return
-
-        popup = self._completer.popup()
-        if popup.isVisible():
-            if event.key() == Qt.Key_Escape:
-                popup.hide()
-                event.accept()
-                return
-            if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Tab):
-                index = popup.currentIndex()
-                if index.isValid():
-                    self._insert_color_completion(
-                        index.data(Qt.DisplayRole)
-                    )
-                    event.accept()
-                    return
-            if event.key() in (Qt.Key_Up, Qt.Key_Down):
-                model = popup.model()
-                row = popup.currentIndex().row()
-                if event.key() == Qt.Key_Up:
-                    row = max(0, row - 1)
-                else:
-                    row = min(model.rowCount() - 1, row + 1)
-                if row >= 0:
-                    popup.setCurrentIndex(model.index(row, 0))
-                event.accept()
-                return
-            if event.key() in (Qt.Key_PageUp, Qt.Key_PageDown):
-                model = popup.model()
-                row = popup.currentIndex().row()
-                step = max(1, popup.viewport().height() // 20)
-                if event.key() == Qt.Key_PageUp:
-                    row = max(0, row - step)
-                else:
-                    row = min(model.rowCount() - 1, row + step)
-                if row >= 0:
-                    popup.setCurrentIndex(model.index(row, 0))
-                event.accept()
-                return
-
         super().keyPressEvent(event)
 
 
@@ -2913,9 +2987,11 @@ class ItemCardView(QWidget):
         on_open_text_source=None,
         theme_color=None,
         color_defs=None,
+        attach_hints=None,
         section=None,
         document_title="",
         preview=False,
+        defer_field_refresh=False,
         parent=None,
     ):
         super().__init__(parent)
@@ -2942,10 +3018,15 @@ class ItemCardView(QWidget):
         # Цвета ``%c[name]`` из ``ui/color_defs.xml``: словарь или
         # функция, чтобы карточка видела проект, созданный позже.
         self._color_defs = color_defs if color_defs is not None else {}
+        self._attach_hints = attach_hints
+        self._hints = None
+        self._description_source = None
         self._section = str(section or "")
         self._document_title = str(document_title or "")
         self._preview = bool(preview)
+        self._defer_field_refresh = bool(defer_field_refresh)
         self._entry = None
+        self._pending_entry = _MISSING
         self._populating_fields = False
         self._populating_text = False
         self._saving = False
@@ -3028,6 +3109,9 @@ class ItemCardView(QWidget):
         self.name_label = ClickToEditLineEdit()
         self.name_label.setPlaceholderText("Название предмета")
         self.name_label.editingFinished.connect(self._apply_name_text)
+        self.name_label.editingFinished.connect(
+            self._schedule_pending_entry_apply
+        )
         self.name_label.set_theme_colors(
             self._palette("border", "#3C3F41"),
             self._palette("accent", "#3592E4"),
@@ -3076,6 +3160,11 @@ class ItemCardView(QWidget):
             self._on_description_editing_changed
         )
         description_layout.addWidget(self.description_label, 1)
+        if callable(self._attach_hints):
+            self._hints = self._attach_hints(
+                self.description_label,
+                target=self._hint_target,
+            )
 
         self.description_save_btn = QPushButton("Сохранить")
         self.description_save_btn.setAutoDefault(False)
@@ -3109,6 +3198,9 @@ class ItemCardView(QWidget):
         )
         self.fields_table.itemChanged.connect(
             self._on_field_item_changed
+        )
+        self.fields_table.itemDelegate().closeEditor.connect(
+            self._on_fields_editor_closed
         )
 
         header_view = self.fields_table.horizontalHeader()
@@ -3179,7 +3271,7 @@ class ItemCardView(QWidget):
         self._section = str(section or "")
         self.refresh()
 
-    def refresh(self, entry=None):
+    def refresh(self, entry=_MISSING):
         try:
             from PyQt5 import sip
 
@@ -3188,11 +3280,23 @@ class ItemCardView(QWidget):
         except Exception:
             pass
 
-        if entry is None:
+        if self._is_user_editing():
+            # Не перерисовываем таблицу/текст под руками пользователя:
+            # готовая проекция применится после завершения правки.
+            self._pending_entry = (
+                _PENDING_FETCH if entry is _MISSING else entry
+            )
+            return
+
+        if entry is _MISSING:
             try:
                 entry = self._get_entry() if self._get_entry else None
             except Exception:
                 entry = None
+
+        self._apply_entry(entry)
+
+    def _apply_entry(self, entry):
         if entry is None:
             self._entry = None
             self._clear_details()
@@ -3201,6 +3305,43 @@ class ItemCardView(QWidget):
 
         self.empty_label.setVisible(False)
         self._show_details(entry)
+
+    def _is_user_editing(self):
+        try:
+            if self._saving:
+                return True
+            if self.name_label.is_editing():
+                return True
+            if self.description_label.is_editing():
+                return True
+            if self.fields_table.state() == QAbstractItemView.EditingState:
+                return True
+        except Exception:
+            return False
+        return False
+
+    def _schedule_pending_entry_apply(self):
+        """Применить отложенную проекцию после завершения правки."""
+        QTimer.singleShot(0, self._apply_pending_entry)
+
+    def _on_fields_editor_closed(self, *_args):
+        self._schedule_pending_entry_apply()
+
+    def _apply_pending_entry(self):
+        if self._pending_entry is _MISSING:
+            return
+        if self._is_user_editing():
+            return
+
+        entry = self._pending_entry
+        self._pending_entry = _MISSING
+        if entry is _PENDING_FETCH:
+            self.refresh()
+            return
+        self._apply_entry(entry)
+
+    def _discard_pending_entry(self):
+        self._pending_entry = _MISSING
 
     # -------------------------------------------------- отрисовка
     def _show_details(self, entry):
@@ -3212,6 +3353,7 @@ class ItemCardView(QWidget):
 
         name_source = getattr(entry, "name_source", None)
         description_source = getattr(entry, "description_source", None)
+        self._description_source = description_source
         name_editable = self._text_edit_predicate(name_source)
         description_editable = self._text_edit_predicate(
             description_source
@@ -3350,12 +3492,30 @@ class ItemCardView(QWidget):
                 return {}
         return value or {}
 
+    def _hint_target(self):
+        source = self._description_source
+        path = getattr(source, "path", None) if source is not None else None
+        return HintTargetInfo(
+            surface=SURFACE_ENGINE_TEXT,
+            language=LANGUAGE_LOCALIZATION_TEXT,
+            path=Path(path) if path else None,
+            role="item.description",
+            default_color=lambda: self._palette("text", "#BCBFBC"),
+        )
+
     def refresh_color_suggestions(self):
-        """Перечитать цвета из XML и обновить подсказку в редакторе."""
+        """Перерисовать описание после изменения ``color_defs.xml``.
+
+        Сами подсказки обновляет общий сервис; карточке остаётся
+        применить новую палитру к уже показанному тексту.
+        """
         try:
-            self.description_label.set_color_suggestions(
-                self._engine_color_defs()
-            )
+            if not self.description_label.is_editing():
+                self.description_label.set_engine_text(
+                    self._shown_description,
+                    self._engine_color_defs(),
+                    self._palette("text", "#BCBFBC"),
+                )
         except RuntimeError:
             pass
 
@@ -3419,6 +3579,9 @@ class ItemCardView(QWidget):
         except RuntimeError:
             pass
 
+        if not self._saving and self._pending_entry is not _MISSING:
+            self._schedule_pending_entry_apply()
+
     def _apply_name_text(self):
         if self._saving or self._populating_text or self._entry is None:
             return
@@ -3434,7 +3597,7 @@ class ItemCardView(QWidget):
 
         if self._on_text_edit(self._entry.section, "name", value):
             self._shown_name = value
-            QTimer.singleShot(0, self.refresh)
+            self._schedule_after_field_change()
         else:
             self.refresh()
 
@@ -3443,6 +3606,8 @@ class ItemCardView(QWidget):
         self.description_save_btn.setEnabled(
             bool(editing) and not self._saving
         )
+        if not editing:
+            self._schedule_pending_entry_apply()
 
     def _apply_description_text(self):
         if self._saving or self._populating_text or self._entry is None:
@@ -3463,7 +3628,7 @@ class ItemCardView(QWidget):
             value,
         ):
             self._shown_description = value
-            QTimer.singleShot(0, self.refresh)
+            self._schedule_after_field_change()
         else:
             self.refresh()
 
@@ -3528,7 +3693,7 @@ class ItemCardView(QWidget):
             ):
                 self.refresh()
             else:
-                QTimer.singleShot(0, self.refresh)
+                self._schedule_after_field_change()
             return
 
         if new_key == field.key and self._on_field_edit is not None:
@@ -3539,7 +3704,7 @@ class ItemCardView(QWidget):
             ):
                 self.refresh()
             else:
-                QTimer.singleShot(0, self.refresh)
+                self._schedule_after_field_change()
             return
 
         if self._on_replace_line is None:
@@ -3548,8 +3713,20 @@ class ItemCardView(QWidget):
         if not self._on_replace_line(int(field.line_number), new_line):
             self.refresh()
         else:
-            QTimer.singleShot(0, self.refresh)
+            self._schedule_after_field_change()
 
+    def _schedule_after_field_change(self):
+        """Обновить карточку после успешной правки поля.
+
+        Когда правка уходит в асинхронную очередь, карточку обновит
+        владелец очереди готовой проекцией. Синхронный ``refresh``
+        здесь недопустим: он заново соберёт предмет в UI-потоке и вернёт
+        те самые зависания на несколько секунд.
+        """
+        # Проекция, посчитанная до этой правки, уже неактуальна.
+        self._discard_pending_entry()
+        if not self._defer_field_refresh:
+            QTimer.singleShot(0, self.refresh)
     def _on_name_context_menu(self, position):
         if self.name_label.is_editing():
             menu = self.name_label.createStandardContextMenu()
@@ -3743,6 +3920,7 @@ class ItemViewerWindow(QDialog):
         self,
         theme_color=None,
         color_defs=None,
+        attach_hints=None,
         on_refresh=None,
         can_edit=None,
         on_replace_line=None,
@@ -3761,6 +3939,7 @@ class ItemViewerWindow(QDialog):
         on_undo=None,
         on_redo=None,
         document_title="",
+        defer_field_refresh=False,
         parent=None,
     ):
         super().__init__(parent)
@@ -3769,6 +3948,7 @@ class ItemViewerWindow(QDialog):
             lambda name, fallback=None: fallback
         )
         self._color_defs = color_defs if color_defs is not None else {}
+        self._attach_hints = attach_hints
         self._on_refresh = on_refresh
         self._can_edit = can_edit or (lambda: False)
         self._on_replace_line = on_replace_line
@@ -3787,6 +3967,7 @@ class ItemViewerWindow(QDialog):
         self._on_undo = on_undo
         self._on_redo = on_redo
         self._document_title = str(document_title or "")
+        self._defer_field_refresh = bool(defer_field_refresh)
 
         self._catalog = None
         self._images = {}
@@ -3914,8 +4095,10 @@ class ItemViewerWindow(QDialog):
             on_open_text_source=self._on_open_text_source,
             theme_color=self._theme_color,
             color_defs=self._color_defs,
+            attach_hints=self._attach_hints,
             document_title=self._document_title,
             preview=True,
+            defer_field_refresh=self._defer_field_refresh,
         )
         splitter.addWidget(self.card)
 

@@ -93,6 +93,43 @@ class LocalizationTest(unittest.TestCase):
         second = service.signature(config_dir=self.configs)
         self.assertNotEqual(first, second)
 
+    def test_signature_ignores_unrelated_resolved_edits(self):
+        from sdk.api import ProjectOverlay
+
+        service = LocalizationService()
+        clean = ProjectOverlay()
+        edited = ProjectOverlay(
+            resolved_edits={
+                Path("system.ltx"): (
+                    "[item]\nkind = i_food\n",
+                    "[item]\nkind = i_med\n",
+                    (None, None),
+                )
+            }
+        )
+
+        self.assertEqual(
+            service.signature(config_dir=self.configs, overlay=clean),
+            service.signature(config_dir=self.configs, overlay=edited),
+        )
+
+    def test_signature_changes_when_overlay_xml_changes(self):
+        from sdk.api import ProjectOverlay
+
+        service = LocalizationService()
+        path = self.configs / "text" / "rus" / "ru.xml"
+        clean = ProjectOverlay()
+        edited = ProjectOverlay(
+            source_files={
+                path: RUSSIAN.replace("Русское имя", "Новое имя")
+            }
+        )
+
+        self.assertNotEqual(
+            service.signature(config_dir=self.configs, overlay=clean),
+            service.signature(config_dir=self.configs, overlay=edited),
+        )
+
     def test_clean_text_handles_escapes_and_colors(self):
         self.assertEqual(
             clean_text("A\\n%c[d_blue]B"),

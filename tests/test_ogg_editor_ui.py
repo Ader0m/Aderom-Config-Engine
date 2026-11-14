@@ -20,6 +20,7 @@ from modules.ogg_editor import module as ogg_module
 from modules.ogg_editor.editor_tab import OggEditorTab
 from modules.ogg_editor.explorer import (
     FIELD_COLUMNS,
+    MISSING_STATE,
     NAME_COLUMN,
     SELECT_COLUMN,
     STATE_COLUMN,
@@ -63,6 +64,13 @@ class _Ui:
     def __init__(self):
         self.saved = {}
         self.dirty = []
+        self.forest = None
+
+    def workspace_forest(self):
+        return self.forest
+
+    def project_overlay(self):
+        return None
 
     def is_project_active(self):
         return True
@@ -119,9 +127,34 @@ class _Ctx:
         self.ui = _Ui()
         self.events = _Events()
         self.tasks = _Tasks()
+        self.services = None
 
     def log(self, message):
         self.ui.log(message)
+
+
+class _Services:
+    """Минимальный сервис резолва для проверки раскрытия snd-секций."""
+
+    def __init__(self, text, root):
+        self._text = text
+        self._root = Path(root)
+
+    def forest_scan_dir(self, _forest):
+        return self._root.parent
+
+    def item_catalog_root(self, _forest):
+        return self._root
+
+    def assemble_resolved(
+        self,
+        _root_path,
+        _forest,
+        _config_dir,
+        log=None,
+        overlay=None,
+    ):
+        return self._text, []
 
 
 class OggEditorUiTest(unittest.TestCase):
@@ -585,6 +618,91 @@ class OggEditorUiTest(unittest.TestCase):
                 )
                 self.assertTrue(window.handle_item_drop(mime))
                 self.assertTrue(window.is_pinned(sound))
+            finally:
+                window.close()
+
+    def test_item_drop_keeps_packed_sound_references(self):
+        with tempfile.TemporaryDirectory() as d:
+            game = Path(d) / "gamedata"
+            sounds = game / "sounds"
+            (sounds / "weapons").mkdir(parents=True)
+            missing = sounds / "weapons" / "generic_close.ogg"
+
+            ctx = _Ctx()
+            window = OggExplorerWindow(
+                ctx,
+                on_open=lambda target: None,
+                on_add=lambda: None,
+            )
+            try:
+                window.set_game_root(game)
+                mime = QMimeData()
+                mime.setData(
+                    ITEM_SECTION_MIME,
+                    encode_item_section(
+                        "wpn_test",
+                        (
+                            ("snd_close", "weapons\\generic_close"),
+                            ("snd_on_take", "pump"),
+                        ),
+                    ),
+                )
+                self.assertTrue(window.handle_item_drop(mime))
+                self.assertTrue(window.is_pinned(missing))
+
+                item = window.pinned_list.topLevelItem(0)
+                self.assertEqual(item.text(STATE_COLUMN), MISSING_STATE)
+                self.assertEqual(
+                    window.pinned_paths(),
+                    [missing],
+                )
+            finally:
+                window.close()
+
+    def test_item_drop_expands_sound_section(self):
+        with tempfile.TemporaryDirectory() as d:
+            game = Path(d) / "gamedata"
+            sounds = game / "sounds"
+            (sounds / "weapons").mkdir(parents=True)
+            shot = sounds / "weapons" / "shot.ogg"
+            shot.write_bytes(b"x")
+            far = sounds / "weapons" / "far.ogg"
+            far.write_bytes(b"x")
+            ltx = game / "configs" / "system.ltx"
+            ltx.parent.mkdir(parents=True)
+            ltx.write_text("[header]\n", encoding="utf-8")
+
+            text = """
+[wpn_test]
+snd_shoot = wpn_test_snd_shoot
+[wpn_test_snd_shoot]
+snd_1_layer = weapons\\shot
+snd_2_layer = weapons\\far
+"""
+
+            ctx = _Ctx()
+            ctx.services = _Services(text, ltx)
+            ctx.ui.forest = object()
+            window = OggExplorerWindow(
+                ctx,
+                on_open=lambda target: None,
+                on_add=lambda: None,
+            )
+            try:
+                window.set_game_root(game)
+                mime = QMimeData()
+                mime.setData(
+                    ITEM_SECTION_MIME,
+                    encode_item_section(
+                        "wpn_test",
+                        (("snd_shoot", "wpn_test_snd_shoot"),),
+                    ),
+                )
+                self.assertTrue(window.handle_item_drop(mime))
+                self.assertEqual(
+                    window.pinned_paths(),
+                    [far, shot],
+                )
             finally:
                 window.close()
 

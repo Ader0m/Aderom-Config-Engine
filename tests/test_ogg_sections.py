@@ -13,6 +13,7 @@ from modules.ogg_editor.section_links import OggSectionGraphContributor
 from modules.ogg_editor.sections import (
     extract_sound_paths,
     extract_sound_references,
+    make_section_resolver,
     normalize_section_name,
     parse_section_field_refs,
     parse_section_fields,
@@ -240,6 +241,60 @@ snd_reload = weapon\\shot
                 vfs_contribution.lost_children[0].resolved
             )
 
+    def test_section_graph_expands_sound_section(self):
+        with tempfile.TemporaryDirectory() as d:
+            game = Path(d) / "gamedata"
+            sounds = game / "sounds"
+            weapon = sounds / "weapon"
+            weapon.mkdir(parents=True)
+            shot = weapon / "shot.ogg"
+            shot.write_bytes(b"x")
+
+            text = """
+[wpn_sounds]
+snd_shoot = wpn_sounds_shoot
+[wpn_sounds_shoot]
+snd_1_layer = weapon\\shot
+"""
+            ltx_path = game / "configs" / "weapons.ltx"
+            ltx_path.parent.mkdir(parents=True)
+            ltx_path.write_text(text, encoding="utf-8")
+
+            class Services:
+                def forest_scan_dir(self, _forest):
+                    return ltx_path.parent
+
+                def game_root(self, _forest):
+                    return game
+
+                def assemble_resolved(self, *_args, **_kwargs):
+                    return text, []
+
+            class Ctx:
+                services = Services()
+
+            contributor = OggSectionGraphContributor(Ctx())
+            graph = SectionGraph(
+                section_name="wpn_sounds",
+                root=GraphNode(
+                    display_name="wpn_sounds",
+                    file_path=ltx_path,
+                    first_match_line=2,
+                ),
+            )
+            contribution = contributor(
+                SectionGraphRequest(
+                    forest=None,
+                    section_name="wpn_sounds",
+                    graph=graph,
+                )
+            )
+
+            self.assertEqual(len(contribution.children), 1)
+            node = contribution.children[0]
+            self.assertEqual(node.target_path, shot)
+            self.assertEqual(node.raw_ref, "wpn_sounds_shoot")
+
     def test_extract_sound_paths_uses_sounds_root_heuristic(self):
         with tempfile.TemporaryDirectory() as d:
             sounds = Path(d) / "gamedata" / "sounds"
@@ -264,6 +319,85 @@ snd_reload = weapon\\shot
                 names,
                 ["deep.ogg", "other.ogg", "shot.ogg"],
             )
+
+    def test_snd_field_expands_sound_section(self):
+        with tempfile.TemporaryDirectory() as d:
+            sounds = Path(d) / "gamedata" / "sounds"
+            weapon = sounds / "weapons"
+            weapon.mkdir(parents=True)
+            (weapon / "shot.ogg").write_bytes(b"x")
+
+            text = """
+[wpn_sounds]
+snd_shoot = wpn_sounds_shoot
+snd_on_take = pump
+[wpn_sounds_shoot]
+snd_1_layer = weapons\\shot
+snd_2_layer = weapons\\far
+"""
+            resolver = make_section_resolver(text)
+            fields = parse_section_fields(text, "wpn_sounds")
+            paths = extract_sound_paths(
+                fields,
+                sounds,
+                resolve_section=resolver,
+                include_missing=True,
+            )
+
+            names = sorted(path.name for path in paths)
+            self.assertEqual(names, ["far.ogg", "shot.ogg"])
+            # "pump" — категория звука подбора, а не файл.
+            self.assertNotIn("pump.ogg", names)
+
+    def test_non_sound_field_is_not_expanded_as_sound_section(self):
+        with tempfile.TemporaryDirectory() as d:
+            sounds = Path(d) / "gamedata" / "sounds"
+            (sounds / "weapons").mkdir(parents=True)
+
+            text = """
+[wpn_test]
+parent = wpn_sounds
+[wpn_sounds]
+snd_shoot = weapons\\shot
+"""
+            paths = extract_sound_paths(
+                (("parent", "wpn_sounds"),),
+                sounds,
+                resolve_section=make_section_resolver(text),
+                include_missing=True,
+            )
+            self.assertEqual(paths, [])
+
+    def test_include_missing_keeps_packed_sound_references(self):
+        with tempfile.TemporaryDirectory() as d:
+            sounds = Path(d) / "gamedata" / "sounds"
+            (sounds / "weapons").mkdir(parents=True)
+            fields = [
+                ("snd_close", "weapons\\generic_close"),
+                ("snd_on_take", "pump"),
+            ]
+
+            existing = extract_sound_paths(fields, sounds)
+            self.assertEqual(existing, [])
+
+            referenced = extract_sound_paths(
+                fields,
+                sounds,
+                include_missing=True,
+            )
+            self.assertEqual(
+                [path.name for path in referenced],
+                ["generic_close.ogg"],
+            )
+
+            # Не-snd поле не должно добавлять несуществующие файлы:
+            # его путь может быть текстурой/моделью с тем же каталогом.
+            visual = extract_sound_paths(
+                (("visual", "weapons\\model"),),
+                sounds,
+                include_missing=True,
+            )
+            self.assertEqual(visual, [])
 
 
 if __name__ == "__main__":

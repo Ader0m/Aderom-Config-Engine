@@ -41,6 +41,15 @@ from PyQt5.QtWidgets import (
 
 from PyQt5.Qsci import QsciScintilla
 
+from sdk.hints import (
+    HintTargetInfo,
+    LANGUAGE_LTX,
+    LANGUAGE_PLAIN,
+    LANGUAGE_XML,
+    SURFACE_RAW,
+    SURFACE_RESOLVED,
+)
+
 try:  # запуск с корня проекта (src в sys.path)
     from ui.theme import PALETTE
     from ui.lexers import create_lexer
@@ -49,6 +58,15 @@ except ImportError:  # запуск как пакета
     from .theme import PALETTE
     from .lexers import create_lexer
     from .debounce import Debounce
+
+
+def _language_for_path(path):
+    suffix = Path(path).suffix.lower() if path else ""
+    if suffix == ".ltx":
+        return LANGUAGE_LTX
+    if suffix == ".xml":
+        return LANGUAGE_XML
+    return LANGUAGE_PLAIN
 
 
 class _LexerScheduler(QObject):
@@ -269,7 +287,7 @@ class CodeEditor(QWidget):
     dirty_changed = pyqtSignal(bool)
     lexer_status = pyqtSignal(str)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, hint_attach=None):
         super().__init__(parent)
 
         self.current_file = None
@@ -281,6 +299,8 @@ class CodeEditor(QWidget):
         self._readonly_content = True
         self._baseline_text = ""
         self._dirty = False
+        self._hint_attach = hint_attach
+        self._hints = None
         # Полный текст нельзя гонять по слоям на каждый символ: для
         # system.ltx это десятки мегабайт. Копим изменения и отдаём
         # прикладному слою после паузы.
@@ -298,6 +318,33 @@ class CodeEditor(QWidget):
             self,
         )
         self._lexer_scheduler.status.connect(self.lexer_status.emit)
+        if callable(self._hint_attach):
+            self._hints = self._hint_attach(
+                self.editor,
+                target=self._hint_target,
+            )
+
+    def _hint_target(self):
+        path = Path(self.current_file) if self.current_file else None
+        return HintTargetInfo(
+            surface=SURFACE_RAW,
+            language=_language_for_path(path),
+            path=path,
+        )
+
+    def _set_hints_enabled(self, enabled):
+        if self._hints is not None:
+            try:
+                self._hints.set_enabled(bool(enabled))
+            except Exception:
+                pass
+
+    def refresh_hints(self):
+        if self._hints is not None:
+            try:
+                self._hints.refresh()
+            except Exception:
+                pass
 
     def _init_ui(self):
         layout = QVBoxLayout()
@@ -460,6 +507,7 @@ class CodeEditor(QWidget):
         # Перед заменой содержимого фиксируем несохранённую правку
         # старого файла (в проектный черновик), иначе она потеряется.
         self.flush_pending()
+        self._set_hints_enabled(False)
 
         text = str(text or "")
         self._loading = True
@@ -497,6 +545,7 @@ class CodeEditor(QWidget):
         # Фокус в редактор: без этого внутренняя карта клавиш Scintilla
         # (undo/redo/копирование/поиск) "не работает" для пользователя.
         self.editor.setFocus(Qt.OtherFocusReason)
+        self._set_hints_enabled(True)
 
     def open_file(self, file_path, text=None):
         path = Path(file_path)
@@ -520,6 +569,7 @@ class CodeEditor(QWidget):
         self.editor.setReadOnly(
             self._readonly_content or not self._editable
         )
+        self.refresh_hints()
 
     @property
     def is_editable(self):
@@ -721,6 +771,29 @@ class SourceListModel(QAbstractListModel):
         self._sources = list(sources)
         self.endResetModel()
 
+    def replace_source(self, row, source):
+        if not 0 <= row < len(self._sources):
+            return False
+        self._sources[row] = source
+        index = self.index(row, 0)
+        self.dataChanged.emit(index, index)
+        return True
+
+    def insert_source(self, row, source):
+        row = max(0, min(int(row), len(self._sources)))
+        self.beginInsertRows(QModelIndex(), row, row)
+        self._sources.insert(row, source)
+        self.endInsertRows()
+        return True
+
+    def remove_source(self, row):
+        if not 0 <= row < len(self._sources):
+            return False
+        self.beginRemoveRows(QModelIndex(), row, row)
+        del self._sources[row]
+        self.endRemoveRows()
+        return True
+
     def source_at(self, row):
         if 0 <= row < len(self._sources):
             return self._sources[row]
@@ -804,6 +877,15 @@ class SourceListView(QListView):
     def set_sources(self, sources):
         self._model.set_sources(sources)
 
+    def replace_source(self, row, source):
+        return self._model.replace_source(row, source)
+
+    def insert_source(self, row, source):
+        return self._model.insert_source(row, source)
+
+    def remove_source(self, row):
+        return self._model.remove_source(row)
+
     def source_at(self, row):
         return self._model.source_at(row)
 
@@ -852,7 +934,7 @@ class ResolvedView(QWidget):
     dirty_changed = pyqtSignal(bool)
     lexer_status = pyqtSignal(str)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, hint_attach=None):
         super().__init__(parent)
         self._root_path = None
         self._line_sources = []
@@ -865,6 +947,8 @@ class ResolvedView(QWidget):
         self._baseline_text = ""
         self._dirty = False
         self._document = None
+        self._hint_attach = hint_attach
+        self._hints = None
         # Синхронизация полного resolved-текста с документом — после
         # паузы ввода. Иначе каждый символ копирует и нормализует 40 МБ.
         self._pending_text = None
@@ -880,6 +964,36 @@ class ResolvedView(QWidget):
             self,
         )
         self._lexer_scheduler.status.connect(self.lexer_status.emit)
+        if callable(self._hint_attach):
+            self._hints = self._hint_attach(
+                self.editor,
+                target=self._hint_target,
+            )
+
+    def _hint_target(self):
+        document = self._document
+        is_xml = bool(document is not None and document.is_xml)
+        path = Path(self._root_path) if self._root_path else None
+        return HintTargetInfo(
+            surface=SURFACE_RESOLVED,
+            language=LANGUAGE_XML if is_xml else LANGUAGE_LTX,
+            path=path,
+            tab_id=str(getattr(document, "tab_id", "") or ""),
+        )
+
+    def _set_hints_enabled(self, enabled):
+        if self._hints is not None:
+            try:
+                self._hints.set_enabled(bool(enabled))
+            except Exception:
+                pass
+
+    def refresh_hints(self):
+        if self._hints is not None:
+            try:
+                self._hints.refresh()
+            except Exception:
+                pass
 
     # -------------------------------------------------- UI
     def _init_ui(self):
@@ -1118,6 +1232,7 @@ class ResolvedView(QWidget):
     def set_editable(self, editable):
         self._editable = bool(editable) and self._editing_supported
         self.editor.setReadOnly(not self._editable)
+        self.refresh_hints()
 
     def mark_clean(self, text=None):
         self.flush_pending()
@@ -1316,23 +1431,56 @@ class ResolvedView(QWidget):
 
             if self._document is not None:
                 # Канонический line_sources уже обновлён документом
-                # до вызова view.apply_line_edit.
-                sources = list(self._document.line_sources)
-            else:
-                sources = list(self._line_sources)
-                while len(sources) < line_count:
-                    sources.append(None)
-
+                # до вызова view.apply_line_edit. Обновляем панель
+                # источников точечно: полный reset модели на сотнях
+                # тысяч строк заметно блокирует UI.
+                sources = self._document.line_sources
+                expected = len(sources)
                 if action == "insert":
-                    index = min(max(line_number, 0), len(sources))
-                    sources.insert(index, None)
+                    expected -= 1
                 elif action == "delete":
-                    index = line_number - 1
-                    if 0 <= index < len(sources):
-                        del sources[index]
+                    expected += 1
+                model = self.source_list.model()
+                rows = model.rowCount() if model is not None else -1
 
-            if self._document is None:
-                self._line_sources = sources
+                updated = False
+                if rows == expected:
+                    if action == "replace":
+                        index = line_number - 1
+                        if 0 <= index < len(sources):
+                            updated = self.source_list.replace_source(
+                                index,
+                                sources[index],
+                            )
+                    elif action == "insert":
+                        index = min(max(line_number, 0), len(sources) - 1)
+                        if 0 <= index < len(sources):
+                            updated = self.source_list.insert_source(
+                                index,
+                                sources[index],
+                            )
+                    elif action == "delete":
+                        updated = self.source_list.remove_source(
+                            line_number - 1
+                        )
+
+                if not updated:
+                    self.source_list.set_sources(list(sources))
+                return True
+
+            sources = list(self._line_sources)
+            while len(sources) < line_count:
+                sources.append(None)
+
+            if action == "insert":
+                index = min(max(line_number, 0), len(sources))
+                sources.insert(index, None)
+            elif action == "delete":
+                index = line_number - 1
+                if 0 <= index < len(sources):
+                    del sources[index]
+
+            self._line_sources = sources
             self.source_list.set_sources(sources)
             return True
         finally:
@@ -1367,6 +1515,7 @@ class ResolvedView(QWidget):
 
     def set_content(self, text, line_sources, root_path, sources_visible=True):
         self.flush_pending()
+        self._set_hints_enabled(False)
         self._pending_text = None
         self._sync_timer.stop()
         self._root_path = str(root_path)
@@ -1394,6 +1543,7 @@ class ResolvedView(QWidget):
 
         # Покраска запускается после отображения текста.
         self._lexer_scheduler.schedule(root_path)
+        self._set_hints_enabled(True)
 
     def find_first(self, text):
         if not text:

@@ -95,6 +95,10 @@ class XmlForkResult:
     generated: GeneratedPatch
     keys: Tuple[XmlForkKey, ...] = ()
     references: Tuple[XmlForkReference, ...] = ()
+    # DLTX-планы перепривязки LTX-ссылок. Уровень проекта объединяет их
+    # с остальными планами того же корня, чтобы не создать два патч-файла
+    # с одним именем.
+    ltx_plans: Tuple[PatchPlan, ...] = ()
 
 
 # ---------------------------------------------------------------- helpers
@@ -979,7 +983,7 @@ class XmlForkService:
             )
             if keys else {}
         )
-        generated_parts.extend(
+        ltx_generated, ltx_plans = (
             self._ltx_reference_patches(
                 ltx_refs,
                 forest,
@@ -987,7 +991,9 @@ class XmlForkService:
                 warnings,
                 dltx_mode=dltx_mode,
             )
+            if ltx_refs else ([], [])
         )
+        generated_parts.extend(ltx_generated)
 
         # 3. Ссылки в XML -> полные копии XML-файлов (без Lua).
         xml_refs, xml_references = (
@@ -1149,6 +1155,7 @@ class XmlForkService:
             generated=generated,
             keys=tuple(keys),
             references=tuple(references),
+            ltx_plans=tuple(ltx_plans),
         )
 
     # -------------------------------------------------- новый XML
@@ -1231,9 +1238,10 @@ class XmlForkService:
         options,
         warnings,
         dltx_mode: str = "root",
-    ) -> List[GeneratedPatch]:
+    ):
+        """Вернуть ``(готовые патчи, DLTX-планы)`` для LTX-ссылок."""
         if not references:
-            return []
+            return [], []
 
         if dltx_mode in ("on_file", "in_place", "override"):
             return self._ltx_reference_file_patches(
@@ -1262,8 +1270,8 @@ class XmlForkService:
                 value = None
             return str(value) if value else Path(path).name
 
-        rewire_notes: List[PatchIssue] = []
         rewired_files = set()
+        all_plans: List[PatchPlan] = []
 
         for (path, section, key), (old_value, new_value) in references.items():
             try:
@@ -1299,26 +1307,29 @@ class XmlForkService:
                 )
                 continue
 
+            note = PatchIssue(
+                code="xml_fork_key_rewired",
+                message=(
+                    "Заменён ключ %s в [%s].%s (файл: %s)"
+                    % (
+                        old_value,
+                        section,
+                        key,
+                        display_path(path),
+                    )
+                ),
+                severity="info",
+            )
+            # Пометка живёт в самом плане: если уровень проекта объединит
+            # его с другими планами корня, комментарий не потеряется.
+            plan = replace(plan, warnings=tuple(plan.warnings) + (note,))
+
             # Один корень может быть представлен алиасами пути (junction,
             # регистр). Группируем по физической идентичности.
             root_key = _file_identity(plan.target.root_path)
             plans_by_root.setdefault(root_key, []).append(plan)
+            all_plans.append(plan)
             rewired_files.add(_file_identity(path))
-            rewire_notes.append(
-                PatchIssue(
-                    code="xml_fork_key_rewired",
-                    message=(
-                        "Заменён ключ %s в [%s].%s (файл: %s)"
-                        % (
-                            old_value,
-                            section,
-                            key,
-                            display_path(path),
-                        )
-                    ),
-                    severity="info",
-                )
-            )
 
         generated: List[GeneratedPatch] = []
 
@@ -1342,7 +1353,6 @@ class XmlForkService:
                     merged,
                     warnings=(
                         kept_warnings
-                        + tuple(rewire_notes)
                         + (
                             (
                                 PatchIssue(
@@ -1373,7 +1383,7 @@ class XmlForkService:
                         severity="warning",
                     )
                 )
-        return generated
+        return generated, all_plans
 
     def _ltx_reference_file_patches(
         self,
@@ -1382,7 +1392,7 @@ class XmlForkService:
         options,
         warnings,
         dltx_mode: str,
-    ) -> List[GeneratedPatch]:
+    ):
         """Перепривязать LTX-ссылки по отдельным файлам.
 
         On-file создаёт отдельный DLTX-патч на каждый файл, но привязывает
@@ -1403,6 +1413,7 @@ class XmlForkService:
             entry[1].append((section, key, new_value))
 
         generated: List[GeneratedPatch] = []
+        all_plans: List[PatchPlan] = []
 
         for file_key in sorted(
             by_file,
@@ -1461,6 +1472,8 @@ class XmlForkService:
                             resolved=False,
                         )
                     generated.append(result.generated)
+                    plan = result.plan
+                    all_plans.append(plan)
                 else:
                     # On-file: отдельный патч на этот файл, но привязанный
                     # к его корню загрузки, а не к самому include-файлу.
@@ -1496,6 +1509,7 @@ class XmlForkService:
                         forest=forest,
                         options=file_options,
                     )
+                    all_plans.append(plan)
                     generated.append(self.services.generate_patch(plan))
             except Exception as exc:
                 warnings.append(
@@ -1509,7 +1523,7 @@ class XmlForkService:
                     )
                 )
 
-        return generated
+        return generated, all_plans
 
     # -------------------------------------------------- XML-ссылки
     def _xml_reference_patches(

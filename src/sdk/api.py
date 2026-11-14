@@ -20,6 +20,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Optional, Protocol, Sequence
 
+from .hints import HintsHandle
+
 
 # ---------------------------------------------------------------- модели данных
 
@@ -644,6 +646,19 @@ class CoreApi(Protocol):
     def read_xml_text(self, path: Path) -> str:
         """Прочитать XML-файл по правилам X-Ray (windows-1251)."""
 
+    def color_definitions(
+        self,
+        forest,
+        overlay=None,
+        config_dir: Optional[Path] = None,
+    ) -> dict:
+        """Цвета ``%c[name]`` из ``configs/ui/color_defs.xml``.
+
+        Возвращает ``{name: (r, g, b, a)}`` с учётом overlay проекта.
+        Модуль использует это для отрисовки текста движка; подсказка
+        берёт те же данные из общего каталога ядра.
+        """
+
     # --- единый разбор LTX ------------------------------------------------
     # Это не Resolver4: разбор синтаксиса одного текста, без include и
     # вычисления наследования между файлами. Нужен для правок и навигации.
@@ -1154,6 +1169,32 @@ class UiApi(Protocol):
     ) -> bool:
         """Переименовать поле, найдя его по секции и старому ключу."""
 
+    def apply_resolved_field_edit_async(
+        self,
+        tab_id: str,
+        section: str,
+        key: str,
+        value: str,
+        on_done=None,
+    ) -> bool:
+        """Поставить правку поля в фоновую очередь.
+
+        ``on_done(ok, error)`` вызывается в UI-потоке после фиксации
+        правки в документе. Возвращает ``False``, если очередь
+        недоступна и нужен синхронный путь.
+        """
+
+    def rename_resolved_field_async(
+        self,
+        tab_id: str,
+        section: str,
+        old_key: str,
+        new_key: str,
+        value: str,
+        on_done=None,
+    ) -> bool:
+        """Фоновая версия :meth:`rename_resolved_field`."""
+
     def undo_resolved_document(self, tab_id: str) -> bool:
         """Отменить последнюю правку resolved-документа."""
 
@@ -1299,6 +1340,24 @@ class UiApi(Protocol):
 
     def copy_to_clipboard(self, text: str) -> None:
         """Поместить текст в буфер обмена."""
+
+    def attach_text_hints(
+        self,
+        widget,
+        target=None,
+        providers=None,
+        enabled: bool = True,
+    ) -> HintsHandle:
+        """Подключить движок подсказок к текстовому полю.
+
+        ``widget`` — любой поддерживаемый платформой текстовый виджет
+        (``QPlainTextEdit``/``QTextEdit``/``QLineEdit``/``QsciScintilla``).
+        ``target`` — :class:`sdk.hints.HintTargetInfo` или callable,
+        возвращающий его; модуль описывает поверхность, но не знает о
+        провайдерах и popup. ``providers`` — необязательное подмножество
+        провайдеров (для специальных полей). Возвращает
+        :class:`sdk.hints.HintsHandle`.
+        """
 
     def theme_color(self, name: str, fallback: Optional[str] = None) -> Optional[str]:
         """Вернуть цвет темы по имени токена.

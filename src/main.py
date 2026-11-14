@@ -91,6 +91,16 @@ def main():
     from ui.module_loader import ModuleLoader
     from sdk.events import Events
     from ui.bus import CommandBus, EventBus
+    from ui.hints import HintService
+    from ui.hints.providers import (
+        ColorTagProvider,
+        DirectiveProvider,
+        IncludePathProvider,
+        KeyProvider,
+        LocalizationKeyProvider,
+        ParentProvider,
+        SectionProvider,
+    )
     from ui.main_window import MainWindow
     from ui.platform_api import PlatformApi
     from ui.tasks import TaskService
@@ -163,6 +173,28 @@ def main():
 
     api = PlatformApi(events, commands, tasks, services, paths)
 
+    # Движок подсказок: провайдеры регистрируются в composition root,
+    # модули только подключают его к своим текстовым полям через SDK.
+    hints = HintService(
+        services=services,
+        events=events,
+        tasks=tasks,
+        forest_getter=api.workspace_forest,
+        overlay_getter=api.project_overlay,
+        log_fn=api.log,
+    )
+    for provider_type in (
+        IncludePathProvider,
+        ColorTagProvider,
+        LocalizationKeyProvider,
+        SectionProvider,
+        ParentProvider,
+        KeyProvider,
+        DirectiveProvider,
+    ):
+        hints.register(provider_type(hints.catalogs))
+    api.hints = hints
+
     # 3) Загрузка модулей (до построения окна, чтобы регистрации попали в меню).
     def make_context(manifest):
         return ModuleContext(
@@ -190,6 +222,7 @@ def main():
     code = app.exec_()
 
     services.stop_prebuild()
+    hints.close()
     loader.deactivate_all(log=api.log)
     sys.exit(code)
 

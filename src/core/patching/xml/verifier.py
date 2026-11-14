@@ -293,7 +293,7 @@ class XmlModelPatchVerifier(BasePatchVerifier):
             return False
 
         actual = {
-            node.canonical() for node in document.roots()
+            node.canonical() for node in document.elements()
         }
         missing = []
         for change in additions:
