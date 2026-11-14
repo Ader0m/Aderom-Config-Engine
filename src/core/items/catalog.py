@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -109,6 +109,9 @@ class ItemRecord:
     description_key: str = ""
     name_source: Optional[LocalizationEntry] = None
     description_source: Optional[LocalizationEntry] = None
+    # XML-объявления текстовых полей: ``inv_name``, ``inv_name_short``,
+    # ``description``. Нужны для контекстного меню «Открыть XML».
+    text_sources: dict = field(default_factory=dict)
 
     def field(self, name: str, default: Optional[str] = None) -> Optional[str]:
         wanted = str(name).lower()
@@ -563,6 +566,18 @@ class ItemCatalogService:
 
         name_key = self._clean(lower.get("inv_name") or "")
         description_key = self._clean(lower.get("description") or "")
+        text_keys = {
+            "inv_name": name_key,
+            "inv_name_short": self._clean(
+                lower.get("inv_name_short") or ""
+            ),
+            "description": description_key,
+        }
+        text_sources = {}
+        for text_key, loc_key in text_keys.items():
+            source = self._localization_entry(localization, loc_key)
+            if source is not None:
+                text_sources[text_key] = source
 
         if localization is not None:
             name_text = localization.translate(name_key)
@@ -590,6 +605,7 @@ class ItemCatalogService:
                 localization,
                 description_key,
             ),
+            text_sources=text_sources,
         )
 
     @staticmethod

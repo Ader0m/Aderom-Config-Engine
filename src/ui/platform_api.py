@@ -117,6 +117,10 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         commands.register("ui.editor_redo", self.request_editor_redo)
         commands.register("ui.editor_find", self.request_editor_find)
         commands.register("ui.open_file_at_line", self.request_open_file_at_line)
+        commands.register(
+            "ui.open_file_raw_at_line",
+            self.request_open_file_raw_at_line,
+        )
         commands.register("ui.open_file_with_search", self.request_open_file_with_search)
 
 
@@ -562,6 +566,24 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
                 "[%s] отрисовка %.2f s (контент %.2f, вкладка %.2f): %s"
                 % (kind, total, content_elapsed, tab_elapsed, title)
             )
+
+    def request_open_file_raw_at_line(self, path, line_number: int):
+        """Открыть файл сырым текстом и перейти к указанной строке.
+
+        В отличие от :meth:`request_open_file_at_line`, обходит
+        зарегистрированные обработчики (например, XML-резолв) и всегда
+        открывает исходный файл. Это нужно для перехода к объявлению
+        строки локализации: ``line`` относится к исходному XML.
+        """
+        key = _path_key(path)
+        self._pending_file_actions.pop(key, None)
+        self._pending_file_actions[key] = ("line", int(line_number))
+
+        ok = self.router.open_default(path, self)
+        if not ok:
+            self._pending_file_actions.pop(key, None)
+            self.show_error("Нет обработчика по умолчанию для: %s" % path)
+        return ok
 
     def request_open_file_raw_with_search(self, path, search_text):
         """Открыть файл как сырой текст и перейти к строке поиска."""

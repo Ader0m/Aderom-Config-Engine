@@ -17,6 +17,13 @@ from .contracts import (
     FileReader,
 )
 from .events import Events
+from .engine_text import (
+    EngineTextRun,
+    engine_source_text,
+    engine_text_lines,
+    parse_color_definitions,
+    parse_engine_text,
+)
 from .paths import path_key, same_path
 from .api import (
     CoreApi,
@@ -75,6 +82,11 @@ __all__ = [
     "ModuleBase",
     "ModuleContext",
     "Events",
+    "EngineTextRun",
+    "engine_source_text",
+    "engine_text_lines",
+    "parse_color_definitions",
+    "parse_engine_text",
     "path_key",
     "same_path",
     "FileOpenHandler",

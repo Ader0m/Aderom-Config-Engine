@@ -164,6 +164,29 @@ class PlatformApiTest(unittest.TestCase):
         self.assertEqual(api.window.editor.widget.lines, [42])
         self.assertEqual(api._pending_file_actions, {})
 
+    def test_open_raw_at_line_bypasses_module_handlers(self):
+        events = FakeEvents()
+        commands = FakeCommands()
+        api = PlatformApi(events, commands, None, None, None)
+        api.window = FakeWindow()
+        api.router.set_default(PublishingHandler(events))
+
+        class ResolvingHandler:
+            priority = 100
+
+            def can_open(self, path):
+                return True
+
+            def open(self, path, api):
+                raise AssertionError("module handler must be bypassed")
+
+        api.router.register(ResolvingHandler())
+
+        path = Path("a.xml")
+        self.assertTrue(api.request_open_file_raw_at_line(path, 42))
+        self.assertEqual(api.window.editor.widget.lines, [42])
+        self.assertEqual(api._pending_file_actions, {})
+
     def test_failed_open_cancels_pending_navigation(self):
         events = FakeEvents()
         commands = FakeCommands()

@@ -10,6 +10,7 @@ from tests.helpers import write_text
 from tests.support import SRC  # noqa: F401
 
 from tests.qt_support import qapp
+from PyQt5.QtWidgets import QLineEdit
 from sdk.api import ItemEntry, ItemField, LocalizationString, ProjectOverlay
 from core.items.catalog import ItemCatalogService
 from core.items.localization import (
@@ -64,7 +65,10 @@ class EditLocalizationTextTest(unittest.TestCase):
 
     def test_newlines_are_written_as_engine_sequence(self):
         updated = edit_localization_text(RU_XML, "st_desc", "A\nB")
-        self.assertIn(r"<text>A\nB</text>", updated)
+        # Литерал ``\n`` остаётся движковым переносом, а после него
+        # появляется реальный перенос XML для читаемости.
+        self.assertIn("A\\n\n\t\tB", updated)
+        self.assertIn("B</text>", updated)
 
     def test_missing_key_is_appended_before_table_end(self):
         updated = edit_localization_text(RU_XML, "st_new", "Новый текст")
@@ -222,6 +226,136 @@ class ItemCardTextEditTest(unittest.TestCase):
             [("item", "description", "Новое описание")],
         )
 
+    def test_description_renders_engine_text_and_edits_raw_xml(self):
+        raw = (
+            r"Строка\n"
+            "\r\n\t\t"
+            r"%c[255,0,0,255]Красный"
+            r"%c[default] обычный"
+        )
+        entry = ItemEntry(
+            section="item",
+            fields=(),
+            name_text="Имя",
+            description_text="Строка\nКрасный обычный",
+            name_source=LocalizationString(
+                "st_name",
+                "Имя",
+                Path("ru.xml"),
+            ),
+            description_source=LocalizationString(
+                "st_desc",
+                "Строка\nКрасный обычный",
+                Path("ru.xml"),
+                raw_text=raw,
+            ),
+        )
+        card = ItemCardView(
+            get_entry=lambda: entry,
+            get_image=lambda section: None,
+            can_edit=lambda: True,
+            on_text_edit=lambda *args: True,
+        )
+        card.refresh()
+
+        # В обычном состоянии — как в движке: меток нет, есть перевод
+        # строки и цвет.
+        shown = card.description_label.toPlainText()
+        self.assertEqual(shown, "Строка\nКрасный обычный")
+        self.assertEqual(
+            card.description_label.raw_text(),
+            r"Строка\n%c[255,0,0,255]Красный%c[default] обычный",
+        )
+
+        block = card.description_label.document().begin().next()
+        self.assertEqual(block.begin().fragment().charFormat()
+                         .foreground().color().name(), "#0000ff")
+
+        # В редакторе литералы ``\n`` превращены в настоящие переносы,
+        # а ``%c[...]`` остаются видимым текстом. Реальных CR/TAB из
+        # форматирования XML здесь уже нет.
+        self.assertTrue(card.description_label.begin_editing())
+        edited = card.description_label.toPlainText()
+        self.assertIn("\n", edited)
+        self.assertNotIn(r"\n", edited)
+        self.assertIn("%c[255,0,0,255]", edited)
+        self.assertIn("%c[default]", edited)
+        self.assertNotIn("\r", edited)
+        self.assertNotIn("\t", edited)
+        self.assertEqual(
+            card.description_label.raw_text(),
+            r"Строка\n%c[255,0,0,255]Красный%c[default] обычный",
+        )
+        card.description_label.end_editing()
+        self.assertEqual(
+            card.description_label.toPlainText(),
+            "Строка\nКрасный обычный",
+        )
+
+    def test_opening_editor_does_not_rewrite_formatting_controls(self):
+        raw = r"Строка\n" + "\r\n\t\t" + r"%c[red]Красный"
+        calls = []
+        entry = ItemEntry(
+            section="item",
+            fields=(),
+            name_text="Имя",
+            description_text="Строка\nКрасный",
+            description_source=LocalizationString(
+                "st_desc",
+                "Строка\nКрасный",
+                Path("ru.xml"),
+                raw_text=raw,
+            ),
+        )
+        card = ItemCardView(
+            get_entry=lambda: entry,
+            get_image=lambda section: None,
+            can_edit=lambda: True,
+            on_text_edit=lambda *args: calls.append(args) or True,
+        )
+        card.refresh()
+
+        card.description_label.begin_editing()
+        card._apply_description_text()
+
+        self.assertEqual(calls, [])
+
+    def test_save_button_appears_only_while_editing(self):
+        card = ItemCardView(
+            get_entry=self._entry,
+            get_image=lambda section: None,
+            can_edit=lambda: True,
+            on_text_edit=lambda *args: True,
+        )
+        card.refresh()
+
+        self.assertTrue(card.description_save_btn.isHidden())
+        self.assertTrue(card.description_label.begin_editing())
+        self.assertFalse(card.description_save_btn.isHidden())
+        card.description_label.end_editing()
+        self.assertTrue(card.description_save_btn.isHidden())
+
+    def test_save_button_applies_description(self):
+        calls = []
+        card = ItemCardView(
+            get_entry=self._entry,
+            get_image=lambda section: None,
+            can_edit=lambda: True,
+            on_text_edit=lambda section, field, value: (
+                calls.append((section, field, value)) or True
+            ),
+        )
+        card.refresh()
+
+        card.description_label.begin_editing()
+        card.description_label.setPlainText("Новое описание")
+        card.description_save_btn.click()
+
+        self.assertEqual(
+            calls,
+            [("item", "description", "Новое описание")],
+        )
+
     def test_click_activates_edit_and_focus_out_returns_label_look(self):
         card = ItemCardView(
             get_entry=self._entry,
@@ -262,6 +396,46 @@ class ItemCardTextEditTest(unittest.TestCase):
         self.assertTrue(card.description_label.isEnabled())
         self.assertTrue(card.fields_table.isEnabled())
 
+    def test_edit_right_checked_when_editing_starts(self):
+        state = {"active": False}
+        card = ItemCardView(
+            get_entry=self._entry,
+            get_image=lambda section: None,
+            can_edit=lambda: state["active"],
+            on_text_edit=lambda *args: True,
+        )
+        card.refresh()
+
+        self.assertTrue(card.name_label.isReadOnly())
+        self.assertFalse(card.name_label.begin_editing())
+        self.assertFalse(card.description_label.begin_editing())
+
+        # Проект создан после открытия карточки: повторная отрисовка
+        # не нужна, право проверяется в момент клика.
+        state["active"] = True
+        self.assertTrue(card.name_label.begin_editing())
+        self.assertFalse(card.name_label.isReadOnly())
+        self.assertTrue(card.description_label.begin_editing())
+        self.assertFalse(card.description_label.isReadOnly())
+
+    def test_field_table_edit_right_checked_when_editor_opens(self):
+        state = {"active": False}
+        card = ItemCardView(
+            get_entry=self._entry,
+            get_image=lambda section: None,
+            can_edit=lambda: state["active"],
+            on_replace_line=lambda *args: True,
+        )
+        card.refresh()
+
+        index = card.fields_table.model().index(0, 1)
+        card.fields_table.edit(index)
+        self.assertIsNone(card.fields_table.findChild(QLineEdit))
+
+        state["active"] = True
+        card.fields_table.edit(index)
+        self.assertIsNotNone(card.fields_table.findChild(QLineEdit))
+
     def test_without_source_text_is_read_only(self):
         entry = ItemEntry(
             section="item",
@@ -289,6 +463,13 @@ class _Ui:
         self.errors = []
         self.logs = []
         self.status = []
+        self.opened_raw = []
+
+    def open_raw_at_line(self, path, line_number):
+        self.opened_raw.append((Path(path), int(line_number)))
+
+    def open_raw(self, path):
+        self.opened_raw.append((Path(path), 0))
 
     def is_project_active(self):
         return True
@@ -391,6 +572,39 @@ class _AsyncUi(_Ui):
 
     def set_status(self, message, timeout=0):
         self.statuses.append(str(message))
+
+
+class TextSourceNavigationTest(unittest.TestCase):
+    def test_feature_opens_raw_xml_at_source_line(self):
+        path = Path("gamedata") / "configs" / "text" / "rus" / "ru.xml"
+        source = LocalizationString("st_desc", "", path, line=17)
+        ui = _Ui(ItemEntry(section="item", fields=()), path)
+        feature = ItemViewerFeature(_Ctx(ui), session=None)
+
+        self.assertTrue(feature._open_text_source(source))
+        self.assertEqual(ui.opened_raw, [(path, 17)])
+
+    def test_field_source_uses_text_sources_for_short_name(self):
+        path = Path("ru.xml")
+        short = LocalizationString("st_short", "", path, line=5)
+        entry = ItemEntry(
+            section="item",
+            fields=(
+                ItemField("inv_name_short", "st_short", 1),
+                ItemField("kind", "i_food", 2),
+            ),
+            text_sources={"inv_name_short": short},
+        )
+        card = ItemCardView(
+            get_entry=lambda: entry,
+            get_image=lambda section: None,
+            can_edit=lambda: False,
+        )
+        card.refresh()
+
+        source = card._text_source_for_field(entry.fields[0])
+        self.assertEqual(source.key, "st_short")
+        self.assertIsNone(card._text_source_for_field(entry.fields[1]))
 
 
 class _FakeCard:

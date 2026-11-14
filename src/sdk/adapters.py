@@ -50,6 +50,7 @@ def _to_localization_string(value):
         text=str(getattr(value, "text", "") or ""),
         path=path,
         line=int(getattr(value, "line", 0) or 0),
+        raw_text=str(getattr(value, "raw_text", "") or ""),
     )
 
 
@@ -96,6 +97,13 @@ def _to_item_entry(item) -> ItemEntry:
         description_source=_to_localization_string(
             getattr(item, "description_source", None)
         ),
+        text_sources={
+            str(key): source
+            for key, value in (
+                getattr(item, "text_sources", None) or {}
+            ).items()
+            if (source := _to_localization_string(value)) is not None
+        },
     )
 
 
@@ -1211,6 +1219,13 @@ class UiApiAdapter:
     def open_at_line(self, path, line_number):
         self._platform.commands.execute(
             "ui.open_file_at_line",
+            path,
+            int(line_number),
+        )
+
+    def open_raw_at_line(self, path, line_number):
+        self._platform.commands.execute(
+            "ui.open_file_raw_at_line",
             path,
             int(line_number),
         )

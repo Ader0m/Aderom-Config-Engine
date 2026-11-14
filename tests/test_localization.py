@@ -61,6 +61,15 @@ class LocalizationTest(unittest.TestCase):
         self.assertNotIn("<b>", text)
         self.assertIn("Характеристики:", text)
 
+    def test_entry_keeps_raw_text_for_editor(self):
+        table = LocalizationService().load(config_dir=self.configs)
+        entry = table.entry("st_rich")
+
+        self.assertIsNotNone(entry)
+        self.assertIn(r"Строка\n%c[ui_gray_3]", entry.raw_text)
+        self.assertIn("<b>тест</b>", entry.raw_text)
+        self.assertNotIn("&lt;", entry.raw_text)
+
     def test_include_is_expanded(self):
         write_text(
             self.configs / "text" / "rus" / "extra.xml",
@@ -89,6 +98,15 @@ class LocalizationTest(unittest.TestCase):
             clean_text("A\\n%c[d_blue]B"),
             "A\nB",
         )
+
+    def test_real_xml_newlines_are_ignored(self):
+        self.assertEqual(
+            clean_text("A\\n\n\t\tB"),
+            "A\nB",
+        )
+
+    def test_br_is_still_a_line_break(self):
+        self.assertEqual(clean_text("A<br>B"), "A\nB")
 
 
 if __name__ == "__main__":

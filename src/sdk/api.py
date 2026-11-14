@@ -400,6 +400,9 @@ class LocalizationString:
     text: str = ""
     path: Optional[Path] = None
     line: int = 0
+    # Исходная строка ``<text>`` с ``\\n`` и ``%c[...]``: её получает
+    # редактор карточки, чтобы не терять оформление движка.
+    raw_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -428,6 +431,9 @@ class ItemEntry:
     description_key: str = ""
     name_source: Optional[LocalizationString] = None
     description_source: Optional[LocalizationString] = None
+    # XML-объявления текстовых полей: ``inv_name``, ``inv_name_short``,
+    # ``description``. Ключ — имя поля, значение — источник строки.
+    text_sources: dict = field(default_factory=dict)
 
     def field(self, name: str, default: Optional[str] = None) -> Optional[str]:
         """Значение поля без учёта регистра ключа."""
@@ -1320,6 +1326,9 @@ class UiApi(Protocol):
 
     def open_at_line(self, path: Path, line_number: int) -> None:
         """Открыть файл и перейти к строке."""
+
+    def open_raw_at_line(self, path: Path, line_number: int) -> None:
+        """Открыть исходный файл без обработчиков и перейти к строке."""
 
     def undo(self) -> None:
         """Отменить действие в редакторе."""

@@ -41,7 +41,7 @@ from core.tools.cache import (
 )
 
 
-LOCALIZATION_VERSION = 2
+LOCALIZATION_VERSION = 3
 
 # Предпочтительный язык карточки предметов: интерфейс приложения русский,
 # а пользователь просит показывать текст из text/rus.
@@ -81,6 +81,9 @@ class LocalizationEntry:
     text: str
     path: Optional[Path] = None
     line: int = 0
+    # Текст без XML-сущностей, но с ``\\n`` и ``%c[...]``: именно его
+    # показывает/правит карточка, когда пользователь входит в редактор.
+    raw_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -256,7 +259,7 @@ class LocalizationService:
                     )
                     for chunk_path, chunk_text, offset in chunks:
                         loaded_files.append(chunk_path)
-                        for string_id, value, line in (
+                        for string_id, value, raw, line in (
                             _iter_string_entries(chunk_text)
                         ):
                             strings[string_id] = value
@@ -265,6 +268,7 @@ class LocalizationService:
                                 text=value,
                                 path=chunk_path,
                                 line=line + offset,
+                                raw_text=raw,
                             )
                 except Exception as exc:
                     warnings.append("%s: %s" % (path, exc))
@@ -508,16 +512,18 @@ def _iter_string_entries(text: str):
         if text_match is None:
             continue
 
+        content = text_match.group(1)
         yield (
             string_id,
-            clean_text(text_match.group(1)),
+            clean_text(content),
+            raw_xml_text(content),
             text.count("\n", 0, match.start()) + 1,
         )
 
 
 def _parse_string_table(text: str):
     """Вернуть пары ``(id, текст)`` (совместимость со старым API)."""
-    for string_id, value, _line in _iter_string_entries(text):
+    for string_id, value, _raw, _line in _iter_string_entries(text):
         yield string_id, value
 
 
@@ -540,13 +546,32 @@ def _xml_escape(value) -> str:
     )
 
 
-def _format_text_value(value, original="") -> str:
+_TEXT_LINE_INDENT = "\t\t"
+
+
+def _break_xml_text_lines(text, newline="\n") -> str:
+    """Добавить реальные переносы после литералов ``\\n``.
+
+    Движок считает переносом только литерал ``\\n``; реальные CR/LF в
+    шрифтовом атласе имеют нулевую ширину. Поэтому такие переносы можно
+    вставлять в XML для читаемости, не меняя отображение в игре.
+    Отступ делаем табами: у них тоже нулевая ширина.
+    """
+    if "\\n" not in text:
+        return text
+    return text.replace(
+        "\\n",
+        "\\n" + newline + _TEXT_LINE_INDENT,
+    )
+
+
+def _format_text_value(value, original="", newline="\n") -> str:
     """Текст для ``<text>``: сохранить CDATA и записать переводы строк.
 
     В конфигурациях X-Ray перевод строки обычно записывается как ``\\n``
-    (движок и карточка понимают эту последовательность). Редактор
-    получает обычный многострочный текст, поэтому на выходе возвращаем
-    совместимый вид.
+    (движок и карточка понимают эту последовательность). После каждого
+    такого литерала в XML добавляется реальный перенос для читаемости;
+    движок его игнорирует.
     """
     text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
     stripped = str(original or "").strip()
@@ -555,10 +580,12 @@ def _format_text_value(value, original="") -> str:
         and stripped.endswith("]]>")
     )
 
+    text = text.replace("\n", "\\n")
+    text = _break_xml_text_lines(text, newline)
+
     if is_cdata:
         return "<![CDATA[%s]]>" % text.replace("]]>", "]]]]><![CDATA[>")
 
-    text = text.replace("\n", "\\n")
     return _xml_escape(text)
 
 
@@ -592,10 +619,17 @@ def edit_localization_text(text, key, value):
     text_match = _TEXT_RE.search(body)
 
     if text_match is None:
-        replacement = '<text>%s</text>' % _format_text_value(value)
+        replacement = '<text>%s</text>' % _format_text_value(
+            value,
+            newline=newline,
+        )
         new_body = body.rstrip() + replacement
     else:
-        content = _format_text_value(value, text_match.group(1))
+        content = _format_text_value(
+            value,
+            text_match.group(1),
+            newline=newline,
+        )
         new_body = (
             body[:text_match.start(1)]
             + content
@@ -617,7 +651,7 @@ def _append_localization_string(text, key, value, newline="\n"):
 
     block = "\t<string id=\"%s\"><text>%s</text></string>" % (
         html.escape(key, quote=True),
-        _format_text_value(value),
+        _format_text_value(value, newline=newline),
     )
     return text[:index].rstrip() + newline + block + newline + text[index:]
 
@@ -630,6 +664,23 @@ def clean_key(value) -> str:
     return text
 
 
+def raw_xml_text(value) -> str:
+    """Текст ``<text>`` без XML-сущностей, но с ``\\n`` и ``%c[...]``.
+
+    ``CXml::Read`` возвращает значение текстового узла: CDATA-обёртка
+    снимается, ``&amp;``/``&lt;`` раскрываются. Цветовые метки и
+    последовательности ``\\n`` остаются частью строки — их разбирает
+    движок (``CUILines``), а не XML-парсер.
+    """
+    text = str(value or "")
+
+    cdata = _CDATA_RE.match(text)
+    if cdata:
+        text = cdata.group(1)
+
+    return html.unescape(text)
+
+
 def clean_text(value) -> str:
     """Текст для Qt-карточки: без XML-тегов и ``%c[...]``-окраски."""
     text = str(value or "")
@@ -639,12 +690,13 @@ def clean_text(value) -> str:
         text = cdata.group(1)
 
     text = html.unescape(text)
-    text = _BR_RE.sub("\n", text)
+    text = _BR_RE.sub(lambda _match: "\\n", text)
     text = _TAG_RE.sub("", text)
     text = _COLOR_TAG_RE.sub("", text)
+    # Реальные CR/LF/TAB — форматирование XML; движок их не рисует.
+    text = "".join(ch for ch in text if ord(ch) >= 0x20)
     text = text.replace("\\n", "\n")
     text = text.replace("\\t", "\t")
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
 
     lines = [line.strip() for line in text.split("\n")]
     return "\n".join(lines).strip()

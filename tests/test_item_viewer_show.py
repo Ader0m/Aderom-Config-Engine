@@ -10,7 +10,29 @@ from tests.qt_support import qapp
 from sdk.api import ItemCatalog, ItemEntry, ItemField, ItemSection
 from modules.base_module.item_viewer import ItemViewerFeature
 
+from sdk.events import Events
+from ui.bus import EventBus
+
 _app = qapp()
+
+
+class _Sub:
+    def unsubscribe(self):
+        pass
+
+
+class _Events:
+    def __init__(self):
+        self.handlers = {}
+
+    def subscribe(self, event, handler, priority=0):
+        self.handlers[event] = handler
+        return _Sub()
+
+    def publish(self, event, payload=None):
+        handler = self.handlers.get(event)
+        if handler is not None:
+            handler(payload)
 
 
 class _Ui:
@@ -21,6 +43,8 @@ class _Ui:
         self.window = None
         self.status = []
         self.logs = []
+        self.active = True
+        self.document = None
 
     def item_catalog_root(self, forest):
         return Path("system.ltx")
@@ -50,7 +74,7 @@ class _Ui:
         return ()
 
     def resolved_draft(self, tab_id):
-        return None
+        return self.document
 
     def ensure_resolved_document(self, tab_id, root_path, title="", text="",
                                  line_sources=()):
@@ -87,7 +111,7 @@ class _Ui:
         self.logs.append(str(message))
 
     def is_project_active(self):
-        return True
+        return self.active
 
 
 class _Tasks:
@@ -133,6 +157,79 @@ class ItemViewerShowTest(unittest.TestCase):
                 ctx.ui.window.card.section(),
                 "item",
             )
+        finally:
+            feature.close()
+
+
+class ProjectSwitchRebindTest(unittest.TestCase):
+    def _feature(self):
+        ctx = _Ctx()
+        ctx.events = _Events()
+        return ctx, ItemViewerFeature(ctx, _Session())
+
+    def test_project_created_after_show_rebinds_root_document(self):
+        ctx, feature = self._feature()
+        try:
+            feature.show()
+            ctx.ui.ensured.clear()
+            ctx.ui.retained.clear()
+
+            ctx.events.publish(Events.PROJECT_CHANGED, object())
+
+            self.assertEqual(
+                ctx.ui.ensured,
+                [
+                    (
+                        "base.resolved:system.ltx",
+                        Path("system.ltx"),
+                        "[item]\nkind = i_food\n",
+                    )
+                ],
+            )
+            self.assertIn(feature._tab_id, ctx.ui.retained)
+            self.assertIn(feature._tab_id, feature._retained)
+        finally:
+            feature.close()
+
+    def test_project_closed_does_not_rebind_documents(self):
+        ctx, feature = self._feature()
+        try:
+            feature.show()
+            ctx.ui.ensured.clear()
+            ctx.ui.active = False
+
+            ctx.events.publish(Events.PROJECT_CHANGED, None)
+
+            self.assertEqual(ctx.ui.ensured, [])
+        finally:
+            feature.close()
+
+    def test_rebind_runs_after_platform_released_documents(self):
+        # Порядок важен: платформа сначала сбрасывает живые документы,
+        # и только затем модуль возвращает корень каталога.
+        bus = EventBus()
+        ctx = _Ctx()
+        ctx.events = bus
+
+        def platform_changed(_project):
+            ctx.ui.document = None
+
+        bus.subscribe(Events.PROJECT_CHANGED, platform_changed)
+        feature = ItemViewerFeature(ctx, _Session())
+        try:
+            feature.show()
+            ctx.ui.ensured.clear()
+            ctx.ui.retained.clear()
+            ctx.ui.document = object()
+
+            bus.publish(Events.PROJECT_CHANGED, object())
+
+            self.assertEqual(len(ctx.ui.ensured), 1)
+            self.assertEqual(
+                ctx.ui.ensured[0][0],
+                "base.resolved:system.ltx",
+            )
+            self.assertIn(feature._tab_id, ctx.ui.retained)
         finally:
             feature.close()
 

@@ -24,6 +24,9 @@ from sdk import (
     DEFAULT_SEARCH_DELAY_MS,
     ITEM_SECTION_MIME,
     encode_item_section,
+    engine_source_text,
+    parse_color_definitions,
+    parse_engine_text,
     path_key as sdk_path_key,
     same_path as sdk_same_path,
 )
@@ -34,6 +37,7 @@ from PyQt5.QtCore import (
     QMimeData,
     QPoint,
     QRect,
+    QRectF,
     QSize,
     QSortFilterProxyModel,
     Qt,
@@ -43,6 +47,8 @@ from PyQt5.QtCore import (
 from PyQt5.QtGui import (
     QColor,
     QDrag,
+    QFont,
+    QFontMetrics,
     QIcon,
     QImage,
     QKeySequence,
@@ -52,6 +58,8 @@ from PyQt5.QtGui import (
     QPixmap,
     QStandardItem,
     QStandardItemModel,
+    QTextCharFormat,
+    QTextCursor,
 )
 from PyQt5.QtWidgets import (
     QAbstractItemView,
@@ -742,6 +750,10 @@ class ItemViewerFeature:
         self._root_path = None
         self._tab_id = ""
         self._title = ""
+        self._root_text = ""
+        self._root_sources = ()
+        # Цвета ``%c[name]`` из ``ui/color_defs.xml`` (с overlay проекта).
+        self._color_defs_cache = None
 
         # Открытые карточки и удержанные документы.
         self._cards = {}
@@ -769,6 +781,7 @@ class ItemViewerFeature:
         self._doc_sub = None
         self._tab_sub = None
         self._card_req_sub = None
+        self._project_sub = None
         if events is not None:
             self._doc_sub = events.subscribe(
                 Events.RESOLVED_DOCUMENT_CHANGED,
@@ -777,6 +790,11 @@ class ItemViewerFeature:
             self._tab_sub = events.subscribe(
                 Events.UI_TAB_CLOSED,
                 self._on_tab_closed,
+            )
+            self._project_sub = events.subscribe(
+                Events.PROJECT_CHANGED,
+                self._on_project_changed,
+                priority=-100,
             )
             register_action = getattr(
                 self.ctx.ui,
@@ -807,6 +825,60 @@ class ItemViewerFeature:
             )
             return None
 
+    def _color_definitions(self):
+        """Цвета ``%c[name]`` из ``configs/ui/color_defs.xml``."""
+        if self._color_defs_cache is not None:
+            return self._color_defs_cache
+
+        session = self.session
+        config_dir = getattr(session, "config_dir", None) if session else None
+        if not config_dir and session is not None:
+            config_dir = getattr(session.forest, "scan_dir", None)
+        if not config_dir:
+            self._color_defs_cache = {}
+            return self._color_defs_cache
+
+        path = Path(config_dir) / "ui" / "color_defs.xml"
+        text = self._overlay_text(path)
+
+        if text is None:
+            services = getattr(self.ctx, "services", None)
+            reader = getattr(services, "read_text", None)
+            if callable(reader):
+                try:
+                    text = reader(path)
+                except Exception:
+                    text = None
+
+        if text is None:
+            try:
+                raw = path.read_bytes()
+                try:
+                    text = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    text = raw.decode("windows-1251", errors="replace")
+            except OSError:
+                text = ""
+
+        self._color_defs_cache = parse_color_definitions(text)
+        return self._color_defs_cache
+
+    def _overlay_text(self, path):
+        overlay = self._project_overlay()
+        sources = getattr(overlay, "source_files", None)
+        if sources is None and isinstance(overlay, dict):
+            sources = overlay
+        if not sources:
+            return None
+        try:
+            wanted = sdk_path_key(path)
+            for source_path, source_text in sources.items():
+                if sdk_path_key(source_path) == wanted:
+                    return str(source_text or "")
+        except Exception:
+            return None
+        return None
+
     # -------------------------------------------------- жизненный цикл
     def show(self):
         self._disposed = False
@@ -823,6 +895,7 @@ class ItemViewerFeature:
         self._running = True
         self._request_seq += 1
         token = self._request_seq
+        self._color_defs_cache = None
         forest = self.session.forest
 
         root = self.ctx.services.item_catalog_root(forest)
@@ -965,6 +1038,7 @@ class ItemViewerFeature:
             getattr(self, "_doc_sub", None),
             getattr(self, "_tab_sub", None),
             getattr(self, "_card_req_sub", None),
+            getattr(self, "_project_sub", None),
         ):
             if sub is not None and hasattr(sub, "unsubscribe"):
                 try:
@@ -1026,6 +1100,7 @@ class ItemViewerFeature:
         if self._window is None:
             self._window = ItemViewerWindow(
                 theme_color=self.ctx.ui.theme_color,
+                color_defs=self._color_definitions,
                 on_refresh=self.show,
                 can_edit=self._can_edit,
                 on_replace_line=lambda line, text: self._replace_line(
@@ -1079,6 +1154,7 @@ class ItemViewerFeature:
                     self._tab_id,
                     section,
                 ),
+                on_open_text_source=self._open_text_source,
                 on_undo=lambda: self.ctx.ui.undo_resolved_document(
                     self._tab_id
                 ),
@@ -1096,6 +1172,36 @@ class ItemViewerFeature:
         self._root_path = context.get("root_path")
         self._tab_id = str(context.get("tab_id") or "")
         self._title = str(context.get("title") or "")
+        self._root_text = str(context.get("text") or "")
+        self._root_sources = tuple(context.get("line_sources") or ())
+
+    def _on_project_changed(self, _project):
+        """Перепривязать корневой документ каталога к новому проекту.
+
+        Платформа освобождает все живые resolved-документы при смене
+        проекта. Окно и каталог при этом не пересобираются: карточки
+        проверяют право на правку в момент действия, поэтому достаточно
+        вернуть документ в реестр.
+        """
+        # Удержания относились к освобождённым документам.
+        self._retained.clear()
+        self._color_defs_cache = None
+        if self._disposed or not self._tab_id or self._root_path is None:
+            return
+        if not self.ctx.ui.is_project_active():
+            return
+        if self._snapshot(self._tab_id) is not None:
+            return
+        self._ensure_root_document(
+            {
+                "root_path": self._root_path,
+                "tab_id": self._tab_id,
+                "title": self._title,
+                "text": self._root_text,
+                "line_sources": self._root_sources,
+            },
+            None,
+        )
 
     # -------------------------------------------------- документ и карточки
     def _ensure_root_document(self, context, previous_tab):
@@ -1365,7 +1471,9 @@ class ItemViewerFeature:
                 tab_id,
                 section,
             ),
+            on_open_text_source=self._open_text_source,
             theme_color=self.ctx.ui.theme_color,
+            color_defs=self._color_definitions,
             section=section,
             document_title=self._document_title(tab_id),
             preview=False,
@@ -1945,6 +2053,24 @@ class ItemViewerFeature:
             )
         return ok
 
+    def _open_text_source(self, source):
+        """Открыть XML-файл на строке объявления строки локализации."""
+        path = getattr(source, "path", None)
+        if path is None:
+            return False
+
+        line = int(getattr(source, "line", 0) or 0)
+        opener = getattr(self.ctx.ui, "open_raw_at_line", None)
+        if callable(opener) and line > 0:
+            opener(path, line)
+            return True
+
+        opener = getattr(self.ctx.ui, "open_raw", None)
+        if callable(opener):
+            opener(path)
+            return True
+        return False
+
     def _go_to_line(self, tab_id, line_number):
         opener = getattr(self.ctx.ui, "open_resolved_document", None)
         if callable(opener):
@@ -2147,37 +2273,77 @@ class ClickToEditLineEdit(QLineEdit):
         "QLineEdit { background: transparent; border: none; "
         "padding: 0; font-weight: 600; }"
     )
-    _EDIT_STYLE = (
-        "QLineEdit { background: palette(base); "
-        "border: 1px solid palette(mid); padding: 2px; "
+    _DEFAULT_BORDER = "#3C3F41"
+    _DEFAULT_ACCENT = "#3592E4"
+    _EDIT_STYLE_TEMPLATE = (
+        "QLineEdit { background: transparent; "
+        "border: 1px solid %(border)s; padding: 2px; "
         "font-weight: 600; }"
+        "QLineEdit:focus { border-color: %(accent)s; }"
     )
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._edit_allowed = False
         self._editing = False
+        self._edit_style = self._EDIT_STYLE_TEMPLATE % {
+            "border": self._DEFAULT_BORDER,
+            "accent": self._DEFAULT_ACCENT,
+        }
         self.setFrame(False)
         self.setReadOnly(True)
         self.setStyleSheet(self._IDLE_STYLE)
 
+    def set_theme_colors(self, border=None, accent=None):
+        """Цвета рамки поля в режиме правки под текущую тему."""
+        self._edit_style = self._EDIT_STYLE_TEMPLATE % {
+            "border": border or self._DEFAULT_BORDER,
+            "accent": accent or self._DEFAULT_ACCENT,
+        }
+        if self._editing:
+            self.setStyleSheet(self._edit_style)
+
     def set_edit_allowed(self, allowed):
-        self._edit_allowed = bool(allowed)
-        self.end_editing()
+        """Разрешение на правку: ``bool`` или предикат.
+
+        Предикат проверяется в момент клика, а не в момент отрисовки:
+        проект может появиться уже после открытия карточки, и право на
+        правку не должно «застывать» до следующего refresh.
+        """
+        self._edit_allowed = allowed if callable(allowed) else bool(allowed)
+        if not callable(allowed):
+            self.end_editing()
+        self._update_cursor()
+
+    def _is_edit_allowed(self):
+        allowed = self._edit_allowed
+        if callable(allowed):
+            try:
+                return bool(allowed())
+            except Exception:
+                return False
+        return bool(allowed)
+
+    def _update_cursor(self):
         self.setCursor(
-            Qt.IBeamCursor if self._edit_allowed else Qt.ArrowCursor
+            Qt.IBeamCursor if self._is_edit_allowed() else Qt.ArrowCursor
         )
+
+    def enterEvent(self, event):
+        self._update_cursor()
+        super().enterEvent(event)
 
     def is_editing(self):
         return self._editing
 
     def begin_editing(self):
-        if not self._edit_allowed:
-            return
+        if not self._is_edit_allowed():
+            return False
         self._editing = True
         self.setReadOnly(False)
-        self.setStyleSheet(self._EDIT_STYLE)
+        self.setStyleSheet(self._edit_style)
         self.setFocus(Qt.MouseFocusReason)
+        return True
 
     def end_editing(self):
         self._editing = False
@@ -2186,9 +2352,9 @@ class ClickToEditLineEdit(QLineEdit):
 
     def mousePressEvent(self, event):
         if (
-            self._edit_allowed
-            and not self._editing
+            not self._editing
             and event.button() == Qt.LeftButton
+            and self._is_edit_allowed()
         ):
             self.begin_editing()
         super().mousePressEvent(event)
@@ -2208,51 +2374,268 @@ class LocalizedDescriptionEdit(QPlainTextEdit):
     """
 
     editing_finished = pyqtSignal()
+    editing_changed = pyqtSignal(bool)
 
     _IDLE_STYLE = (
         "QPlainTextEdit { background: transparent; border: none; }"
     )
-    _EDIT_STYLE = (
-        "QPlainTextEdit { background: palette(base); "
-        "border: 1px solid palette(mid); }"
+    _DEFAULT_BORDER = "#3C3F41"
+    _DEFAULT_ACCENT = "#3592E4"
+    _EDIT_STYLE_TEMPLATE = (
+        "QPlainTextEdit { background: transparent; "
+        "border: 1px solid %(border)s; }"
+        "QPlainTextEdit:focus { border-color: %(accent)s; }"
     )
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._edit_allowed = False
         self._editing = False
+        self._edit_style = self._EDIT_STYLE_TEMPLATE % {
+            "border": self._DEFAULT_BORDER,
+            "accent": self._DEFAULT_ACCENT,
+        }
+        # Исходная строка с ``\n`` и ``%c[...]``. В обычном состоянии
+        # виджет рисует её как движок, в режиме правки — как XML.
+        self._raw_text = ""
+        self._engine_colors = {}
+        self._engine_default = None
         self.setFrameShape(QFrame.NoFrame)
         self.setReadOnly(True)
         self.setStyleSheet(self._IDLE_STYLE)
 
-    def set_edit_allowed(self, allowed):
-        self._edit_allowed = bool(allowed)
-        self.end_editing()
-        self.setCursor(
-            Qt.IBeamCursor if self._edit_allowed else Qt.ArrowCursor
+    def set_engine_text(self, raw_text, colors=None, default_color=None):
+        """Показать текст с оформлением движка.
+
+        ``raw_text`` остаётся доступен редактору без изменений; цвета
+        применяются только к отрисованному виду.
+        """
+        self._raw_text = engine_source_text(raw_text)
+        self._engine_colors = dict(colors or {})
+        self._engine_default = default_color
+
+        if self._editing:
+            QPlainTextEdit.setPlainText(
+                self,
+                self._raw_to_editor_text(self._raw_text),
+            )
+        else:
+            self._render_engine_text()
+
+    def raw_text(self):
+        """Текст в том виде, в котором его нужно записать в XML."""
+        if self._editing:
+            return self._editor_text_to_raw(self.toPlainText())
+        return self._raw_text
+
+    @staticmethod
+    def _raw_to_editor_text(text):
+        """XML-строка → текст редактора: литералы ``\\n`` → переносы."""
+        return str(text or "").replace("\\n", "\n")
+
+    @staticmethod
+    def _editor_text_to_raw(text):
+        """Текст редактора → XML-строка: переносы → литералы ``\\n``."""
+        normalized = (
+            str(text or "").replace("\r\n", "\n").replace("\r", "\n")
         )
+        return normalized.replace("\n", "\\n")
+
+    def setPlainText(self, text):
+        self._raw_text = str(text or "")
+        super().setPlainText(self._raw_text)
+
+    def clear(self):
+        self._raw_text = ""
+        super().clear()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._editing:
+            self._paint_newline_markers()
+
+    def _paint_newline_markers(self):
+        """Показать призрачные ``\\n`` в конце каждой строки редактора.
+
+        В редакторе литералы ``\\n`` превращены в настоящие переносы.
+        Маркер не является частью текста: он только напоминает, что в
+        XML на этом месте записан ``\\n``.
+        """
+        viewport = self.viewport()
+        if viewport is None:
+            return
+
+        painter = QPainter(viewport)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            font = QFont(self.font())
+            if font.pointSizeF() > 0:
+                font.setPointSizeF(max(6.0, font.pointSizeF() - 2.0))
+            else:
+                font.setPixelSize(max(7, font.pixelSize() - 2))
+            painter.setFont(font)
+            metrics = QFontMetrics(font)
+
+            label = "\\n"
+            width = metrics.width(label) + 10
+            height = metrics.height() + 2
+
+            text_color = self.palette().color(QPalette.Text)
+            if not text_color.isValid():
+                text_color = QColor("#787878")
+            text_color.setAlpha(160)
+            fill = QColor(text_color)
+            fill.setAlpha(24)
+            border = QColor(text_color)
+            border.setAlpha(70)
+
+            block = self.document().firstBlock()
+            while block.isValid() and block.next().isValid():
+                cursor = QTextCursor(block)
+                cursor.movePosition(QTextCursor.EndOfBlock)
+                rect = self.cursorRect(cursor)
+                x = rect.right() + 6
+                if x + width > viewport.width() - 2:
+                    x = max(2, viewport.width() - width - 2)
+                y = rect.top() + (rect.height() - height) // 2
+                box = QRectF(x, y, width, height)
+
+                painter.setPen(QPen(border, 1))
+                painter.setBrush(fill)
+                painter.drawRoundedRect(box, 3, 3)
+                painter.setPen(text_color)
+                painter.drawText(box, Qt.AlignCenter, label)
+                block = block.next()
+        finally:
+            painter.end()
+
+    def _default_engine_color(self):
+        value = self._engine_default
+        if isinstance(value, QColor):
+            return value
+        if isinstance(value, (tuple, list)) and len(value) >= 3:
+            return QColor(
+                int(value[0]) & 0xFF,
+                int(value[1]) & 0xFF,
+                int(value[2]) & 0xFF,
+            )
+        color = QColor(str(value or ""))
+        if color.isValid():
+            return color
+        return self.palette().color(QPalette.Text)
+
+    def _render_engine_text(self):
+        default = self._default_engine_color()
+        document = self.document()
+        document.clear()
+        cursor = QTextCursor(document)
+
+        runs = parse_engine_text(
+            self._raw_text,
+            self._engine_colors,
+            (default.red(), default.green(), default.blue()),
+        )
+        for run in runs:
+            if run.color is None:
+                color = default
+            else:
+                color = QColor(
+                    int(run.color[0]) & 0xFF,
+                    int(run.color[1]) & 0xFF,
+                    int(run.color[2]) & 0xFF,
+                )
+            char_format = QTextCharFormat()
+            char_format.setForeground(color)
+
+            # Движок не считает реальные CR/LF/TAB переводами строк:
+            # в шрифтовом атласе у управляющих символов нулевая ширина.
+            # Перенос делает только литерал ``\n`` (``CUILine``).
+            text = "".join(
+                ch for ch in run.text if ord(ch) >= 0x20
+            ).replace("\\n", "\n")
+            for index, part in enumerate(text.split("\n")):
+                if index:
+                    cursor.insertBlock()
+                if part:
+                    cursor.insertText(part, char_format)
+
+    def set_theme_colors(self, border=None, accent=None):
+        """Цвета рамки поля в режиме правки под текущую тему."""
+        self._edit_style = self._EDIT_STYLE_TEMPLATE % {
+            "border": border or self._DEFAULT_BORDER,
+            "accent": accent or self._DEFAULT_ACCENT,
+        }
+        if self._editing:
+            self.setStyleSheet(self._edit_style)
+
+    def set_edit_allowed(self, allowed):
+        """Разрешение на правку: ``bool`` или предикат.
+
+        Предикат проверяется в момент клика, а не в момент отрисовки:
+        проект может появиться уже после открытия карточки, и право на
+        правку не должно «застывать» до следующего refresh.
+        """
+        self._edit_allowed = allowed if callable(allowed) else bool(allowed)
+        if not callable(allowed):
+            self.end_editing()
+        self._update_cursor()
+
+    def _is_edit_allowed(self):
+        allowed = self._edit_allowed
+        if callable(allowed):
+            try:
+                return bool(allowed())
+            except Exception:
+                return False
+        return bool(allowed)
+
+    def _update_cursor(self):
+        self.setCursor(
+            Qt.IBeamCursor if self._is_edit_allowed() else Qt.ArrowCursor
+        )
+
+    def enterEvent(self, event):
+        self._update_cursor()
+        super().enterEvent(event)
 
     def is_editing(self):
         return self._editing
 
     def begin_editing(self):
-        if not self._edit_allowed:
-            return
+        if not self._is_edit_allowed():
+            return False
         self._editing = True
+        # В редакторе литералы ``\n`` превращаются в настоящие переносы,
+        # а их места помечаются призрачными значками ``\n``. Метки
+        # ``%c[...]`` остаются видимым текстом.
+        QPlainTextEdit.setPlainText(
+            self,
+            self._raw_to_editor_text(self._raw_text),
+        )
         self.setReadOnly(False)
-        self.setStyleSheet(self._EDIT_STYLE)
+        self.setStyleSheet(self._edit_style)
         self.setFocus(Qt.MouseFocusReason)
+        self.viewport().update()
+        self.editing_changed.emit(True)
+        return True
 
     def end_editing(self):
+        was_editing = self._editing
+        if was_editing:
+            self._raw_text = self._editor_text_to_raw(self.toPlainText())
         self._editing = False
         self.setReadOnly(True)
         self.setStyleSheet(self._IDLE_STYLE)
+        if was_editing:
+            self._render_engine_text()
+            self.editing_changed.emit(False)
+        self.viewport().update()
 
     def mousePressEvent(self, event):
         if (
-            self._edit_allowed
-            and not self._editing
+            not self._editing
             and event.button() == Qt.LeftButton
+            and self._is_edit_allowed()
         ):
             self.begin_editing()
         super().mousePressEvent(event)
@@ -2273,6 +2656,37 @@ class LocalizedDescriptionEdit(QPlainTextEdit):
             event.accept()
             return
         super().keyPressEvent(event)
+
+
+class ItemFieldsTable(QTableWidget):
+    """Таблица полей с проверкой права на правку в момент вызова.
+
+    ``QTableWidget`` решает, открывать ли редактор, по флагам ячеек,
+    которые выставляются при отрисовке. Проект же может появиться позже
+    (окно/вкладка уже открыты), поэтому право проверяется динамически,
+    а не кешируется в флагах.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._edit_allowed = True
+
+    def set_edit_allowed(self, allowed):
+        self._edit_allowed = allowed if callable(allowed) else bool(allowed)
+
+    def _is_edit_allowed(self):
+        allowed = self._edit_allowed
+        if callable(allowed):
+            try:
+                return bool(allowed())
+            except Exception:
+                return False
+        return bool(allowed)
+
+    def edit(self, index, *args):
+        if not self._is_edit_allowed():
+            return False
+        return super().edit(index, *args)
 
 
 class ItemCardView(QWidget):
@@ -2300,7 +2714,9 @@ class ItemCardView(QWidget):
         on_redo=None,
         on_open_as_tab=None,
         on_open_document=None,
+        on_open_text_source=None,
         theme_color=None,
+        color_defs=None,
         section=None,
         document_title="",
         preview=False,
@@ -2323,9 +2739,13 @@ class ItemCardView(QWidget):
         self._on_redo = on_redo
         self._on_open_as_tab = on_open_as_tab
         self._on_open_document = on_open_document
+        self._on_open_text_source = on_open_text_source
         self._theme_color = theme_color or (
             lambda name, fallback=None: fallback
         )
+        # Цвета ``%c[name]`` из ``ui/color_defs.xml``: словарь или
+        # функция, чтобы карточка видела проект, созданный позже.
+        self._color_defs = color_defs if color_defs is not None else {}
         self._section = str(section or "")
         self._document_title = str(document_title or "")
         self._preview = bool(preview)
@@ -2412,6 +2832,14 @@ class ItemCardView(QWidget):
         self.name_label = ClickToEditLineEdit()
         self.name_label.setPlaceholderText("Название предмета")
         self.name_label.editingFinished.connect(self._apply_name_text)
+        self.name_label.set_theme_colors(
+            self._palette("border", "#3C3F41"),
+            self._palette("accent", "#3592E4"),
+        )
+        self.name_label.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.name_label.customContextMenuRequested.connect(
+            self._on_name_context_menu
+        )
         text_block.addWidget(self.name_label)
 
         self.meta_label = QLabel()
@@ -2440,9 +2868,37 @@ class ItemCardView(QWidget):
         self.description_label.editing_finished.connect(
             self._apply_description_text
         )
+        self.description_label.set_theme_colors(
+            self._palette("border", "#3C3F41"),
+            self._palette("accent", "#3592E4"),
+        )
+        self.description_label.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.description_label.customContextMenuRequested.connect(
+            self._on_description_context_menu
+        )
+        self.description_label.editing_changed.connect(
+            self._on_description_editing_changed
+        )
         description_layout.addWidget(self.description_label, 1)
 
-        self.fields_table = QTableWidget(0, 2)
+        self.description_save_btn = QPushButton("Сохранить")
+        self.description_save_btn.setAutoDefault(False)
+        self.description_save_btn.setDefault(False)
+        self.description_save_btn.setFocusPolicy(Qt.NoFocus)
+        self.description_save_btn.setToolTip(
+            "Применить изменения описания (Ctrl+Enter)"
+        )
+        self.description_save_btn.setVisible(False)
+        self.description_save_btn.clicked.connect(
+            self._apply_description_text
+        )
+        save_row = QHBoxLayout()
+        save_row.setContentsMargins(0, 0, 0, 0)
+        save_row.addStretch(1)
+        save_row.addWidget(self.description_save_btn)
+        description_layout.addLayout(save_row)
+
+        self.fields_table = ItemFieldsTable(0, 2)
         self.fields_table.setHorizontalHeaderLabels(["Поле", "Значение"])
         self.fields_table.verticalHeader().setVisible(False)
         self.fields_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -2558,18 +3014,11 @@ class ItemCardView(QWidget):
 
         self.section_label.setText("[%s]" % entry.section)
 
-        editable = bool(self._can_edit())
         name_source = getattr(entry, "name_source", None)
         description_source = getattr(entry, "description_source", None)
-        name_editable = (
-            editable
-            and name_source is not None
-            and getattr(name_source, "path", None) is not None
-        )
-        description_editable = (
-            editable
-            and description_source is not None
-            and getattr(description_source, "path", None) is not None
+        name_editable = self._text_edit_predicate(name_source)
+        description_editable = self._text_edit_predicate(
+            description_source
         )
 
         if name_source is not None:
@@ -2587,6 +3036,9 @@ class ItemCardView(QWidget):
                 or entry.field("description")
                 or ""
             )
+        description_raw = engine_source_text(
+            self._raw_source_text(description_source, description)
+        )
 
         self._populating_text = True
         try:
@@ -2597,10 +3049,14 @@ class ItemCardView(QWidget):
             )
 
             has_description = bool(description.strip()) or (
-                description_editable
+                self._text_source_editable(description_source)
             )
             self.description_panel.setVisible(has_description)
-            self.description_label.setPlainText(description)
+            self.description_label.set_engine_text(
+                description_raw,
+                self._engine_color_defs(),
+                self._palette("text", "#BCBFBC"),
+            )
             self.description_label.set_edit_allowed(
                 description_editable
             )
@@ -2611,7 +3067,7 @@ class ItemCardView(QWidget):
                 )
             )
             self._shown_name = name
-            self._shown_description = description
+            self._shown_description = description_raw
         finally:
             self._populating_text = False
 
@@ -2650,7 +3106,9 @@ class ItemCardView(QWidget):
             value_item = QTableWidgetItem(field.value)
             value_item.setToolTip(field.value)
 
-            can_edit_field = editable and field.line_number > 0
+            # Право на правку проверяет сама таблица в момент вызова:
+            # проект мог появиться уже после отрисовки карточки.
+            can_edit_field = field.line_number > 0
             any_editable = any_editable or can_edit_field
             for column, table_item in ((0, key_item), (1, value_item)):
                 flags = table_item.flags()
@@ -2661,6 +3119,7 @@ class ItemCardView(QWidget):
                 table_item.setFlags(flags)
                 self.fields_table.setItem(row, column, table_item)
 
+        self.fields_table.set_edit_allowed(self._can_edit)
         self.fields_table.setEditTriggers(
             (
                 QAbstractItemView.DoubleClicked
@@ -2673,6 +3132,44 @@ class ItemCardView(QWidget):
         self.fields_table.resizeRowsToContents()
         self.fields_table.setUpdatesEnabled(True)
         self._populating_fields = False
+
+    @staticmethod
+    def _raw_source_text(source, fallback=""):
+        """Строка для редактора: исходный ``<text>`` с ``\\n`` и ``%c``."""
+        if source is not None:
+            raw = str(getattr(source, "raw_text", "") or "")
+            if raw:
+                return raw
+            text = str(getattr(source, "text", "") or "")
+            if text:
+                return text
+        return str(fallback or "")
+
+    def _engine_color_defs(self):
+        value = self._color_defs
+        if callable(value):
+            try:
+                value = value()
+            except Exception:
+                return {}
+        return value or {}
+
+    @staticmethod
+    def _text_source_editable(source):
+        return (
+            source is not None
+            and getattr(source, "path", None) is not None
+        )
+
+    def _text_edit_predicate(self, source):
+        """Право на правку названия/описания проверяется при клике."""
+
+        def allowed():
+            return self._text_source_editable(source) and bool(
+                self._can_edit()
+            )
+
+        return allowed
 
     @staticmethod
     def _text_source_tooltip(text, source):
@@ -2691,6 +3188,7 @@ class ItemCardView(QWidget):
         widgets = (
             self.name_label,
             self.description_label,
+            self.description_save_btn,
             self.fields_table,
             self.save_btn,
             self.open_doc_btn,
@@ -2735,11 +3233,17 @@ class ItemCardView(QWidget):
         else:
             self.refresh()
 
+    def _on_description_editing_changed(self, editing):
+        self.description_save_btn.setVisible(bool(editing))
+        self.description_save_btn.setEnabled(
+            bool(editing) and not self._saving
+        )
+
     def _apply_description_text(self):
         if self._saving or self._populating_text or self._entry is None:
             return
 
-        value = self.description_label.toPlainText()
+        value = self.description_label.raw_text()
         self.description_label.end_editing()
         if value == self._shown_description:
             return
@@ -2768,6 +3272,7 @@ class ItemCardView(QWidget):
             self.meta_label.clear()
             self.description_label.clear()
             self.description_label.set_edit_allowed(False)
+            self.description_save_btn.setVisible(False)
             self.description_panel.setVisible(False)
             self.fields_table.clearContents()
             self.fields_table.setRowCount(0)
@@ -2781,6 +3286,9 @@ class ItemCardView(QWidget):
         if self._populating_fields or self._entry is None:
             return
         if not self._can_edit():
+            # Проект закрыли уже после открытия редактора ячейки:
+            # возвращаем отрисованное значение, чтобы правка не повисла.
+            self.refresh()
             return
 
         row = item.row()
@@ -2837,6 +3345,62 @@ class ItemCardView(QWidget):
         else:
             QTimer.singleShot(0, self.refresh)
 
+    def _on_name_context_menu(self, position):
+        if self.name_label.is_editing():
+            menu = self.name_label.createStandardContextMenu()
+        else:
+            menu = self.name_label.createStandardContextMenu()
+            self._add_open_xml_action(
+                menu,
+                getattr(self._entry, "name_source", None),
+            )
+        menu.exec_(self.name_label.mapToGlobal(position))
+
+    def _on_description_context_menu(self, position):
+        menu = self.description_label.createStandardContextMenu()
+        if not self.description_label.is_editing():
+            self._add_open_xml_action(
+                menu,
+                getattr(self._entry, "description_source", None),
+            )
+        menu.exec_(self.description_label.mapToGlobal(position))
+
+    def _add_open_xml_action(self, menu, source):
+        if source is None or getattr(source, "path", None) is None:
+            return None
+        menu.addSeparator()
+        action = menu.addAction("Открыть XML")
+        action.triggered.connect(
+            lambda _checked=False: self._open_text_source(source)
+        )
+        return action
+
+    def _open_text_source(self, source):
+        if self._on_open_text_source is not None:
+            self._on_open_text_source(source)
+
+    def _text_source_for_field(self, field):
+        """XML-объявление для текстового поля (``inv_name`` и т.п.)."""
+        entry = self._entry
+        if entry is None:
+            return None
+
+        key = str(getattr(field, "key", "") or "").strip().lower()
+        if not key:
+            return None
+
+        sources = getattr(entry, "text_sources", None) or {}
+        source = sources.get(key)
+        if source is not None:
+            return source
+
+        # Совместимость с записями, собранными до появления text_sources.
+        if key == "inv_name":
+            return getattr(entry, "name_source", None)
+        if key == "description":
+            return getattr(entry, "description_source", None)
+        return None
+
     def _on_fields_context_menu(self, position):
         index = self.fields_table.indexAt(position)
         if not index.isValid():
@@ -2850,8 +3414,14 @@ class ItemCardView(QWidget):
         field = entry.fields[row]
         line = field.line_number or entry.line_number
         editable = bool(self._can_edit())
+        text_source = self._text_source_for_field(field)
 
         menu = QMenu(self)
+
+        open_xml_action = None
+        if text_source is not None:
+            open_xml_action = menu.addAction("Открыть XML")
+            menu.addSeparator()
 
         go_action = menu.addAction("Перейти к строке")
         go_action.setEnabled(line > 0)
@@ -2866,7 +3436,9 @@ class ItemCardView(QWidget):
             self.fields_table.mapToGlobal(position)
         )
 
-        if chosen is go_action and line > 0:
+        if chosen is open_xml_action and text_source is not None:
+            self._open_text_source(text_source)
+        elif chosen is go_action and line > 0:
             self._go_to_line(line)
         elif chosen is add_action and line > 0:
             self._add_line_under(entry, field, line)
@@ -2965,6 +3537,7 @@ class ItemViewerWindow(QDialog):
     def __init__(
         self,
         theme_color=None,
+        color_defs=None,
         on_refresh=None,
         can_edit=None,
         on_replace_line=None,
@@ -2979,6 +3552,7 @@ class ItemViewerWindow(QDialog):
         on_item_entry=None,
         on_open_card=None,
         on_open_document=None,
+        on_open_text_source=None,
         on_undo=None,
         on_redo=None,
         document_title="",
@@ -2989,6 +3563,7 @@ class ItemViewerWindow(QDialog):
         self._theme_color = theme_color or (
             lambda name, fallback=None: fallback
         )
+        self._color_defs = color_defs if color_defs is not None else {}
         self._on_refresh = on_refresh
         self._can_edit = can_edit or (lambda: False)
         self._on_replace_line = on_replace_line
@@ -3003,6 +3578,7 @@ class ItemViewerWindow(QDialog):
         self._on_item_entry = on_item_entry
         self._on_open_card = on_open_card
         self._on_open_document = on_open_document
+        self._on_open_text_source = on_open_text_source
         self._on_undo = on_undo
         self._on_redo = on_redo
         self._document_title = str(document_title or "")
@@ -3130,7 +3706,9 @@ class ItemViewerWindow(QDialog):
             on_redo=self._on_redo,
             on_open_as_tab=self._open_current_card,
             on_open_document=None,
+            on_open_text_source=self._on_open_text_source,
             theme_color=self._theme_color,
+            color_defs=self._color_defs,
             document_title=self._document_title,
             preview=True,
         )
