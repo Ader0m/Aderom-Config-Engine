@@ -10,8 +10,7 @@ $ErrorActionPreference = 'Stop'
 
 $BackupSuffix = '.ace_backup'
 $bs = [string][char]92
-$AceArguments = '../ACE/src/main.py'
-$AceBinary = '../ACE/.venv/Scripts/python.exe'
+$AceTitle = 'ACE'
 
 function Write-Info {
     param([string]$Message)
@@ -145,6 +144,27 @@ function Get-SectionBounds {
     }
 }
 
+function Test-AcePath {
+    param(
+        [string]$Value,
+        [string]$RelativePath
+    )
+
+    $normalized = $Value.Trim().Replace('/', $bs)
+    $relative = $RelativePath.Replace('/', $bs)
+
+    foreach ($folder in $AceFolderNames) {
+        $pattern = '(?i)(^|' + [regex]::Escape($bs) + ')' +
+            [regex]::Escape($folder + $bs + $relative) + '$'
+
+        if ($normalized -match $pattern) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
 function Test-AceEntry {
     param(
         $Lines,
@@ -152,18 +172,18 @@ function Test-AceEntry {
     )
 
     for ($i = $Bounds.Start + 1; $i -lt $Bounds.End; $i++) {
-        if ($Lines[$i] -match '^\s*\d+\\title\s*=\s*ACE\s*$') {
+        if ($Lines[$i] -match ('^\s*\d+\\title\s*=\s*' + [regex]::Escape($AceTitle) + '\s*$')) {
             return $true
         }
 
         if ($Lines[$i] -match '^\s*\d+\\(arguments|binary)\s*=\s*(.+)$') {
-            $value = $Matches[2].Trim().Replace('/', $bs)
+            $value = $Matches[2]
 
-            if ($value -match '(?i)(^|\\)ACE\\src\\main\.py$') {
+            if (Test-AcePath -Value $value -RelativePath 'src/main.py') {
                 return $true
             }
 
-            if ($value -match '(?i)(^|\\)ACE\\\.venv\\Scripts\\python\.exe$') {
+            if (Test-AcePath -Value $value -RelativePath '.venv/Scripts/python.exe') {
                 return $true
             }
         }
@@ -220,7 +240,7 @@ function Add-AceEntry {
     $body.Add([string]$newN + $bs + 'hide=false')
     $body.Add([string]$newN + $bs + 'ownicon=false')
     $body.Add([string]$newN + $bs + 'steamAppID=')
-    $body.Add([string]$newN + $bs + 'title=ACE')
+    $body.Add([string]$newN + $bs + 'title=' + $AceTitle)
     $body.Add([string]$newN + $bs + 'toolbar=false')
     $body.Add([string]$newN + $bs + 'workingDirectory=./')
 
@@ -262,15 +282,15 @@ function Remove-AceEntries {
 
             if ($rest -match '^(?i)(arguments|binary|title)\s*=\s*(.+)$') {
                 $key = $Matches[1].ToLowerInvariant()
-                $value = $Matches[2].Trim().Replace('/', $bs)
+                $value = $Matches[2].Trim()
 
-                if ($key -eq 'arguments' -and $value -match '(?i)(^|\\)ACE\\src\\main\.py$') {
+                if ($key -eq 'arguments' -and (Test-AcePath -Value $value -RelativePath 'src/main.py')) {
                     [void]$remove.Add($idx)
                 }
-                elseif ($key -eq 'binary' -and $value -match '(?i)(^|\\)ACE\\\.venv\\Scripts\\python\.exe$') {
+                elseif ($key -eq 'binary' -and (Test-AcePath -Value $value -RelativePath '.venv/Scripts/python.exe')) {
                     [void]$remove.Add($idx)
                 }
-                elseif ($key -eq 'title' -and $value -ieq 'ACE') {
+                elseif ($key -eq 'title' -and $value -ieq $AceTitle) {
                     [void]$remove.Add($idx)
                 }
             }
@@ -342,6 +362,14 @@ function Remove-AceEntries {
 }
 
 try {
+    $ProjectRoot = Get-ProjectRoot -ScriptRoot $PSScriptRoot
+    $ProjectFolderName = Split-Path -Leaf $ProjectRoot
+
+    # The project may be unpacked into any folder name (ACE, ACE-master, etc.).
+    $AceFolderNames = @($ProjectFolderName, 'ACE') | Select-Object -Unique
+    $AceArguments = '../' + $ProjectFolderName + '/src/main.py'
+    $AceBinary = '../' + $ProjectFolderName + '/.venv/Scripts/python.exe'
+
     $resolvedPath = Resolve-ExistingFile -FilePath $Path
 
     if (-not $resolvedPath) {
