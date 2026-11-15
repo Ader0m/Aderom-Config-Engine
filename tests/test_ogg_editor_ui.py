@@ -516,6 +516,63 @@ class OggEditorUiTest(unittest.TestCase):
             finally:
                 window.close()
 
+    def test_type_picker_sets_weapon_sound_type(self):
+        """Выбор «Оружие: Выстрел» должен дойти до сохранения без int32."""
+        with tempfile.TemporaryDirectory() as d:
+            game = Path(d) / "gamedata"
+            sounds = game / "sounds" / "weapons"
+            sounds.mkdir(parents=True)
+            comments = build_comment_packet(
+                "enc",
+                (build_xray_comment(XraySoundComment()),),
+            )
+            path = sounds / "shot.ogg"
+            path.write_bytes(_make_file(comments))
+
+            edited = []
+
+            def on_edit_field(target, params):
+                edited.append((Path(target), params))
+                return True, ""
+
+            ctx = _Ctx()
+            window = OggExplorerWindow(
+                ctx,
+                on_open=lambda target: None,
+                on_add=lambda: None,
+                on_edit_field=on_edit_field,
+            )
+            try:
+                window.set_game_root(game)
+                window.pin_paths([path])
+                window._load_visible_fields()
+                item = window.pinned_list.topLevelItem(0)
+
+                window._open_type_picker(item, FIELD_COLUMNS[4])
+                picker = window._type_picker
+                self.assertIsNotNone(picker)
+                row = next(
+                    row
+                    for row in range(picker.listing.count())
+                    if picker.listing.item(row).data(Qt.UserRole)
+                    == 0x80200000
+                )
+                picker._choose(picker.listing.item(row))
+
+                self.assertEqual(len(edited), 1)
+                self.assertEqual(edited[0][0], path)
+                self.assertEqual(
+                    edited[0][1].game_type,
+                    0x80200000,
+                )
+                self.assertIn(
+                    "Оружие: Выстрел",
+                    item.text(FIELD_COLUMNS[4]),
+                )
+                self.assertIsNone(getattr(ctx.ui, "error", None))
+            finally:
+                window.close()
+
     def test_cell_delegate_creates_numeric_editor(self):
         with tempfile.TemporaryDirectory() as d:
             game = Path(d) / "gamedata"

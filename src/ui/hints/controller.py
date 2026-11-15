@@ -87,7 +87,11 @@ class HintController(QObject):
         self._schedule()
 
     def close(self):
-        self._hide_popup()
+        try:
+            self._hide_popup()
+        except Exception:
+            log.exception("Не удалось скрыть popup подсказок")
+            self._popup = None
         self._result = None
         self._signature = None
         self._context = None
@@ -129,9 +133,19 @@ class HintController(QObject):
     def _schedule(self):
         if not self._alive or not self._enabled or self._suppress:
             return
-        self._timer.start()
+        try:
+            self._timer.start()
+        except RuntimeError:
+            # Таймер уже уничтожен вместе с виджетом.
+            pass
 
     def _on_destroyed(self, *_args):
+        try:
+            self._on_destroyed_impl()
+        except Exception:
+            log.exception("Ошибка освобождения контроллера подсказок")
+
+    def _on_destroyed_impl(self):
         if not self._alive:
             return
         self._alive = False
@@ -148,6 +162,20 @@ class HintController(QObject):
         self.deleteLater()
 
     def eventFilter(self, obj, event):
+        # Event filter вызывается из C++; исключение отсюда PyQt5
+        # завершает процесс через qFatal(). Подсказки не должны ронять
+        # редактор, поэтому любая ошибка только закрывает popup.
+        try:
+            return self._event_filter_impl(obj, event)
+        except Exception:
+            log.exception("Ошибка обработки события подсказок")
+            try:
+                self.close()
+            except Exception:
+                pass
+            return False
+
+    def _event_filter_impl(self, obj, event):
         if not self._alive:
             return False
         widget = self._adapter.widget() if self._adapter is not None else None
@@ -430,6 +458,18 @@ class HintController(QObject):
             self.close()
 
     def _commit_row(self, row):
+        # Слот подключён к сигналу popup и вызывается из C++: ошибка
+        # здесь иначе завершит процесс через qFatal().
+        try:
+            self._commit_row_impl(row)
+        except Exception:
+            log.exception("Не удалось применить подсказку из списка")
+            try:
+                self.close()
+            except Exception:
+                pass
+
+    def _commit_row_impl(self, row):
         if self._popup is None:
             return
         index = self._popup.model.index(int(row), 0)

@@ -398,7 +398,9 @@ def show_sound_type_info():
 class SoundTypePicker(QFrame):
     """Свободный floating-picker для редактирования ячейки."""
 
-    selected = pyqtSignal(int)
+    # object, а не int: значения с верхним битом (0x80000000, оружие)
+    # не помещаются в знаковый C++ int и приходили бы отрицательными.
+    selected = pyqtSignal(object)
 
     def __init__(self, parent=None, current_value=None):
         super().__init__(

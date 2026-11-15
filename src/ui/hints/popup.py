@@ -7,6 +7,8 @@ Popup — дочерний виджет окна редактора. Он не �
 
 from __future__ import annotations
 
+import logging
+
 from PyQt5.QtCore import QAbstractListModel, QRect, QSize, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPixmap
 from PyQt5.QtWidgets import (
@@ -23,6 +25,8 @@ from ui.theme import PALETTE
 
 _ITEM_ROLE = Qt.UserRole + 1
 
+log = logging.getLogger(__name__)
+
 
 class HintListModel(QAbstractListModel):
     def __init__(self, parent=None):
@@ -32,23 +36,36 @@ class HintListModel(QAbstractListModel):
 
     def set_items(self, items, total=0):
         self.beginResetModel()
-        self._items = list(items)
-        self._total = int(total or len(self._items))
-        self.endResetModel()
+        try:
+            self._items = list(items)
+            self._total = int(total or len(self._items))
+        except Exception:
+            # Не оставляем модель в состоянии reset: иначе view
+            # продолжает работать с устаревшими индексами.
+            self._items = []
+            self._total = 0
+            log.exception("Не удалось обновить модель подсказок")
+        finally:
+            self.endResetModel()
 
     def rowCount(self, parent=None):
         return 0 if parent is not None and parent.isValid() else len(self._items)
 
     def data(self, index, role=Qt.DisplayRole):
-        if not index.isValid() or not (0 <= index.row() < len(self._items)):
-            return None
-        item = self._items[index.row()]
-        if role == Qt.DisplayRole:
-            return item.label
-        if role == Qt.ToolTipRole:
-            return item.description or item.label
-        if role == _ITEM_ROLE:
-            return item
+        try:
+            if not index.isValid() or not (
+                0 <= index.row() < len(self._items)
+            ):
+                return None
+            item = self._items[index.row()]
+            if role == Qt.DisplayRole:
+                return item.label
+            if role == Qt.ToolTipRole:
+                return item.description or item.label
+            if role == _ITEM_ROLE:
+                return item
+        except Exception:
+            log.exception("Не удалось получить данные подсказки")
         return None
 
     @property
@@ -80,13 +97,24 @@ class HintItemDelegate(QStyledItemDelegate):
         return pixmap
 
     def sizeHint(self, option, index):
-        item = index.data(_ITEM_ROLE)
+        try:
+            item = index.data(_ITEM_ROLE)
+        except Exception:
+            log.exception("Не удалось прочитать элемент подсказки")
+            return QSize(280, 22)
         if item is None:
             return QSize(280, 22)
         height = 34 if item.description else 23
         return QSize(320, height)
 
     def paint(self, painter, option, index):
+        # Отрисовка вызывается из C++: исключение здесь = qFatal().
+        try:
+            self._paint(painter, option, index)
+        except Exception:
+            log.exception("Не удалось нарисовать строку подсказки")
+
+    def _paint(self, painter, option, index):
         item = index.data(_ITEM_ROLE)
         if item is None:
             return

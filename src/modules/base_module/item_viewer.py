@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import re
 from pathlib import Path
 
@@ -37,6 +38,7 @@ from sdk.events import Events
 from PyQt5.QtCore import (
     QEvent,
     QMimeData,
+    QPersistentModelIndex,
     QPoint,
     QRect,
     QRectF,
@@ -108,6 +110,8 @@ KIND_ROLE = Qt.UserRole + 3
 _MISSING = object()
 _PENDING_FETCH = object()
 
+log = logging.getLogger(__name__)
+
 
 class KindListWidget(QListWidget):
     """Список kind, который не сбрасывает выбор по клику в пустоте."""
@@ -125,27 +129,35 @@ class ItemGalleryView(QListView):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._drag_start = None
+        # Индекс под курсором должен пережить пересборку модели
+        # (``set_catalog``/``clear``): обычный ``QModelIndex`` хранит
+        # указатель на внутренние данные модели и после сброса становится
+        # висячим — обращение к нему в mouseMoveEvent может уронить
+        # процесс в Qt. ``QPersistentModelIndex`` сам инвалидируется.
         self._drag_index = None
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self._drag_start = event.pos()
-            self._drag_index = self.indexAt(event.pos())
+            index = self.indexAt(event.pos())
+            self._drag_index = (
+                QPersistentModelIndex(index) if index.isValid() else None
+            )
         else:
             self._drag_start = None
             self._drag_index = None
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        index = self._drag_index
         if (
             self._drag_start is not None
-            and self._drag_index is not None
-            and self._drag_index.isValid()
+            and index is not None
+            and index.isValid()
             and event.buttons() & Qt.LeftButton
             and (event.pos() - self._drag_start).manhattanLength()
             >= QApplication.startDragDistance()
         ):
-            index = self._drag_index
             self._drag_start = None
             self._drag_index = None
             self._start_drag(index)
@@ -2728,7 +2740,12 @@ class LocalizedDescriptionEdit(QPlainTextEdit):
     def paintEvent(self, event):
         super().paintEvent(event)
         if self._editing:
-            self._paint_newline_markers()
+            # Исключение внутри paintEvent PyQt превращает в qFatal():
+            # призрачные метки — не повод ронять всё приложение.
+            try:
+                self._paint_newline_markers()
+            except Exception:
+                log.exception("Не удалось нарисовать маркеры переносов")
 
     def _paint_newline_markers(self):
         """Показать призрачные ``\\n`` в конце каждой строки редактора.

@@ -93,6 +93,22 @@ class SoundTypeCatalogTest(unittest.TestCase):
         finally:
             picker.close()
 
+    def test_picker_signal_keeps_weapon_values(self):
+        """0x8… не должен превращаться в отрицательный int32."""
+        picker = SoundTypePicker(current_value=0)
+        received = []
+        picker.selected.connect(received.append)
+        try:
+            row = next(
+                row
+                for row in range(picker.listing.count())
+                if picker.listing.item(row).data(Qt.UserRole) == 0x80200000
+            )
+            picker._choose(picker.listing.item(row))
+            self.assertEqual(received, [0x80200000])
+        finally:
+            picker.close()
+
     def test_picker_explains_non_basic_current_value(self):
         picker = SoundTypePicker(current_value=0x80000000)
         try:
