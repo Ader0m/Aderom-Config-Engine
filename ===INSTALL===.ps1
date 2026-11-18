@@ -1,7 +1,8 @@
 # Runs the numbered install scripts in the install folder in order (1, 2, 3).
 param(
     [string]$ProjectRoot = '',
-    [string]$InstallDir = ''
+    [string]$InstallDir = '',
+    [switch]$ForceVenv
 )
 
 $ErrorActionPreference = 'Stop'
@@ -110,7 +111,16 @@ try {
         foreach ($script in $scripts) {
             Write-Info "Running: $script"
 
-            & $psExe -NoProfile -ExecutionPolicy Bypass -File $script
+            # Only step 2 accepts this switch.
+            $scriptArgs = @()
+
+            if ($script -eq $scripts[1]) {
+                if ($ForceVenv) {
+                    $scriptArgs += '-ForceVenv'
+                }
+            }
+
+            & $psExe -NoProfile -ExecutionPolicy Bypass -File $script @scriptArgs
             $exitCode = $LASTEXITCODE
 
             if ($exitCode -ne 0) {

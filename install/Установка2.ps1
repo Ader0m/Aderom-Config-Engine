@@ -6,7 +6,6 @@ param(
     [string]$RequirementsFile,
     [string]$PythonExe,
     [switch]$ForceVenv,
-    [switch]$ForceInstallPython,
     [switch]$Uninstall
 )
 
@@ -33,6 +32,27 @@ function Write-Success {
 function Write-Warn {
     param([string]$Message)
     Write-Host $Message -ForegroundColor Yellow
+}
+
+function Read-YesNo {
+    param([string]$Prompt)
+
+    while ($true) {
+        $answer = Read-Host -Prompt $Prompt
+
+        if ($null -eq $answer) {
+            return $false
+        }
+
+        switch ($answer.Trim().ToLowerInvariant()) {
+            'y' { return $true }
+            'yes' { return $true }
+            'n' { return $false }
+            'no' { return $false }
+        }
+
+        Write-Warn "Please enter 'y' to continue or 'n' to cancel."
+    }
 }
 
 function Get-ProjectRoot {
@@ -316,8 +336,15 @@ try {
     if (-not $python) {
         $other310 = Get-Any310Version
 
-        if ($other310 -and -not (Test-PythonVersion -Version $other310) -and -not $ForceInstallPython) {
-            throw "Found Python $other310, but version $MinimumVersion or newer (3.10.x) is required. Run again with -ForceInstallPython to install Python $InstallerVersion."
+        if ($other310 -and -not (Test-PythonVersion -Version $other310)) {
+            Write-Warn "Found Python $other310, but version $MinimumVersion or newer (3.10.x) is required."
+            Write-Info "Update Python to $InstallerVersion now?"
+            Write-Info '  y - continue'
+            Write-Info '  n - cancel installation'
+
+            if (-not (Read-YesNo -Prompt 'Choice (y/n)')) {
+                throw 'Installation cancelled by user.'
+            }
         }
 
         Install-Python310
