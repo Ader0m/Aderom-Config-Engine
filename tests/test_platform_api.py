@@ -9,7 +9,7 @@ from tests.support import SRC  # noqa: F401
 from sdk import FileOpened, FileOpenFailed, ProjectSetting, ProjectSettingChoice
 from sdk.events import Events
 from ui.platform_api import PlatformApi, _path_key
-from app.projects import ProjectService
+from app.projects import PreviewItem, ProjectService
 
 
 class FakeEvents:
@@ -81,6 +81,12 @@ class FakeEditor:
             self.tab_busy.add(str(tab_id))
         else:
             self.tab_busy.discard(str(tab_id))
+
+    def open_paths(self):
+        return []
+
+    def resolved_tabs(self):
+        return []
 
     def clear_tab_busy(self):
         self.tab_busy.clear()
@@ -425,6 +431,33 @@ class ProjectVfsRestoreTest(unittest.TestCase):
             self.assertEqual((added, removed), (0, 1))
             self.assertNotIn(path, api._forest.files)
             self.assertEqual(api.services.resolver.invalidations, 2)
+
+
+class ProjectRollbackTest(unittest.TestCase):
+    def test_rollback_preview_item_removes_text_draft(self):
+        with tempfile.TemporaryDirectory() as d:
+            api = PlatformApi(FakeEvents(), FakeCommands(), None, None, None)
+            api.window = FakeWindow()
+            api.project = ProjectService(Path(d) / "projects")
+            api.project.create("Proj")
+
+            source = Path(d) / "gamedata" / "configs" / "a.ltx"
+            source.parent.mkdir(parents=True)
+            source.write_text("[a]\nx = 1\n", encoding="cp1251")
+            api.project.update_draft(source, "[a]\nx = 2\n")
+
+            item = PreviewItem(
+                title=source.name,
+                source_path=source,
+                plan=None,
+                generated=None,
+                rollback_paths=(source,),
+            )
+
+            self.assertTrue(api.rollback_preview_item(item))
+
+            self.assertIsNone(api.project.get_draft(source))
+            self.assertTrue(api._patch_preview_ready)
 
 
 class ResolvedDocumentPlatformTest(unittest.TestCase):

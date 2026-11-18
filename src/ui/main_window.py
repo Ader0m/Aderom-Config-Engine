@@ -203,6 +203,12 @@ class MainWindow(QMainWindow):
     def set_project_status(self, text):
         self.project_label.setText(str(text))
 
+    def set_patch_rebuild_label(self, rebuild):
+        """Переключить пункт меню между «Сформировать» и «Пересобрать»."""
+        self.project_patch_action.setText(
+            "Пересобрать патч..." if rebuild else "Сформировать патч..."
+        )
+
     def _update_project_menu(self):
         active = bool(self.api.is_project_active())
         self.project_settings_action.setVisible(active)

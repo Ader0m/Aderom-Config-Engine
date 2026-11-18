@@ -204,6 +204,18 @@ class PreviewItem:
     # DLTX-планы, которые несёт XML-форк: уровень проекта в режиме Root
     # объединяет их с планами того же корня.
     plans: Tuple[PatchPlan, ...] = ()
+    # Файл исключён из записи в патч-мод. Черновик и правки проекта при
+    # этом не меняются: исключение действует только на этот предпросмотр.
+    excluded: bool = False
+    # Что откатывает «Откатить изменения»: черновики этих путей и ключи
+    # resolved-черновиков. Для Root/XML-строк это объединённый набор
+    # всех файлов, из которых собрана строка.
+    rollback_paths: Tuple[Path, ...] = ()
+    rollback_resolved_ids: Tuple[str, ...] = ()
+
+    @property
+    def can_rollback(self) -> bool:
+        return bool(self.rollback_paths or self.rollback_resolved_ids)
 
     @property
     def is_patch(self) -> bool:
@@ -236,6 +248,11 @@ class ProjectPatchPreview:
             item for item in self.items
             if item.is_patch and item.ok
         )
+
+    @property
+    def included_items(self) -> Tuple[PreviewItem, ...]:
+        """Элементы, которые попадут в патч-мод (без исключённых)."""
+        return tuple(item for item in self.items if not item.excluded)
 
     @property
     def has_errors(self) -> bool:

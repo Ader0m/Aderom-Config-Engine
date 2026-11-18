@@ -1269,10 +1269,14 @@ class ProjectControllerMixin:
             5000,
         )
 
+        self._patch_preview_ready = True
+        self._apply_patch_action_label()
+
         dialog = ProjectPreviewDialog(
             preview,
             self.window,
             on_write=self.write_preview,
+            on_rollback=self.rollback_preview_item,
         )
         dialog.exec_()
 
@@ -1283,6 +1287,16 @@ class ProjectControllerMixin:
         if preview.project is not self.project.active:
             self.show_error(
                 "Активный проект изменился: патч не записан."
+            )
+            return False
+
+        included = [
+            item for item in preview.items
+            if item.is_patch and not item.excluded
+        ]
+        if not included:
+            self.show_error(
+                "Все файлы исключены из патча: записывать нечего."
             )
             return False
 
@@ -1307,6 +1321,8 @@ class ProjectControllerMixin:
 
         for item in preview.items:
             if not item.is_patch:
+                continue
+            if item.excluded:
                 continue
             if not item.ok:
                 skipped.append(item.title)
@@ -1343,21 +1359,97 @@ class ProjectControllerMixin:
         )
         self.log("Проект: записано файлов патча %d" % len(written))
 
-        if skipped:
-            QMessageBox.warning(
-                self.window,
-                "Проект",
-                "Записаны не все файлы. Пропущены:\n%s"
-                % "\n".join(skipped),
-            )
-        else:
-            QMessageBox.information(
-                self.window,
-                "Проект",
-                "Патч-мод создан:\n%s" % mod_dir,
+        excluded_count = sum(
+            1 for item in preview.items
+            if item.is_patch and item.excluded
+        )
+        if excluded_count:
+            self.log(
+                "Проект: исключено из патча файлов %d" % excluded_count
             )
 
+        if skipped:
+            text = (
+                "Записаны не все файлы. Пропущены:\n%s"
+                % "\n".join(skipped)
+            )
+            if excluded_count:
+                text += "\n\nИсключено из патча: %d." % excluded_count
+            QMessageBox.warning(self.window, "Проект", text)
+        else:
+            text = "Патч-мод создан:\n%s" % mod_dir
+            if excluded_count:
+                text += "\n\nИсключено из патча: %d." % excluded_count
+            QMessageBox.information(self.window, "Проект", text)
+
         return True
+
+    def rollback_preview_item(self, item):
+        """Удалить черновики файлов, из которых собран пункт патча."""
+        if not self.project.is_active:
+            self.show_error("Проект не активен: откат невозможен.")
+            return False
+
+        paths = [Path(path) for path in item.rollback_paths]
+        resolved_ids = [str(key) for key in item.rollback_resolved_ids]
+        removed_paths = []
+        removed_resolved = []
+        invalidate_paths = list(paths)
+
+        try:
+            for path in paths:
+                if self.project.remove_draft(path):
+                    removed_paths.append(path)
+                    continue
+                if self.project.remove_asset_draft(path):
+                    removed_paths.append(path)
+            for key in resolved_ids:
+                draft = self.project.get_resolved_draft(key)
+                if draft is not None and draft.root_path is not None:
+                    invalidate_paths.append(Path(draft.root_path))
+                if self.project.remove_resolved_draft(key):
+                    removed_resolved.append(key)
+        except ProjectError as exc:
+            self.show_error("Не удалось откатить изменения:\n%s" % exc)
+            return False
+
+        if not removed_paths and not removed_resolved:
+            self.show_error(
+                "Не удалось откатить изменения: черновик уже отсутствует."
+            )
+            return False
+
+        try:
+            self.refresh_workspace()
+        except Exception as exc:
+            self.log(
+                "Проект: не удалось обновить VFS после отката: %s" % exc
+            )
+        try:
+            self._invalidate_paths(invalidate_paths)
+        except Exception as exc:
+            self.log(
+                "Проект: не удалось сбросить кэш после отката: %s" % exc
+            )
+        try:
+            self._reload_open_documents()
+        except Exception:
+            logger.exception("Не удалось обновить документы после отката")
+
+        self._update_project_status()
+        name = Path(item.source_path).name or item.title
+        self.log("Проект: изменения отменены: %s" % name)
+        self.set_status("Изменения отменены: %s" % name, 5000)
+        self._patch_preview_ready = True
+        self._apply_patch_action_label()
+        return True
+
+    def _apply_patch_action_label(self):
+        if self.window is None:
+            return
+        setter = getattr(self.window, "set_patch_rebuild_label", None)
+        if callable(setter):
+            setter(bool(getattr(self, "_patch_preview_ready", False)))
 
     def _update_project_status(self):
         if self.window is None:

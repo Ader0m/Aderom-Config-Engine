@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Optional
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFontDatabase
+from PyQt5.QtGui import QBrush, QColor, QFontDatabase
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -22,6 +23,8 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSplitter,
@@ -516,10 +519,12 @@ class ProjectPreviewDialog(QDialog):
         preview: ProjectPatchPreview,
         parent=None,
         on_write: Optional[Callable] = None,
+        on_rollback: Optional[Callable] = None,
     ):
         super().__init__(parent)
         self.preview = preview
         self._on_write = on_write
+        self._on_rollback = on_rollback
 
         self.setWindowTitle("Предпросмотр патча — %s" % preview.project.name)
         self.resize(1100, 720)
@@ -539,32 +544,26 @@ class ProjectPreviewDialog(QDialog):
             preview.project.xml_patch_mode,
             preview.project.xml_patch_mode,
         )
-        header = QLabel(
-            "Проект: %s. DLTX: %s. DXML: %s. Файлов к патчу: %d. "
-            "Успешно: %d."
-            % (
-                preview.project.name,
-                mode,
-                xml_mode,
-                len(preview.items),
-                len(preview.ok_items),
-            )
-        )
-        layout.addWidget(header)
+        self._mode_text = mode
+        self._xml_mode_text = xml_mode
+        self._header = QLabel()
+        layout.addWidget(self._header)
 
         splitter = QSplitter(Qt.Horizontal)
 
         self.list = QListWidget()
         self.list.setMinimumWidth(280)
         for item in preview.items:
-            status = "OK" if item.ok else "ОШИБКА"
-            entry = QListWidgetItem(
-                "%s  [%s]" % (item.title, status)
-            )
+            entry = QListWidgetItem()
             entry.setData(Qt.UserRole, item)
-            entry.setToolTip(str(item.source_path))
+            self._apply_entry_style(entry, item)
             self.list.addItem(entry)
         self.list.currentRowChanged.connect(self._show_item)
+        self.list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list.customContextMenuRequested.connect(
+            self._list_context_menu
+        )
+        self._update_header()
         splitter.addWidget(self.list)
 
         right = QWidget()
@@ -607,8 +606,8 @@ class ProjectPreviewDialog(QDialog):
         buttons.addStretch(1)
 
         self.write_button = QPushButton("Записать в патч-мод...")
-        self.write_button.setEnabled(bool(preview.ok_items) and on_write is not None)
         self.write_button.clicked.connect(self._write)
+        self._refresh_write_button()
         buttons.addWidget(self.write_button)
 
         close_button = QPushButton("Закрыть")
@@ -619,6 +618,177 @@ class ProjectPreviewDialog(QDialog):
 
         if self.list.count():
             self.list.setCurrentRow(0)
+
+    def _entry_text(self, item) -> str:
+        status = "OK" if item.ok else "ОШИБКА"
+        text = "%s  [%s]" % (item.title, status)
+        if item.excluded:
+            text += "  [не включён]"
+        return text
+
+    def _apply_entry_style(self, entry, item):
+        entry.setText(self._entry_text(item))
+        tooltip = str(item.source_path)
+        if item.excluded:
+            tooltip += "\nНе будет добавлен в патч-мод"
+        entry.setToolTip(tooltip)
+        if PALETTE is not None and item.excluded:
+            entry.setForeground(QBrush(QColor(PALETTE.text_disabled)))
+        else:
+            entry.setForeground(QBrush())
+
+    def _selector_items(self):
+        return tuple(
+            self.list.item(row).data(Qt.UserRole)
+            for row in range(self.list.count())
+            if self.list.item(row).data(Qt.UserRole) is not None
+        )
+
+    def _update_header(self):
+        items = self._selector_items()
+        included = [item for item in items if not item.excluded]
+        ok_included = [
+            item for item in included if item.is_patch and item.ok
+        ]
+        excluded = sum(1 for item in items if item.excluded)
+        text = (
+            "Проект: %s. DLTX: %s. DXML: %s. Файлов к патчу: %d. "
+            "Успешно: %d."
+            % (
+                self.preview.project.name,
+                self._mode_text,
+                self._xml_mode_text,
+                len(included),
+                len(ok_included),
+            )
+        )
+        if excluded:
+            text += " Исключено: %d." % excluded
+        self._header.setText(text)
+
+    def _refresh_write_button(self):
+        has_ok = any(
+            item.is_patch and item.ok and not item.excluded
+            for item in self._selector_items()
+        )
+        self.write_button.setEnabled(
+            has_ok and self._on_write is not None
+        )
+
+    def _list_context_menu(self, pos):
+        entry = self.list.itemAt(pos)
+        if entry is None:
+            return
+        item = entry.data(Qt.UserRole)
+        if item is None:
+            return
+        can_toggle = bool(item.is_patch)
+        can_rollback = bool(item.can_rollback) and self._on_rollback is not None
+        if not can_toggle and not can_rollback:
+            return
+        self.list.setCurrentItem(entry)
+
+        menu = QMenu(self.list)
+        if can_rollback:
+            rollback = menu.addAction("Откатить изменения")
+            rollback.triggered.connect(
+                lambda _checked=False, entry=entry: self._rollback_entry(entry)
+            )
+            if can_toggle:
+                menu.addSeparator()
+        if can_toggle:
+            if item.excluded:
+                action = menu.addAction("Включить файл в патч")
+            else:
+                action = menu.addAction("Не включать файл в патч")
+            action.triggered.connect(
+                lambda _checked=False, entry=entry: self._toggle_excluded(entry)
+            )
+        menu.exec_(self.list.viewport().mapToGlobal(pos))
+
+    def _toggle_excluded(self, entry):
+        item = entry.data(Qt.UserRole)
+        if item is None or not item.is_patch:
+            return
+        updated = replace(item, excluded=not item.excluded)
+        entry.setData(Qt.UserRole, updated)
+        self._apply_entry_style(entry, updated)
+        self._update_header()
+        self._refresh_write_button()
+        if self.list.currentItem() is entry:
+            self._show_item(self.list.row(entry))
+
+    def _rollback_targets(self, item):
+        paths = {
+            str(Path(path)).lower()
+            for path in getattr(item, "rollback_paths", ())
+        }
+        resolved = {
+            str(key)
+            for key in getattr(item, "rollback_resolved_ids", ())
+        }
+        return paths, resolved
+
+    def _rollback_name(self, item) -> str:
+        if item.kind == "root":
+            return item.title
+        name = Path(item.source_path).name
+        return name or item.title
+
+    def _rollback_entry(self, entry):
+        item = entry.data(Qt.UserRole)
+        if (
+            item is None
+            or not item.can_rollback
+            or self._on_rollback is None
+        ):
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Откат изменений",
+            "Вы уверены, что хотите потерять все изменения в файле %s?"
+            % self._rollback_name(item),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        try:
+            ok = bool(self._on_rollback(item))
+        except Exception:
+            ok = False
+        if not ok:
+            return
+
+        removed_paths, removed_resolved = self._rollback_targets(item)
+        rows = []
+        for row in range(self.list.count()):
+            other = self.list.item(row)
+            if other is entry:
+                rows.append(row)
+                continue
+            paths, resolved = self._rollback_targets(
+                other.data(Qt.UserRole)
+            )
+            if paths & removed_paths or resolved & removed_resolved:
+                rows.append(row)
+
+        self.list.blockSignals(True)
+        try:
+            for row in reversed(rows):
+                self.list.takeItem(row)
+        finally:
+            self.list.blockSignals(False)
+
+        self._update_header()
+        self._refresh_write_button()
+        if self.list.count():
+            self.list.setCurrentRow(0)
+        else:
+            self.details.clear()
+            self.patch_text.clear()
 
     def _show_item(self, row):
         if row < 0:
@@ -644,6 +814,12 @@ class ProjectPreviewDialog(QDialog):
                 len(item.plan.changes) if item.plan is not None else 0
             ),
         ]
+
+        if item.excluded:
+            lines.append(
+                "Файл исключён из патча: в патч-мод не попадёт. "
+                "Правки проекта и сам файл не затрагиваются."
+            )
 
         if item.notes:
             lines.append("Изменённые строки и победители:")
@@ -697,5 +873,9 @@ class ProjectPreviewDialog(QDialog):
     def _write(self):
         if self._on_write is None:
             return
-        if self._on_write(self.preview):
+        updated = replace(
+            self.preview,
+            items=self._selector_items(),
+        )
+        if self._on_write(updated):
             self.accept()

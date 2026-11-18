@@ -295,6 +295,10 @@ class ProjectServiceTest(unittest.TestCase):
             self.assertEqual(preview.patch_count, 1)
             self.assertTrue(preview.items[0].ok)
             self.assertIn("cost = 150", preview.items[0].generated.text)
+            # В режиме Root строка объединяет файлы корня: откат должен
+            # знать черновик исходного файла.
+            self.assertEqual(preview.items[0].kind, "root")
+            self.assertIn(source, preview.items[0].rollback_paths)
 
     def test_build_preview_for_multiline_resolved_edit(self):
         with tempfile.TemporaryDirectory() as d:

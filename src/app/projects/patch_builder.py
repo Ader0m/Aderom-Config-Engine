@@ -36,6 +36,7 @@ from .models import (
     ProjectError,
     ProjectPatchPreview,
     ProjectResolvedDraft,
+    resolved_key,
 )
 from .readers import FileReaderError
 
@@ -267,6 +268,7 @@ class ProjectPreviewMixin:
                 error=str(exc),
                 kind="asset",
                 draft=None,
+                rollback_paths=(Path(draft.path),),
             )
 
         patch_rel = Path("gamedata") / relative
@@ -346,6 +348,7 @@ class ProjectPreviewMixin:
             text=view_text or (
                 "Двоичный файл: %d байт" % len(draft.current_bytes)
             ),
+            rollback_paths=(Path(draft.path),),
         )
 
     def _new_file_preview(self, project, forest, draft, title):
@@ -363,6 +366,7 @@ class ProjectPreviewMixin:
                 error=str(exc),
                 kind="new_file",
                 draft=draft,
+                rollback_paths=(Path(draft.path),),
             )
 
         suffix = Path(draft.path).suffix.lower()
@@ -375,6 +379,7 @@ class ProjectPreviewMixin:
                 error="Новый файл должен быть .ltx или .xml",
                 kind="new_file",
                 draft=draft,
+                rollback_paths=(Path(draft.path),),
             )
 
         if not str(draft.current_text or "").strip():
@@ -386,6 +391,7 @@ class ProjectPreviewMixin:
                 error="Содержимое нового файла пустое",
                 kind="new_file",
                 draft=draft,
+                rollback_paths=(Path(draft.path),),
             )
 
         plan = PatchPlan(
@@ -437,6 +443,7 @@ class ProjectPreviewMixin:
                 % (Path("gamedata") / "configs" / relative_path),
             ),
             text=str(draft.current_text),
+            rollback_paths=(Path(draft.path),),
         )
 
     def _build_preview_per_file(
@@ -531,6 +538,16 @@ class ProjectPreviewMixin:
         ):
             output = items if output is None else output
 
+            rollback_paths = (
+                (Path(draft.path),) if draft is not None else ()
+            )
+            rollback_resolved_ids = ()
+            if resolved is not None:
+                rollback_resolved_ids = (
+                    resolved.tab_id
+                    or resolved_key("", resolved.root_path),
+                )
+
             if log:
                 log("Проект: подготовка %s" % title)
 
@@ -561,6 +578,8 @@ class ProjectPreviewMixin:
                         draft=draft,
                         resolved=resolved,
                         notes=(),
+                        rollback_paths=rollback_paths,
+                        rollback_resolved_ids=rollback_resolved_ids,
                     )
                 )
                 return
@@ -601,6 +620,8 @@ class ProjectPreviewMixin:
                             draft=draft,
                             resolved=resolved,
                             notes=notes,
+                            rollback_paths=rollback_paths,
+                            rollback_resolved_ids=rollback_resolved_ids,
                         )
                     )
                     return
@@ -617,6 +638,8 @@ class ProjectPreviewMixin:
                             draft=draft,
                             resolved=resolved,
                             notes=notes,
+                            rollback_paths=rollback_paths,
+                            rollback_resolved_ids=rollback_resolved_ids,
                         )
                     )
                     return
@@ -731,6 +754,8 @@ class ProjectPreviewMixin:
                         resolved=resolved,
                         notes=notes,
                         plans=tuple(getattr(result, "plans", ()) or ()),
+                        rollback_paths=rollback_paths,
+                        rollback_resolved_ids=rollback_resolved_ids,
                     )
                 )
 
@@ -770,6 +795,8 @@ class ProjectPreviewMixin:
                         draft=draft,
                         resolved=resolved,
                         notes=notes,
+                        rollback_paths=rollback_paths,
+                        rollback_resolved_ids=rollback_resolved_ids,
                     )
                 )
 
@@ -862,6 +889,8 @@ class ProjectPreviewMixin:
         # предпросмотра создадут один и тот же файл.
         extra_plans = {}
         extra_notes = {}
+        extra_rollback_paths = {}
+        extra_rollback_resolved = {}
 
         for item in base.items:
             if (
@@ -889,6 +918,14 @@ class ProjectPreviewMixin:
                     root_key = str(Path(plan.target.root_path)).lower()
                     extra_plans.setdefault(root_key, []).append(plan)
                     extra_notes.setdefault(root_key, []).extend(item.notes)
+                    extra_rollback_paths.setdefault(
+                        root_key,
+                        [],
+                    ).extend(item.rollback_paths)
+                    extra_rollback_resolved.setdefault(
+                        root_key,
+                        [],
+                    ).extend(item.rollback_resolved_ids)
                 continue
 
             key = str(item.plan.target.root_path).lower()
@@ -920,6 +957,22 @@ class ProjectPreviewMixin:
             for note in extra_notes.get(key, ()):
                 if note not in notes:
                     notes.append(note)
+
+            rollback_paths = []
+            rollback_resolved_ids = []
+            for member in group:
+                rollback_paths.extend(member.rollback_paths)
+                rollback_resolved_ids.extend(
+                    member.rollback_resolved_ids
+                )
+            rollback_paths.extend(extra_rollback_paths.get(key, ()))
+            rollback_resolved_ids.extend(
+                extra_rollback_resolved.get(key, ())
+            )
+            rollback_paths = tuple(dict.fromkeys(rollback_paths))
+            rollback_resolved_ids = tuple(
+                dict.fromkeys(rollback_resolved_ids)
+            )
 
             try:
                 if is_xml:
@@ -955,6 +1008,8 @@ class ProjectPreviewMixin:
                         error="" if merged.can_generate else "План содержит ошибки",
                         kind="root",
                         notes=tuple(notes),
+                        rollback_paths=rollback_paths,
+                        rollback_resolved_ids=rollback_resolved_ids,
                     )
                 )
             except Exception as exc:
@@ -967,6 +1022,8 @@ class ProjectPreviewMixin:
                         error=str(exc),
                         kind="root",
                         notes=tuple(notes),
+                        rollback_paths=rollback_paths,
+                        rollback_resolved_ids=rollback_resolved_ids,
                     )
                 )
 

@@ -76,6 +76,9 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         # Корни, которые нужно пересобрать после последней точечной
         # инвалидации. ``None`` — сборка всего леса.
         self._project_prebuild_roots = None
+        # Был ли уже построен предпросмотр патча для активного проекта:
+        # после него пункт меню называется «Пересобрать патч».
+        self._patch_preview_ready = False
         # На старте действует обычная тема. ``False`` (а не ``None``)
         # избавляет первую правку от повторной установки stylesheet.
         self._override_theme_enabled = False

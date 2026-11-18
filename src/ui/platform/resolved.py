@@ -55,6 +55,10 @@ class ResolvedDocumentMixin:
             document.unbind_view()
         self._resolved_documents.clear()
         self._pending_file_actions.clear()
+        self._patch_preview_ready = False
+        apply_label = getattr(self, "_apply_patch_action_label", None)
+        if callable(apply_label):
+            apply_label()
 
     def _cancel_resolved_edits(self):
         queues = getattr(self, "_resolved_edit_queues", {})
