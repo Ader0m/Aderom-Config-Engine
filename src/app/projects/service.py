@@ -119,6 +119,9 @@ class ProjectService(ProjectPreviewMixin):
     RESOLVED_DIR = "resolved"
     ASSETS_DIR = "assets"
     ROOTS_NAME = "project_roots.json"
+    # Сессия редактора: какие вкладки были открыты при прошлом закрытии.
+    TABS_NAME = "tabs.json"
+    TABS_VERSION = 1
 
     PREVIEW_CACHE_SIZE = 128
     # Кэш предпросмотра ограничен и по объёму: GeneratedPatch хранит
@@ -618,6 +621,99 @@ class ProjectService(ProjectPreviewMixin):
         self.invalidate_preview_cache()
         self._write_meta(project)
         return value
+
+    # -------------------------------------------------- сессия вкладок
+    def _tabs_path(self, project=None) -> Path:
+        project = self._require_active() if project is None else project
+        return Path(project.root_dir) / self.TABS_NAME
+
+    @staticmethod
+    def _normalize_tab_record(record):
+        """Привести запись вкладки к безопасному виду для JSON."""
+        if not isinstance(record, dict):
+            return None
+
+        tab_id = str(record.get("tab_id") or "").strip()
+        if not tab_id:
+            return None
+
+        kind = str(record.get("kind") or "module").strip().lower()
+        if kind not in ("editor", "resolved", "module"):
+            kind = "module"
+
+        source_path = record.get("source_path")
+        source_path = str(source_path) if source_path else None
+
+        state = {}
+        raw_state = record.get("state")
+        if isinstance(raw_state, dict):
+            for key, value in raw_state.items():
+                if value is None or isinstance(
+                    value,
+                    (str, bool, int, float),
+                ):
+                    state[str(key)[:64]] = value
+
+        return {
+            "tab_id": tab_id[:512],
+            "title": str(record.get("title") or tab_id)[:512],
+            "kind": kind,
+            "owner": str(record.get("owner") or "")[:128],
+            "source_path": source_path,
+            "state": state,
+            "active": bool(record.get("active")),
+        }
+
+    def save_tabs(self, tabs) -> bool:
+        """Сохранить список открытых вкладок активного проекта."""
+        project = self._require_active()
+        records = []
+        for record in tabs or ():
+            normalized = self._normalize_tab_record(record)
+            if normalized is not None:
+                records.append(normalized)
+
+        payload = {
+            "version": self.TABS_VERSION,
+            "tabs": records,
+        }
+        with self._write_lock:
+            self._write_json_atomic(self._tabs_path(project), payload)
+        return True
+
+    def load_tabs(self) -> List[dict]:
+        """Прочитать сохранённые вкладки активного проекта."""
+        with self._state_lock:
+            if self.active is None:
+                return []
+            path = self._tabs_path(self.active)
+
+        if not path.is_file():
+            return []
+
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            log.warning(
+                "Проект: не удалось прочитать вкладки %s: %s",
+                path,
+                exc,
+            )
+            return []
+
+        if isinstance(data, dict):
+            values = data.get("tabs") or ()
+        elif isinstance(data, list):
+            values = data
+        else:
+            values = ()
+
+        result = []
+        for record in values:
+            normalized = self._normalize_tab_record(record)
+            if normalized is not None:
+                result.append(normalized)
+        return result
 
     def delete_active_project(self) -> bool:
         """Удалить активный проект со всеми черновиками.

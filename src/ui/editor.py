@@ -594,6 +594,14 @@ class CodeEditor(QWidget):
             return False
         return True
 
+    def session_state(self):
+        """Состояние вкладки для восстановления в новом сеансе."""
+        return {
+            "label": self.file_label.text(),
+            "readonly": bool(self._readonly_content),
+            "notice": self.notice_label.text(),
+        }
+
     def _flush_content(self):
         if self._pending_content is None:
             return False

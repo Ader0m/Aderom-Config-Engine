@@ -6,7 +6,13 @@ from pathlib import Path
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QIcon, QPainter, QPalette, QPen, QPixmap
-from PyQt5.QtWidgets import QMenu, QTabWidget, QWidget
+from PyQt5.QtWidgets import (
+    QLabel,
+    QMenu,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from sdk.api import FileOpened
 from sdk.events import Events
@@ -16,6 +22,22 @@ from .editor import CodeEditor
 
 log = logging.getLogger(__name__)
 DEFAULT_TAB_ID = "ui.editor"
+MISSING_OWNER_MESSAGE = "Не обнаружен плагин-владелец вкладки"
+
+
+class MissingOwnerTab(QWidget):
+    """Заглушка для вкладки, которую больше не может открыть её модуль."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        self.label = QLabel(MISSING_OWNER_MESSAGE)
+        self.label.setAlignment(Qt.AlignCenter)
+        self.label.setWordWrap(True)
+        layout.addWidget(self.label)
 
 
 class EditorTabs(QTabWidget):
@@ -260,6 +282,109 @@ class EditorTabs(QTabWidget):
             ):
                 result.append((tab_id, widget))
         return result
+
+    def session_tabs(self):
+        """Снимок открытых вкладок для сохранения в активном проекте.
+
+        Сохраняются именно вкладки, а не только файлы: модуль может
+        открыть вкладку, у которой нет файла-источника. Порядок записей
+        совпадает с порядком вкладок; активная помечается флагом.
+        """
+        current_id = self.current_tab_id
+        records = []
+        for index in range(self.count()):
+            widget = self.widget(index)
+            tab_id = self._tab_id_for_widget(widget)
+            if tab_id is None:
+                continue
+
+            title = self.tabText(index)
+            if title.startswith("* "):
+                title = title[2:]
+
+            source_path = self._tab_source_paths.get(tab_id)
+            if source_path is None:
+                source_path = getattr(widget, "current_file", None)
+            if source_path is None:
+                source_path = getattr(widget, "root_path", None)
+
+            state = {}
+            snapshot = getattr(widget, "session_state", None)
+            if callable(snapshot):
+                try:
+                    value = snapshot()
+                except Exception:
+                    log.exception(
+                        "Не удалось сохранить состояние вкладки %s",
+                        tab_id,
+                    )
+                else:
+                    if isinstance(value, dict):
+                        state = value
+
+            records.append(
+                {
+                    "tab_id": str(tab_id),
+                    "title": title,
+                    "kind": self._tab_kind(widget),
+                    "owner": _tab_owner(tab_id),
+                    "source_path": (
+                        str(source_path)
+                        if source_path is not None
+                        else None
+                    ),
+                    "state": state,
+                    "active": str(tab_id) == str(current_id),
+                }
+            )
+        return records
+
+    @staticmethod
+    def _tab_kind(widget):
+        if isinstance(widget, CodeEditor):
+            return "editor"
+        if hasattr(widget, "root_path") and hasattr(
+            widget,
+            "line_sources",
+        ):
+            return "resolved"
+        return "module"
+
+    def ensure_default_tab(self):
+        """Вернуть базовую вкладку редактора, создав её при необходимости."""
+        return self._ensure_default_tab()
+
+    def set_current_tab(self, tab_id):
+        """Сделать текущей вкладку по id. Возвращает ``True`` при успехе."""
+        widget = self._tab_ids.get(str(tab_id or ""))
+        if widget is None:
+            return False
+        self.setCurrentWidget(widget)
+        return True
+
+    def set_tab_title(self, tab_id, title, tooltip=None):
+        """Установить заголовок (и подсказку) вкладки по id."""
+        widget = self._tab_ids.get(str(tab_id or ""))
+        if widget is None:
+            return False
+        index = self.indexOf(widget)
+        if index < 0:
+            return False
+        self.setTabText(index, str(title))
+        if tooltip is not None:
+            self.setTabToolTip(index, str(tooltip))
+        return True
+
+    def close_all_tabs(self):
+        """Закрыть все вкладки, включая базовую."""
+        self._close_tabs_by_indices(range(self.count()))
+        return self.count() == 0
+
+    def open_missing_owner_tab(self, tab_id, title):
+        """Открыть заглушку вкладки, чей плагин-владелец не найден."""
+        widget = MissingOwnerTab()
+        self.open_tab(tab_id, str(title or tab_id), widget)
+        return widget
 
     # -------------------------------------------------- вкладки модулей
     def open_tab(self, tab_id, title, widget, source_path=None):
@@ -557,6 +682,12 @@ class EditorTabs(QTabWidget):
                 Events.FILE_OPENED,
                 FileOpened(path=Path(path), tab_id=str(tab_id or "")),
             )
+
+
+def _tab_owner(tab_id):
+    """Модуль-владелец по префиксу id вкладки (``ogg_editor.xxx``)."""
+    value = str(tab_id or "").split(":", 1)[0]
+    return value.split(".", 1)[0] if "." in value else ""
 
 
 def _short_title(text, limit=40):

@@ -888,6 +888,184 @@ class ProjectControllerMixin:
     def _end_project_activation(self):
         self._set_project_loading(False)
 
+    # -------------------------------------------------- сессия вкладок
+    def _editor_widget(self):
+        if self.window is None:
+            return None
+        return getattr(self.window, "editor", None)
+
+    def _save_open_tabs(self):
+        """Сохранить открытые вкладки в каталог активного проекта."""
+        if not self.project.is_active:
+            return False
+        editor = self._editor_widget()
+        collector = getattr(editor, "session_tabs", None)
+        saver = getattr(self.project, "save_tabs", None)
+        if not callable(collector) or not callable(saver):
+            return False
+
+        try:
+            saver(collector())
+        except Exception:
+            logger.exception("Не удалось сохранить открытые вкладки")
+            self.log("Проект: не удалось сохранить открытые вкладки")
+            return False
+        return True
+
+    def _reset_editor_tabs(self):
+        """Закрыть вкладки прошлого проекта перед восстановлением новых."""
+        editor = self._editor_widget()
+        closer = getattr(editor, "close_all_tabs", None)
+        if not callable(closer):
+            return False
+        try:
+            closer()
+        except Exception:
+            logger.exception("Не удалось закрыть вкладки прошлого проекта")
+            return False
+        return True
+
+    def _restore_editor_tabs(self):
+        """Восстановить вкладки, сохранённые в активном проекте."""
+        editor = self._editor_widget()
+        if editor is None:
+            return
+
+        loader = getattr(self.project, "load_tabs", None)
+        try:
+            records = loader() if callable(loader) else []
+        except Exception:
+            logger.exception("Не удалось прочитать вкладки проекта")
+            records = []
+
+        if not records:
+            ensure = getattr(editor, "ensure_default_tab", None)
+            if callable(ensure):
+                ensure()
+            return
+
+        active_id = None
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            tab_id = str(record.get("tab_id") or "")
+            if not tab_id:
+                continue
+
+            try:
+                self._restore_editor_tab(record)
+            except Exception:
+                logger.exception(
+                    "Не удалось восстановить вкладку %s",
+                    tab_id,
+                )
+                self._open_missing_owner_tab(
+                    tab_id,
+                    record.get("title") or tab_id,
+                )
+
+            if record.get("active"):
+                active_id = tab_id
+
+        if active_id:
+            select = getattr(editor, "set_current_tab", None)
+            if callable(select):
+                select(active_id)
+
+    def _restore_editor_tab(self, record):
+        kind = str(record.get("kind") or "module").lower()
+        if kind == "editor":
+            self._restore_file_tab(record)
+        elif kind == "resolved":
+            self._restore_resolved_tab(record)
+        else:
+            self._restore_module_tab(record)
+
+    def _restore_file_tab(self, record):
+        editor = self._editor_widget()
+        if editor is None:
+            return
+
+        source_path = record.get("source_path")
+        title = str(record.get("title") or "")
+        state = record.get("state")
+        if not isinstance(state, dict):
+            state = {}
+
+        if source_path:
+            text = self.document_text(source_path)
+            label = str(state.get("label") or title or source_path)
+            shower = getattr(editor, "show_text", None)
+            if callable(shower):
+                shower(
+                    text,
+                    label,
+                    readonly=bool(state.get("readonly", False)),
+                    source_path=source_path,
+                    notice=state.get("notice") or None,
+                )
+            else:
+                opener = getattr(editor, "open_file", None)
+                if callable(opener):
+                    opener(source_path, text=text)
+        else:
+            ensure = getattr(editor, "ensure_default_tab", None)
+            if callable(ensure):
+                ensure()
+
+        if title:
+            setter = getattr(editor, "set_tab_title", None)
+            if callable(setter):
+                setter(record.get("tab_id"), title)
+
+    def _restore_resolved_tab(self, record):
+        editor = self._editor_widget()
+        tab_id = str(record.get("tab_id") or "")
+
+        if self.project.is_active:
+            draft = self.project.get_resolved_draft(tab_id)
+            if draft is not None:
+                opener = getattr(self, "open_resolved_document", None)
+                if callable(opener) and opener(tab_id):
+                    self._restore_tab_title(editor, record)
+                    return True
+
+        source_path = record.get("source_path")
+        if source_path:
+            # Текст resolved-вкладки не хранится отдельно: при отсутствии
+            # черновика собираем его заново штатным обработчиком файла.
+            self.request_open_file(source_path)
+            self._restore_tab_title(editor, record)
+            return True
+
+        return False
+
+    def _restore_module_tab(self, record):
+        editor = self._editor_widget()
+        tab_id = str(record.get("tab_id") or "")
+        title = str(record.get("title") or tab_id)
+
+        requested = bool(self.request_tab(tab_id))
+        has_tab = getattr(editor, "has_tab", None)
+        opened = bool(callable(has_tab) and has_tab(tab_id))
+        if requested or opened:
+            self._restore_tab_title(editor, record)
+            return
+
+        self._open_missing_owner_tab(tab_id, title)
+
+    def _restore_tab_title(self, editor, record):
+        setter = getattr(editor, "set_tab_title", None)
+        title = record.get("title")
+        if callable(setter) and title:
+            setter(record.get("tab_id"), str(title))
+
+    def _open_missing_owner_tab(self, tab_id, title):
+        editor = self._editor_widget()
+        opener = getattr(editor, "open_missing_owner_tab", None)
+        if callable(opener):
+            opener(tab_id, title)
+
     def _activate_project_state(self, project, message):
         """Привести VFS и вкладки к состоянию активированного проекта.
 
@@ -900,6 +1078,9 @@ class ProjectControllerMixin:
         # Сначала освобождаем старые живые документы, затем заново
         # привязываем открытые вкладки к черновикам нового проекта.
         self.events.publish(Events.PROJECT_CHANGED, project)
+        # Вкладки принадлежат конкретному проекту: старые закрываем,
+        # сохранённые в проекте — восстанавливаем ниже.
+        self._reset_editor_tabs()
         try:
             self._reload_open_documents()
         except Exception:
@@ -909,6 +1090,7 @@ class ProjectControllerMixin:
                 "(crash.log)"
             )
         self._start_project_prebuild()
+        self._restore_editor_tabs()
         self.log(message)
         self.set_status(message, 5000)
 
@@ -934,6 +1116,7 @@ class ProjectControllerMixin:
         name = dialog.project_name()
         project_dir = dialog.project_directory() or None
 
+        self._save_open_tabs()
         self._begin_project_activation()
         try:
             try:
@@ -979,6 +1162,7 @@ class ProjectControllerMixin:
         if not project_id:
             return
 
+        self._save_open_tabs()
         self._begin_project_activation()
         try:
             try:
@@ -1007,6 +1191,11 @@ class ProjectControllerMixin:
             self._invalidate_resolver_cache()
             self._update_project_status()
             self.events.publish(Events.PROJECT_CHANGED, None)
+            self._reset_editor_tabs()
+            editor = self._editor_widget()
+            ensure = getattr(editor, "ensure_default_tab", None)
+            if callable(ensure):
+                ensure()
             self.log("Проект удалён")
             self.set_status("Проект удалён", 5000)
             return True
@@ -1227,6 +1416,7 @@ class ProjectControllerMixin:
         if not self.project.is_active:
             return
         self._flush_editor_pending()
+        self._save_open_tabs()
         try:
             self.project.flush()
         except Exception as exc:
