@@ -279,11 +279,37 @@ class HintPopup(QFrame):
         self.hide()
 
     # -------------------------------------------------- данные
+    @staticmethod
+    def _items_signature(items):
+        """Только видимые поля: payload не должен влиять на перерисовку."""
+        return tuple(
+            (
+                str(getattr(item, "label", "")),
+                str(getattr(item, "insert_text", "")),
+                str(getattr(item, "description", "")),
+                str(getattr(item, "detail", "")),
+                str(getattr(item, "kind", "")),
+                getattr(item, "swatch", None),
+            )
+            for item in items
+        )
+
     def set_items(self, items, total=0):
         items = list(items)
-        self.model.set_items(items, total)
-        self.view.setCurrentIndex(self.model.index(0, 0))
         total = int(total or len(items))
+
+        # Сброс модели — тяжёлая и потенциально опасная операция для
+        # QListView, поэтому не делаем её, если список не изменился.
+        same_items = (
+            self._items_signature(self.model.items)
+            == self._items_signature(items)
+        )
+        if not same_items or self.model.total != total:
+            self.model.set_items(items, total)
+            # Текущую строку выставляет контроллер после обновления:
+            # setCurrentIndex здесь вызывался дважды за один refresh и
+            # мог выполняться внутри обработки события QListView.
+
         if total > len(items):
             self.footer.setText(
                 "Показано %d из %d — уточните ввод" % (len(items), total)

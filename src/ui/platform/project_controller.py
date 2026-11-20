@@ -70,6 +70,35 @@ class ProjectControllerMixin:
         """
         self._invalidate_paths(self.project.changed_paths())
 
+    def _invalidate_saved_paths(self, paths):
+        """Сбросить кеш резолва для файлов, записанных в проект.
+
+        Вызывается только из путей сохранения (Ctrl+S, автосохранение,
+        запись из карточки). Правка в редакторе кеш не трогает: ключ
+        резолва и так учитывает overlay, а сброс на каждый символ
+        запускал бы пересборку корня во время набора.
+        """
+        paths = [
+            Path(path) for path in (paths or ()) if path is not None
+        ]
+        if not paths:
+            return
+        try:
+            self._invalidate_paths(paths)
+        except Exception as exc:
+            self.log(
+                "Проект: не удалось сбросить кэш после сохранения: %s"
+                % exc
+            )
+
+    def _invalidate_saved(self, saved):
+        """Сбросить кеш по событиям :class:`SavedDraft`."""
+        self._invalidate_saved_paths(
+            getattr(event, "path", None)
+            for event in (saved or ())
+            if getattr(event, "kind", "") in ("file", "resolved")
+        )
+
     def _start_project_prebuild(self):
         """Пересобрать только затронутые проектом корни."""
         ensure = getattr(self.services, "ensure_prebuild", None)
@@ -615,6 +644,8 @@ class ProjectControllerMixin:
             self.log("Проект: ошибка сохранения: %s" % exc)
             return 0
 
+        self._invalidate_saved(saved)
+
         if self.window is not None:
             for event in saved:
                 if event.kind == "file":
@@ -679,13 +710,9 @@ class ProjectControllerMixin:
             self.log("Проект: непредвиденная ошибка черновика (crash.log)")
             return
 
-        # Черновик входит в VFS: ранее собранные корни больше нельзя
-        # считать актуальными, даже если файл на диске не менялся.
-        try:
-            self._invalidate_paths([path])
-        except Exception as exc:
-            self.log("Проект: не удалось сбросить кэш резолва: %s" % exc)
-
+        # Кеш здесь намеренно не сбрасывается: черновик живёт в памяти,
+        # а ключ резолва уже включает overlay проекта. Инвалидация — и,
+        # значит, пересборка корня — выполняется только при сохранении.
         self._update_project_status()
 
     def on_resolved_changed(self, tab_id, view, text):
@@ -708,11 +735,8 @@ class ProjectControllerMixin:
             self.log("Проект: не удалось обновить resolved-черновик: %s" % exc)
             return
 
-        try:
-            self._invalidate_paths([view.root_path])
-        except Exception as exc:
-            self.log("Проект: не удалось сбросить кэш резолва: %s" % exc)
-
+        # Как и для обычных файлов, правка resolved-текста не сбрасывает
+        # кеш: это происходит при сохранении resolved-черновика.
         self._update_project_status()
 
     def save_resolved_document(self, tab_id, view=None):
@@ -770,6 +794,8 @@ class ProjectControllerMixin:
         if self.window is not None:
             self.window.editor.mark_tab_clean(tab_id)
 
+        self._invalidate_saved_paths([draft.root_path])
+
         self.set_status("Resolved сохранён в проекте", 5000)
         self.log("Проект: сохранён resolved-черновик %s" % tab_id)
         self._update_project_status()
@@ -804,6 +830,8 @@ class ProjectControllerMixin:
 
         if self.window is not None:
             self.window.editor.mark_clean(path, text)
+
+        self._invalidate_saved_paths([path])
 
         self.set_status(
             "Сохранено в проекте: %s" % Path(path).name,
@@ -1161,6 +1189,8 @@ class ProjectControllerMixin:
 
         if not saved:
             return
+
+        self._invalidate_saved(saved)
 
         if self.window is not None:
             for event in saved:

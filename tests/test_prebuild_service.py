@@ -70,6 +70,47 @@ class BlockingResolver(FakeResolver):
         return ("text:%s" % Path(path).name, [])
 
 
+class RevisionBlockingResolver(BlockingResolver):
+    """Блокируется на первом проходе и различает ревизии overlay в ключе."""
+
+    def __init__(self):
+        super().__init__(cached=[])
+        self.key_revisions = []
+        self.value_revisions = []
+
+    def resolved_key(self, path, forest, config_dir, overlay=None):
+        revision = (overlay or {}).get("revision", "")
+        self.key_revisions.append(revision)
+        return "%s|%s" % (path, revision)
+
+    def assemble_resolved(
+        self,
+        path,
+        forest,
+        config_dir,
+        log=None,
+        key=None,
+        overlay=None,
+    ):
+        self.value_revisions.append((overlay or {}).get("revision", ""))
+        return super().assemble_resolved(
+            path,
+            forest,
+            config_dir,
+            log=log,
+            key=key,
+            overlay=overlay,
+        )
+
+
+class RevisionResolver(FakeResolver):
+    """Быстрый резолвер, различающий ревизии overlay в ключе."""
+
+    def resolved_key(self, path, forest, config_dir, overlay=None):
+        revision = (overlay or {}).get("revision", "")
+        return "%s|%s" % (path, revision)
+
+
 class FailingResolver(FakeResolver):
     def assemble_resolved(self, path, forest, config_dir, log=None, key=None, overlay=None):
         self.calls.append(str(path))
@@ -288,6 +329,141 @@ class PrebuildServiceTest(unittest.TestCase):
             self.assertEqual(status["done"], 1)
             self.assertLess(len(resolver.calls), len(paths))
             self.assertEqual(len(resolver.calls), 1)
+
+    def test_new_start_does_not_interrupt_running_pass(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d)
+            path = cfg / "a.ltx"
+            path.write_text("[a]\n", encoding="utf-8")
+
+            resolver = RevisionBlockingResolver()
+            service = PrebuildService(resolver, workers=1)
+            forest = FakeForest([path])
+
+            service.start(forest, cfg, overlay={"revision": "1"})
+            self.assertTrue(
+                resolver.entered.wait(2.0),
+                "предсборка не начала работу",
+            )
+
+            # Новая ревизия проекта приходит во время сборки: текущий
+            # проход не должен быть убит.
+            service.start(forest, cfg, overlay={"revision": "2"})
+            status = service.status()
+            self.assertEqual(status["generation"], 2)
+            self.assertEqual(status["done_generation"], 0)
+            self.assertTrue(status["pending"])
+            self.assertEqual(len(resolver.calls), 1)
+
+            resolver.release.set()
+            service.wait()
+
+            status = service.status()
+            self.assertEqual(status["state"], "done")
+            self.assertEqual(status["done_generation"], 2)
+            self.assertFalse(status["pending"])
+            self.assertEqual(len(resolver.calls), 2)
+            self.assertEqual(resolver.value_revisions, ["1", "2"])
+
+    def test_wait_covers_pending_generation(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d)
+            path = cfg / "a.ltx"
+            path.write_text("[a]\n", encoding="utf-8")
+
+            resolver = RevisionBlockingResolver()
+            service = PrebuildService(resolver, workers=1)
+            forest = FakeForest([path])
+
+            service.start(forest, cfg, overlay={"revision": "1"})
+            self.assertTrue(resolver.entered.wait(2.0))
+            service.start(forest, cfg, overlay={"revision": "2"})
+
+            finished = threading.Event()
+
+            def waiter():
+                service.wait()
+                finished.set()
+
+            thread = threading.Thread(target=waiter, daemon=True)
+            thread.start()
+            self.assertFalse(
+                finished.wait(0.3),
+                "wait вернулся до отложенной сборки",
+            )
+
+            resolver.release.set()
+            self.assertTrue(finished.wait(3.0))
+            thread.join(1.0)
+            self.assertEqual(service.status()["done_generation"], 2)
+
+    def test_burst_of_starts_is_not_lost(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d)
+            path = cfg / "a.ltx"
+            path.write_text("[a]\n", encoding="utf-8")
+
+            resolver = RevisionResolver(cached=[])
+            service = PrebuildService(resolver, workers=1)
+            forest = FakeForest([path])
+
+            for index in range(200):
+                service.start(forest, cfg, overlay={"revision": str(index)})
+
+            service.wait(timeout=5)
+
+            status = service.status()
+            self.assertFalse(status["pending"])
+            self.assertEqual(status["state"], "done")
+            self.assertEqual(status["generation"], 200)
+            self.assertEqual(status["done_generation"], 200)
+
+    def test_stop_cancels_pending_generation(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d)
+            path = cfg / "a.ltx"
+            path.write_text("[a]\n", encoding="utf-8")
+
+            resolver = RevisionBlockingResolver()
+            service = PrebuildService(resolver, workers=1)
+            forest = FakeForest([path])
+
+            service.start(forest, cfg, overlay={"revision": "1"})
+            self.assertTrue(resolver.entered.wait(2.0))
+            service.start(forest, cfg, overlay={"revision": "2"})
+
+            service.stop()
+            resolver.release.set()
+            service.wait()
+
+            status = service.status()
+            self.assertEqual(status["state"], "idle")
+            self.assertFalse(status["pending"])
+            self.assertEqual(status["done_generation"], 0)
+            self.assertEqual(len(resolver.calls), 1)
+            self.assertEqual(resolver.value_revisions, ["1"])
+
+    def test_start_after_stop_runs_again(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d)
+            path = cfg / "a.ltx"
+            path.write_text("[a]\n", encoding="utf-8")
+
+            resolver = RevisionResolver(cached=[])
+            service = PrebuildService(resolver, workers=1)
+            forest = FakeForest([path])
+
+            service.start(forest, cfg, overlay={"revision": "1"})
+            service.wait()
+            service.stop()
+
+            service.start(forest, cfg, overlay={"revision": "2"})
+            service.wait()
+
+            status = service.status()
+            self.assertEqual(status["state"], "done")
+            self.assertEqual(status["done_generation"], 2)
+            self.assertEqual(len(resolver.calls), 2)
 
     def test_reports_failure(self):
         with tempfile.TemporaryDirectory() as d:

@@ -135,7 +135,7 @@ class ProjectEditInvalidationTest(unittest.TestCase):
         api.workspace.set_forest(forest)
         return api, services
 
-    def test_editing_child_invalidates_only_its_root(self):
+    def test_editing_child_does_not_invalidate_cache(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d) / "configs" / "system.ltx"
             child = Path(d) / "configs" / "misc" / "shared.ltx"
@@ -147,6 +147,22 @@ class ProjectEditInvalidationTest(unittest.TestCase):
 
             api.on_document_changed(child, "[sec]\nx = 1\n")
 
+            self.assertEqual(services.invalidated, [])
+            self.assertEqual(services.full_invalidations, 0)
+            self.assertIsNone(api._project_prebuild_roots)
+
+    def test_saving_child_invalidates_only_its_root(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "configs" / "system.ltx"
+            child = Path(d) / "configs" / "misc" / "shared.ltx"
+            forest = _Forest(
+                [root],
+                include_parents={child: {root}},
+            )
+            api, services = self._api(d, forest)
+
+            api.save_current_document(child, "[sec]\nx = 1\n")
+
             self.assertEqual(services.invalidated, [{root}])
             self.assertEqual(services.full_invalidations, 0)
             self.assertEqual(api._project_prebuild_roots, {root})
@@ -154,24 +170,24 @@ class ProjectEditInvalidationTest(unittest.TestCase):
             api._start_project_prebuild()
             self.assertEqual(services.prebuild_starts, [{root}])
 
-    def test_editing_root_invalidates_only_that_root(self):
+    def test_saving_root_invalidates_only_that_root(self):
         with tempfile.TemporaryDirectory() as d:
             root_a = Path(d) / "configs" / "a.ltx"
             root_b = Path(d) / "configs" / "b.ltx"
             forest = _Forest([root_a, root_b])
             api, services = self._api(d, forest)
 
-            api.on_document_changed(root_a, "[sec]\nx = 1\n")
+            api.save_current_document(root_a, "[sec]\nx = 1\n")
 
             self.assertEqual(services.invalidated, [{root_a}])
             self.assertEqual(services.full_invalidations, 0)
 
-    def test_unknown_path_falls_back_to_full_invalidation(self):
+    def test_saving_unknown_path_falls_back_to_full_invalidation(self):
         with tempfile.TemporaryDirectory() as d:
             forest = _Forest([Path(d) / "configs" / "system.ltx"])
             api, services = self._api(d, forest)
 
-            api.on_document_changed(
+            api.save_current_document(
                 Path(d) / "elsewhere" / "unknown.ltx",
                 "[sec]\nx = 1\n",
             )
@@ -366,7 +382,7 @@ class SectionGraphPrebuildFlowTest(unittest.TestCase):
             api.project.create("graph", save_mode="root")
             api.workspace.set_forest(forest)
 
-            api.on_document_changed(child, "[misc]\nx = 1\n")
+            api.save_current_document(child, "[misc]\nx = 1\n")
 
             # Ровно так граф связей просит предсборку перед поиском.
             self.assertTrue(

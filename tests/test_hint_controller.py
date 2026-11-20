@@ -104,6 +104,55 @@ class HintControllerTest(unittest.TestCase):
         handle._refresh()
         self.assertFalse(handle._popup.isVisible())
 
+    def test_refresh_deferred_while_mouse_button_held(self):
+        widget = QPlainTextEdit()
+        widget.show()
+        _app.processEvents()
+        widget.setPlainText("xx")
+        cursor = widget.textCursor()
+        cursor.setPosition(2)
+        widget.setTextCursor(cursor)
+        handle = self.service.attach(
+            widget,
+            target=HintTargetInfo(surface="plain", language="plain"),
+        )
+        handle._timer.stop()
+        handle._mouse_is_down = lambda: True
+
+        handle._refresh()
+
+        self.assertIsNone(handle._popup)
+        self.assertTrue(handle._timer.isActive())
+
+        handle._timer.stop()
+        handle._mouse_is_down = lambda: False
+        handle._refresh()
+        _app.processEvents()
+
+        self.assertTrue(handle._popup.isVisible())
+
+    def test_same_items_do_not_reset_popup_model(self):
+        widget = QPlainTextEdit()
+        widget.show()
+        widget.setPlainText("xx")
+        cursor = widget.textCursor()
+        cursor.setPosition(2)
+        widget.setTextCursor(cursor)
+        handle = self.service.attach(
+            widget,
+            target=HintTargetInfo(surface="plain", language="plain"),
+        )
+        handle._refresh()
+        popup = handle._popup
+        self.assertTrue(popup.isVisible())
+
+        resets = []
+        popup.model.modelReset.connect(lambda: resets.append(True))
+        handle._refresh()
+
+        self.assertEqual(resets, [])
+        self.assertTrue(popup.isVisible())
+
 
 class ColorHintPopupTest(unittest.TestCase):
     """Подсказка цветов не завершает правку описания и не теряет popup."""
@@ -250,6 +299,25 @@ class ScintillaControllerTest(unittest.TestCase):
         self.assertEqual(editor.text(), "xx_value")
         editor.undo()
         self.assertEqual(editor.text(), "xx")
+
+    def test_refresh_does_not_copy_selection(self):
+        editor = QsciScintilla()
+        editor.show()
+        editor.setText("xx")
+        editor.setCursorPosition(0, 2)
+
+        calls = []
+        editor.selectedText = lambda: calls.append(True) or "selected"
+
+        handle = self.service.attach(
+            editor,
+            target=HintTargetInfo(surface="raw", language="ltx"),
+        )
+        handle._refresh()
+
+        self.assertEqual(calls, [])
+        self.assertEqual(handle._context.selected_text, "")
+        self.assertTrue(handle._popup.isVisible())
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
@@ -299,6 +300,135 @@ class ProjectServiceTest(unittest.TestCase):
             # знать черновик исходного файла.
             self.assertEqual(preview.items[0].kind, "root")
             self.assertIn(source, preview.items[0].rollback_paths)
+
+    def test_mod_file_edit_is_written_as_full_replacement(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "gamedata" / "configs"
+            cfg.mkdir(parents=True)
+            root = cfg / "system.ltx"
+            source = cfg / "a.ltx"
+            patch = cfg / "mod_a_custom.ltx"
+            root.write_text('[system]\n#include "a.ltx"\n', encoding="cp1251")
+            source.write_text("[w]\ncost = 100\n", encoding="cp1251")
+            patch.write_text(
+                "[w]\n; старый комментарий\ncost = 200\n",
+                encoding="cp1251",
+            )
+
+            services, forest = self._services(d, cfg, root)
+            project = ProjectService(Path(d) / "projects")
+            project.create("Mod edit", save_mode="root")
+            project.update_draft(
+                patch,
+                "[w]\n; новый комментарий\ncost = 300\n",
+            )
+
+            preview = project.build_preview(services, forest)
+
+            self.assertEqual(len(preview.items), 1)
+            item = preview.items[0]
+            self.assertEqual(item.kind, "mod_file")
+            self.assertTrue(item.ok, item.error)
+            self.assertEqual(len(item.generated.files), 1)
+            file = item.generated.files[0]
+            self.assertEqual(
+                file.relative_path,
+                Path("gamedata") / "configs" / "mod_a_custom.ltx",
+            )
+            self.assertEqual(
+                file.text,
+                "[w]\n; новый комментарий\ncost = 300\n",
+            )
+            self.assertEqual(file.encoding, "windows-1251")
+            self.assertIn(patch, item.rollback_paths)
+
+            written = services.write_patch(
+                replace(
+                    item.generated,
+                    plan=replace(item.plan, confirmed=True),
+                ),
+                Path(d) / "patch_mod",
+                forbidden_roots=[cfg],
+            )
+            self.assertEqual(len(written), 1)
+            self.assertEqual(
+                written[0],
+                Path(d) / "patch_mod" / file.relative_path,
+            )
+            self.assertEqual(
+                written[0].read_bytes().decode("windows-1251"),
+                "[w]\n; новый комментарий\ncost = 300\n",
+            )
+
+    def test_root_preview_skips_per_item_resolver_checks(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "gamedata" / "configs"
+            cfg.mkdir(parents=True)
+            root = cfg / "system.ltx"
+            source = cfg / "a.ltx"
+            root.write_text('[system]\n#include "a.ltx"\n', encoding="cp1251")
+            source.write_text("[w]\ncost = 100\n", encoding="cp1251")
+
+            cache = FileCacheSystem()
+            forest = TreeBuilder(cache).build(
+                cfg,
+                root,
+                use_cache=False,
+            )
+            resolver = ResolverService(cache, ResolvedCache())
+            resolver.ensure_adapter(forest, cfg)
+
+            services = CoreServices(
+                cache=cache,
+                tree_builder=TreeBuilder(cache),
+                tree_query=TreeQueryService(),
+                graph_builder=ReferenceGraphBuilder(DisabledCache()),
+                resolver_service=resolver,
+                assembly_service=AssemblyService(
+                    resolver,
+                    Path(d) / "generated",
+                ),
+                generated_dir=Path(d) / "generated",
+                xml_resolve_service=XmlResolveService(),
+            )
+
+            project = ProjectService(Path(d) / "projects")
+            project.create("Preview")
+            project.update_draft(source, "[w]\ncost = 150\n")
+
+            verify_flags = []
+            original_plan = services.plan_ltx_patch
+
+            def plan_ltx(*args, **kwargs):
+                verify_flags.append(kwargs.get("verify_resolver", True))
+                return original_plan(*args, **kwargs)
+
+            services.plan_ltx_patch = plan_ltx
+
+            generated = []
+            original_generate = services.generate_patch
+
+            def generate_patch(plan):
+                generated.append(plan)
+                return original_generate(plan)
+
+            services.generate_patch = generate_patch
+
+            preview = project.build_preview(services, forest)
+
+            # В Root-режиме поштучный патч не проверяется резолвером:
+            # остаётся ровно один проход на объединённый план.
+            self.assertEqual(verify_flags, [False])
+            self.assertEqual(len(generated), 1)
+            self.assertTrue(preview.items[0].ok, preview.items[0].error)
+
+            # В on_file поштучный патч — это и есть записываемый файл,
+            # поэтому полная проверка обязана остаться.
+            project.set_patch_mode("on_file")
+            preview = project.build_preview(services, forest)
+
+            self.assertTrue(verify_flags[-1])
+            self.assertTrue(preview.items[0].ok, preview.items[0].error)
 
     def test_build_preview_for_multiline_resolved_edit(self):
         with tempfile.TemporaryDirectory() as d:

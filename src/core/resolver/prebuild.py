@@ -118,7 +118,13 @@ def _worker_resolve_xml(job):
 
 
 class PrebuildService:
-    """Фоновая предсборка LTX-корней и XML-файлов."""
+    """Фоновая предсборка LTX-корней и XML-файлов.
+
+    Запросы не прерывают уже идущую сборку: новый ``start`` складывается
+    в очередь, а последний запрос заменяет предыдущий отложенный. Так
+    правка проекта не убивает пул процессов и не теряет уже собранные
+    результаты; новая ревизия overlay собирается следующим проходом.
+    """
 
     def __init__(self, resolver, xml_resolver=None, workers=None):
         self._resolver = resolver
@@ -127,7 +133,16 @@ class PrebuildService:
         self._lock = threading.RLock()
         self._thread = None
         self._pool = None
+        # Событие текущего прохода. Новый запрос получает своё событие,
+        # чтобы запоздавшие результаты старого прохода не трогали
+        # прогресс нового.
         self._stop = threading.Event()
+
+        # Последний отложенный запрос:
+        # (forest, config_dir, overlay, roots, generation).
+        self._pending = None
+        self._generation = 0
+        self._done_generation = 0
 
         self._state = "idle"      # idle | running | done
         self._done = 0
@@ -136,26 +151,124 @@ class PrebuildService:
 
     # -------------------------------------------------- управление
     def start(self, forest, config_dir, overlay=None, roots=None):
-        """Запустить предсборку.
+        """Поставить предсборку в очередь.
 
         ``roots`` — необязательный набор корней. Для точечной инвалидации
         после проекта пересобираются только они; XML-файлы при этом не
         трогаются, потому что overlay проекта в XML-резолв не входит.
-        """
-        with self._lock:
-            old = self._thread
-            self._stop.set()
-            old_pool = self._pool
 
-        if old_pool is not None:
+        Если сборка уже идёт, она не прерывается: запрос запоминается и
+        выполняется сразу после текущего прохода. Более новый запрос
+        заменяет предыдущий отложенный.
+        """
+        if roots is not None:
+            roots = frozenset(Path(path) for path in roots)
+
+        with self._lock:
+            self._generation += 1
+            generation = self._generation
+            self._pending = (
+                forest,
+                config_dir,
+                overlay or {},
+                roots,
+                generation,
+            )
+            self._state = "running"
+            if self._thread is None or not self._thread.is_alive():
+                stop_event = threading.Event()
+                self._stop = stop_event
+                thread = threading.Thread(
+                    target=self._run,
+                    args=(stop_event,),
+                    name="ltx-prebuild",
+                    daemon=True,
+                )
+                self._thread = thread
+                # Стартуем под локом: иначе wait() может увидеть поток,
+                # который ещё не запущен, и упасть на join().
+                thread.start()
+
+        logger.info(
+            "Фоновая сборка поставлена в очередь: ревизия %d%s",
+            generation,
+            " (только затронутые корни)" if roots is not None else "",
+        )
+
+    def stop(self):
+        """Остановить текущую сборку и отменить отложенную."""
+        with self._lock:
+            self._pending = None
+            stop_event = self._stop
+            pool = self._pool
+
+        if stop_event is not None:
+            stop_event.set()
+        if pool is not None:
             try:
-                old_pool.terminate()
+                pool.terminate()
             except Exception:
                 pass
 
-        if old is not None and old.is_alive():
-            old.join(timeout=0.5)
+    def wait(self, log=None, timeout=None):
+        """Дождаться окончания фоновой сборки (для графа связей).
 
+        Ждёт не только текущий проход, но и отложенный запрос: иначе
+        вызывающий код решил бы, что кэш уже соответствует последней
+        ревизии overlay.
+
+        ``timeout`` — защита от вечного ожидания: зависший один корень не
+        должен блокировать граф связей навсегда.
+        """
+        if log:
+            log("Ожидание фоновой сборки…")
+
+        deadline = (
+            time.monotonic() + float(timeout)
+            if timeout is not None
+            else None
+        )
+        while True:
+            with self._lock:
+                thread = self._thread
+                pending = self._pending is not None
+
+            if not pending and (thread is None or not thread.is_alive()):
+                break
+
+            if deadline is not None and time.monotonic() >= deadline:
+                if log:
+                    log(
+                        "Фоновая сборка не завершилась за %.0f с; "
+                        "граф продолжит работу по кэшу/по требованию"
+                        % float(timeout)
+                    )
+                return
+
+            if thread is not None:
+                thread.join(timeout=0.2)
+            else:
+                # Между «нет потока» и «есть запрос» окна быть не должно,
+                # но не крутимся вхолостую, если оно всё же возникнет.
+                time.sleep(0.05)
+
+        if log:
+            log("Фоновая сборка завершена")
+
+    def status(self):
+        with self._lock:
+            return {
+                "state": self._state,
+                "done": self._done,
+                "total": self._total,
+                "error": self._error,
+                "pending": self._pending is not None,
+                "generation": self._generation,
+                "done_generation": self._done_generation,
+            }
+
+    def _prepare_targets(self, forest, roots):
+        """Список LTX-корней и XML-файлов для одного прохода."""
         ltx_targets = resolved_ltx_roots(forest)
         if roots is not None:
             wanted = {str(Path(path)).lower() for path in roots}
@@ -163,6 +276,7 @@ class PrebuildService:
                 path for path in ltx_targets
                 if str(path).lower() in wanted
             ]
+
         xml_targets = []
         if roots is None and self._xml_resolver is not None:
             if hasattr(self._xml_resolver, "refresh"):
@@ -189,133 +303,113 @@ class PrebuildService:
         # Мелкие файлы быстрее дают видимый прогресс и заполняют кэш.
         ltx_targets.sort(key=_size)
         xml_targets.sort(key=_size)
-
-        with self._lock:
-            stop_event = threading.Event()
-            self._stop = stop_event
-            self._state = "running"
-            self._done = 0
-            self._total = len(ltx_targets) + len(xml_targets)
-            self._error = None
-            self._pool = None
-            self._thread = threading.Thread(
-                target=self._run,
-                args=(
-                    forest,
-                    config_dir,
-                    ltx_targets,
-                    xml_targets,
-                    stop_event,
-                    overlay or {},
-                ),
-                name="ltx-prebuild",
-                daemon=True,
-            )
-            self._thread.start()
-
-        logger.info(
-            "Фоновая сборка запущена: LTX %d, XML %d, процессов: %d%s",
-            len(ltx_targets),
-            len(xml_targets),
-            self._workers or _default_workers(),
-            " (только затронутые корни)" if roots is not None else "",
-        )
-
-    def stop(self):
-        self._stop.set()
-        with self._lock:
-            pool = self._pool
-
-        if pool is not None:
-            try:
-                pool.terminate()
-            except Exception:
-                pass
-
-    def wait(self, log=None, timeout=None):
-        """Дождаться окончания фоновой сборки (для графа связей).
-
-        ``timeout`` — защита от вечного ожидания: зависший один корень не
-        должен блокировать граф связей навсегда.
-        """
-        if log:
-            log("Ожидание фоновой сборки…")
-
-        deadline = (
-            time.monotonic() + float(timeout)
-            if timeout is not None
-            else None
-        )
-        while True:
-            with self._lock:
-                thread = self._thread
-
-            if thread is None or not thread.is_alive():
-                break
-
-            if deadline is not None and time.monotonic() >= deadline:
-                if log:
-                    log(
-                        "Фоновая сборка не завершилась за %.0f с; "
-                        "граф продолжит работу по кэшу/по требованию"
-                        % float(timeout)
-                    )
-                return
-
-            thread.join(timeout=0.2)
-
-        if log:
-            log("Фоновая сборка завершена")
-
-    def status(self):
-        with self._lock:
-            return {
-                "state": self._state,
-                "done": self._done,
-                "total": self._total,
-                "error": self._error,
-            }
+        return ltx_targets, xml_targets
 
     # -------------------------------------------------- рабочий поток
-    def _run(self, forest, config_dir, ltx_targets, xml_targets,
-             stop_event, overlay=None):
+    def _run(self, stop_event):
+        """Обработать текущий запрос и все отложенные после него."""
+        generation = None
         try:
-            self._run_ltx(
-                forest,
-                config_dir,
-                ltx_targets,
-                stop_event,
-                overlay=overlay,
-            )
-            if not stop_event.is_set():
-                self._run_xml(
-                    config_dir,
-                    xml_targets,
-                    stop_event,
-                    overlay=overlay,
-                )
-        except Exception as exc:
-            with self._lock:
-                if self._stop is stop_event:
-                    self._error = str(exc)
-            logger.exception("Фоновая сборка прервана")
-        finally:
-            with self._lock:
-                self._pool = None
-                if self._stop is stop_event:
-                    self._state = (
-                        "idle" if stop_event.is_set() else "done"
-                    )
-                state = self._state
-                done = self._done
-                total = self._total
+            while True:
+                with self._lock:
+                    request = self._pending
+                    self._pending = None
+                    if request is None:
+                        # Решение «работы больше нет» и снятие ссылки на
+                        # поток выполняются под одним локом. Иначе start()
+                        # между проверкой очереди и выходом потерял бы
+                        # запрос: увидел живой поток и не создал новый.
+                        if self._thread is threading.current_thread():
+                            self._thread = None
+                        if self._stop is stop_event:
+                            self._state = (
+                                "idle" if stop_event.is_set() else "done"
+                            )
+                        return
 
-            if state == "done":
-                logger.info(
-                    "Фоновая сборка завершена: %d/%d файлов",
-                    done,
-                    total,
-                )
+                    (
+                        forest,
+                        config_dir,
+                        overlay,
+                        roots,
+                        generation,
+                    ) = request
+
+                    if self._stop is not stop_event:
+                        stop_event = threading.Event()
+                        self._stop = stop_event
+
+                    self._state = "running"
+                    self._done = 0
+                    self._total = 0
+                    self._error = None
+
+                try:
+                    ltx_targets, xml_targets = self._prepare_targets(
+                        forest,
+                        roots,
+                    )
+                    with self._lock:
+                        if self._stop is stop_event:
+                            self._total = (
+                                len(ltx_targets) + len(xml_targets)
+                            )
+
+                    logger.info(
+                        "Фоновая сборка запущена: LTX %d, XML %d, "
+                        "процессов: %d%s",
+                        len(ltx_targets),
+                        len(xml_targets),
+                        self._workers or _default_workers(),
+                        " (только затронутые корни)"
+                        if roots is not None else "",
+                    )
+
+                    if not stop_event.is_set():
+                        self._run_ltx(
+                            forest,
+                            config_dir,
+                            ltx_targets,
+                            stop_event,
+                            overlay=overlay,
+                        )
+                    if not stop_event.is_set():
+                        self._run_xml(
+                            config_dir,
+                            xml_targets,
+                            stop_event,
+                            overlay=overlay,
+                        )
+                except Exception as exc:
+                    with self._lock:
+                        if self._stop is stop_event:
+                            self._error = str(exc)
+                    logger.exception("Фоновая сборка прервана")
+                finally:
+                    with self._lock:
+                        self._pool = None
+                        if self._stop is stop_event:
+                            if not stop_event.is_set():
+                                self._done_generation = generation
+                            done = self._done
+                            total = self._total
+                        else:
+                            done = total = None
+
+                    if done is not None:
+                        logger.info(
+                            "Фоновая сборка: ревизия %s завершена (%d/%d)",
+                            generation,
+                            done,
+                            total,
+                        )
+        except BaseException:
+            with self._lock:
+                if self._thread is threading.current_thread():
+                    self._thread = None
+                if self._stop is stop_event:
+                    self._state = "idle"
+            raise
 
     def _overlay_for_root(self, forest, path, overlay):
         """Overlay для ключа/значения одного корня.

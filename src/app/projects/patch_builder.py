@@ -41,6 +41,19 @@ from .models import (
 from .readers import FileReaderError
 
 
+def _is_mod_ltx(path) -> bool:
+    """True для DLTX-патча ``mod_*.ltx``.
+
+    Такие файлы не являются корнями загрузки и не участвуют в построении
+    DLTX-дельты: их правка всегда записывается полной заменой файла.
+    """
+    path = Path(path)
+    return (
+        path.suffix.lower() == ".ltx"
+        and path.name.lower().startswith("mod_")
+    )
+
+
 class ProjectPreviewMixin:
     """Preview-часть ProjectService. Наследуется сервисом проекта."""
 
@@ -452,6 +465,7 @@ class ProjectPreviewMixin:
         forest,
         log=None,
         generate=True,
+        verify_resolver=True,
     ) -> ProjectPatchPreview:
         project = self._require_active()
 
@@ -663,6 +677,57 @@ class ProjectPreviewMixin:
                 xml_patch_mode=project.xml_patch_mode,
             )
 
+            if kind == "file" and not is_xml and _is_mod_ltx(source_path):
+                # mod_*.ltx — готовый DLTX-патч. Его нельзя снова
+                # превращать в дельту: правка записывается полной
+                # заменой самого файла.
+                try:
+                    result = services.plan_ltx_patch(
+                        source_path,
+                        original_text,
+                        current_text,
+                        mode="override",
+                        forest=forest,
+                        options=options,
+                        verify_resolver=False,
+                    )
+                    plan = result.plan
+                    generated = result.generated
+                    output.append(
+                        PreviewItem(
+                            title=title,
+                            source_path=Path(source_path),
+                            plan=plan,
+                            generated=generated,
+                            error=(
+                                "" if plan.can_generate
+                                else "План содержит ошибки"
+                            ),
+                            kind="mod_file",
+                            draft=draft,
+                            notes=tuple(notes) + (
+                                "Мод-файл: полная замена файла",
+                            ),
+                            text=str(current_text),
+                            rollback_paths=rollback_paths,
+                        )
+                    )
+                except Exception as exc:
+                    output.append(
+                        PreviewItem(
+                            title=title,
+                            source_path=Path(source_path),
+                            plan=None,
+                            generated=None,
+                            error=str(exc),
+                            kind="mod_file",
+                            draft=draft,
+                            notes=notes,
+                            rollback_paths=rollback_paths,
+                        )
+                    )
+                return
+
             try:
                 # Единый вход core: mode/format-специфичная диспетчеризация
                 # живёт в LtxPatchService/XmlPatchService, а не в UI.
@@ -708,6 +773,11 @@ class ProjectPreviewMixin:
                             kind == "resolved" and resolved is not None
                         ),
                         analysis=resolved_analysis,
+                        # В Root-режиме поштучный патч будет заменён
+                        # объединённым, поэтому полный проход Resolver4
+                        # здесь не нужен. XML-ветка не затрагивается:
+                        # её файлы попадают в патч как есть.
+                        verify_resolver=verify_resolver,
                     )
 
                 plan = result.plan
@@ -880,6 +950,9 @@ class ProjectPreviewMixin:
             forest,
             log=log,
             generate=False,
+            # Поштучные DLTX-патчи в Root-режиме не записываются:
+            # итоговый файл собирается ниже и проверяется один раз.
+            verify_resolver=False,
         )
 
         items: List[PreviewItem] = []
@@ -896,6 +969,7 @@ class ProjectPreviewMixin:
             if (
                 item.kind == "asset"
                 or item.kind == "new_file"
+                or item.kind == "mod_file"
                 or item.plan is None
                 or not item.plan.can_generate
                 or (

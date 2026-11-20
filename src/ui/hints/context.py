@@ -177,7 +177,20 @@ def _value_kind(parsed):
     return "bare"
 
 
-def build_context(adapter, target) -> HintContext:
+def build_context(
+    adapter,
+    target,
+    with_selection=False,
+) -> HintContext:
+    """Собрать снимок контекста для провайдеров.
+
+    ``with_selection`` по умолчанию выключен: копирование выделения на
+    каждом движении курсора дорого, а в QScintilla вызов
+    ``selectedText()`` во время перетаскивания/Shift-клика приводил к
+    повреждению памяти (известный баг QScintilla). Ни один провайдер
+    сейчас выделение не использует, поэтому читаем его только по
+    явному запросу.
+    """
     target = resolve_target(target)
     line = int(adapter.cursor_line())
     column = int(adapter.cursor_column())
@@ -238,7 +251,9 @@ def build_context(adapter, target) -> HintContext:
         line_text=line_text,
         prefix=prefix,
         suffix=suffix,
-        selected_text=str(adapter.selected_text() or ""),
+        selected_text=(
+            str(adapter.selected_text() or "") if with_selection else ""
+        ),
         default_color=default_color,
         editable=editable,
         in_comment=in_comment,

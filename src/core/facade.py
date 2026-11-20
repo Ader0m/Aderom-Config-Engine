@@ -13,6 +13,7 @@ CoreServices — тонкий фасад над сервисами ядра.
 специализированным сервисам ядра.
 """
 
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -89,6 +90,9 @@ class CoreServices:
 
         # Параметры последней сборки: нужны, чтобы после инвалидации
         # кеша перезапустить именно её, а не резолвить корни по одному.
+        # Лок закрывает проверку «устарела?» и постановку в очередь:
+        # два фоновых потока не должны решить это одновременно.
+        self._prebuild_lock = threading.RLock()
         self._prebuild_forest = None
         self._prebuild_config_dir = None
         self._prebuild_overlay = {}
@@ -147,10 +151,23 @@ class CoreServices:
 
     # -------------------------------------------------- кэш
 
+    def _prebuild_guard(self):
+        """Лок состояния предсборки.
+
+        ``__new__``-конструкторы в тестах могут не вызывать ``__init__``;
+        создаём лок лениво, чтобы не падать на таких объектах.
+        """
+        lock = getattr(self, "_prebuild_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._prebuild_lock = lock
+        return lock
+
     def invalidate_cache(self):
         """Очистить общий кэш ядра и пометить предсборку устаревшей."""
-        self._prebuild_stale = True
-        self._prebuild_roots = None
+        with self._prebuild_guard():
+            self._prebuild_stale = True
+            self._prebuild_roots = None
         self.cache.clear()
         if hasattr(self.resolver, "invalidate_cache"):
             self.resolver.invalidate_cache()
@@ -179,8 +196,9 @@ class CoreServices:
         Используется при правках файлов: предметный и локализационный
         кеши при каждом изменении текста пересоздавать не нужно.
         """
-        self._prebuild_stale = True
-        self._prebuild_roots = None
+        with self._prebuild_guard():
+            self._prebuild_stale = True
+            self._prebuild_roots = None
         if hasattr(self.resolver, "invalidate_cache"):
             self.resolver.invalidate_cache()
         if hasattr(self.xml, "clear"):
@@ -189,8 +207,9 @@ class CoreServices:
     def invalidate_paths(self, roots):
         """Инвалидировать кэш только для заданных корней."""
         roots = {Path(path) for path in (roots or ())}
-        self._prebuild_stale = True
-        self._prebuild_roots = roots or None
+        with self._prebuild_guard():
+            self._prebuild_stale = True
+            self._prebuild_roots = roots or None
         invalidate_roots = getattr(self.resolver, "invalidate_roots", None)
         if callable(invalidate_roots) and roots:
             invalidate_roots(roots)
@@ -200,50 +219,59 @@ class CoreServices:
     # -------------------------------------------------- фоновая предсборка
 
     def start_prebuild(self, forest, config_dir, overlay=None, roots=None):
-        """Запустить фоновую сборку LTX после построения дерева.
+        """Поставить фоновую сборку LTX в очередь.
 
         ``roots=None`` — весь лес; набор корней — точечная пересборка.
+        Если предыдущая сборка ещё идёт, она не прерывается: новый
+        запрос выполнится сразу после неё.
         """
-        self._prebuild_forest = forest
-        self._prebuild_config_dir = config_dir
-        self._prebuild_overlay = overlay or {}
-        self._prebuild_stale = False
-        self._prebuild_roots = (
-            {Path(path) for path in roots}
-            if roots is not None
-            else None
-        )
-        self.prebuild.start(
-            forest,
-            config_dir,
-            overlay=overlay,
-            roots=self._prebuild_roots,
-        )
+        with self._prebuild_guard():
+            self._prebuild_forest = forest
+            self._prebuild_config_dir = config_dir
+            self._prebuild_overlay = overlay or {}
+            self._prebuild_stale = False
+            self._prebuild_roots = (
+                {Path(path) for path in roots}
+                if roots is not None
+                else None
+            )
+            self.prebuild.start(
+                forest,
+                config_dir,
+                overlay=overlay,
+                roots=self._prebuild_roots,
+            )
 
     def ensure_prebuild(self, forest=None, config_dir=None, overlay=None,
                         roots=None):
-        """Гарантировать актуальную предсборку перед чтением кеша."""
-        forest = forest or self._prebuild_forest
-        config_dir = config_dir or self._prebuild_config_dir
-        if overlay is None:
-            overlay = self._prebuild_overlay
-        if roots is None:
-            roots = self._prebuild_roots
-        if forest is None or config_dir is None:
-            return False
+        """Гарантировать актуальную предсборку перед чтением кеша.
 
-        status = self.prebuild.status()
-        running = status.get("state") == "running"
-        if self._prebuild_stale or not running:
-            if self._prebuild_stale or status.get("state") != "done":
-                self.start_prebuild(
-                    forest,
-                    config_dir,
-                    overlay=overlay,
-                    roots=roots,
-                )
-                return True
-        return False
+        Проверка и постановка в очередь выполняются под одним локом,
+        поэтому одновременные вызовы из разных фоновых задач не создают
+        две конкурирующие сборки.
+        """
+        with self._prebuild_guard():
+            forest = forest or self._prebuild_forest
+            config_dir = config_dir or self._prebuild_config_dir
+            if overlay is None:
+                overlay = self._prebuild_overlay
+            if roots is None:
+                roots = self._prebuild_roots
+            if forest is None or config_dir is None:
+                return False
+
+            status = self.prebuild.status()
+            running = status.get("state") == "running"
+            if self._prebuild_stale or not running:
+                if self._prebuild_stale or status.get("state") != "done":
+                    self.start_prebuild(
+                        forest,
+                        config_dir,
+                        overlay=overlay,
+                        roots=roots,
+                    )
+                    return True
+            return False
 
     def prebuild_status(self):
         return self.prebuild.status()
@@ -817,6 +845,7 @@ class CoreServices:
         options=None,
         resolved=False,
         analysis=None,
+        verify_resolver=True,
     ):
         """Единый вход LTX: root / on_file / override."""
         return self.ltx_patch.plan(
@@ -829,6 +858,7 @@ class CoreServices:
             options=options,
             resolved=resolved,
             analysis=analysis,
+            verify_resolver=verify_resolver,
         )
 
     def plan_xml_patch(

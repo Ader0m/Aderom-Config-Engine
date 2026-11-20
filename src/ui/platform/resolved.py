@@ -377,11 +377,8 @@ class ResolvedDocumentMixin:
             )
             return False
 
-        try:
-            self._invalidate_paths([document.root_path])
-        except Exception as exc:
-            self.log("Проект: не удалось сбросить кэш резолва: %s" % exc)
-
+        # Кеш резолва не сбрасываем: правка ещё не сохранена, а ключ
+        # учитывает overlay. Инвалидация выполняется при сохранении.
         try:
             self._update_project_status()
         except Exception as exc:
@@ -403,6 +400,11 @@ class ResolvedDocumentMixin:
         except ProjectError as exc:
             self.show_error(str(exc))
             return False
+
+        try:
+            self._invalidate_paths([document.root_path])
+        except Exception as exc:
+            self.log("Проект: не удалось сбросить кэш резолва: %s" % exc)
 
         if self.window is not None:
             try:

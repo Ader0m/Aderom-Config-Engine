@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Координация сброса кеша и перезапуска предсборки."""
 
+import threading
 import unittest
 from pathlib import Path
 
@@ -52,6 +53,7 @@ class PrebuildCoordinationTest(unittest.TestCase):
         services.item_icons = _Items()
         services.localization = _Items()
         services.prebuild = _Prebuild()
+        services._prebuild_lock = threading.RLock()
         services._prebuild_forest = object()
         services._prebuild_config_dir = Path("configs")
         services._prebuild_overlay = {}
@@ -102,6 +104,30 @@ class PrebuildCoordinationTest(unittest.TestCase):
         services.invalidate_cache()
         self.assertTrue(services.ensure_prebuild())
         self.assertEqual(len(services.prebuild.starts), 2)
+
+    def test_concurrent_ensure_queues_only_one_build(self):
+        services = self._services()
+        services.invalidate_cache()
+
+        barrier = threading.Barrier(2)
+        results = []
+
+        def worker():
+            barrier.wait()
+            results.append(services.ensure_prebuild())
+
+        threads = [
+            threading.Thread(target=worker),
+            threading.Thread(target=worker),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(2.0)
+
+        self.assertEqual(sum(1 for value in results if value), 1)
+        self.assertEqual(len(services.prebuild.starts), 1)
+        self.assertFalse(services._prebuild_stale)
 
 
 if __name__ == "__main__":

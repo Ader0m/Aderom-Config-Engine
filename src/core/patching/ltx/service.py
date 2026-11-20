@@ -44,6 +44,7 @@ class LtxPatchService:
         options: Optional[PatchOptions] = None,
         resolved: bool = False,
         analysis=None,
+        verify_resolver: bool = True,
     ) -> PatchResult:
         mode = (mode or "root").lower().replace("-", "_")
         if mode == "in_place":
@@ -95,7 +96,10 @@ class LtxPatchService:
 
         generated = None
         if plan.can_generate:
-            generated = self._generate(plan)
+            generated = self._generate(
+                plan,
+                verify_resolver=verify_resolver,
+            )
 
         return PatchResult(
             plan=plan,
@@ -103,13 +107,26 @@ class LtxPatchService:
             notes=tuple(issue.message for issue in plan.warnings),
         )
 
-    def _generate(self, plan):
-        if self.services is not None and hasattr(
+    def _generate(self, plan, verify_resolver=True):
+        """Сгенерировать патч одного элемента.
+
+        ``verify_resolver=False`` нужен уровню проекта в режиме Root: там
+        поштучный патч всё равно заменяется объединённым, и полный проход
+        Resolver4 по каждому файлу — чистая потеря времени. Модельная
+        round-trip проверка остаётся: она дешёвая и ловит ошибки
+        наследования и операций со списками, которые resolver-проверка
+        объединённого плана не покрывает.
+        """
+        if verify_resolver and self.services is not None and hasattr(
             self.services,
             "generate_patch",
         ):
             return self.services.generate_patch(plan)
 
         generated = DltxGenerator().generate(plan)
+        if plan.diff is None:
+            # Модельной проверке нужен исходный diff; для таких планов
+            # оставляем патч без вердикта, а не помечаем его ошибкой.
+            return generated
         verification = ModelPatchVerifier().verify(generated)
         return replace(generated, verification=verification)

@@ -57,8 +57,9 @@ class LtxFileOpener:
         """Единственная точка входа для сырого просмотра.
 
         Для ``mod_*`` добавляется шапка DLTX-патча, для остальных —
-        шапка сырого файла. Оба варианта показываются одинаково:
-        через ``show_text``, только для чтения.
+        шапка сырого файла. Патч можно править в проекте: он всегда
+        сохраняется полной заменой файла. Обычный сырой файл остаётся
+        доступен только для чтения.
         """
         path = Path(path)
         if not self.session.has_tree:
@@ -87,7 +88,7 @@ class LtxFileOpener:
         self.ctx.ui.show_text(
             raw_content,
             title,
-            readonly=True,
+            readonly=not is_patch,
             source_path=path,
             line_number=(
                 int(line_number) if line_number is not None else None
@@ -120,6 +121,7 @@ class LtxFileOpener:
             "; ═══════════════════════════════════════════════════════════",
             "; Файл: %s" % rel,
             "; Тип: Патч (не загружается отдельно движком)",
+            "; Правка сохраняется полной заменой файла.",
         ]
         if root is not None:
             header += [

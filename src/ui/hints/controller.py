@@ -20,6 +20,14 @@ from ui.hints.ranking import (
 
 log = logging.getLogger(__name__)
 
+# Пока кнопка мыши нажата, QScintilla меняет выделение (Shift-клик,
+# перетаскивание). Подсказки в этот момент не пересчитываем: чтение
+# выделения/текста и показ popup поверх ещё не законченного выбора
+# приводили к падению, а после отпускания кнопки контекст всё равно
+# нужно пересчитать заново.
+_MOUSE_BUTTONS = Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+_MOUSE_REFRESH_DELAY_MS = 50
+
 
 class HintController(QObject):
     def __init__(
@@ -275,8 +283,26 @@ class HintController(QObject):
         return False
 
     # -------------------------------------------------- пересчёт
+    @staticmethod
+    def _mouse_is_down():
+        app = QApplication.instance()
+        if app is None:
+            return False
+        try:
+            return bool(app.mouseButtons() & _MOUSE_BUTTONS)
+        except Exception:
+            return False
+
     def _refresh(self):
         if not self._alive or not self._enabled or self._refreshing:
+            return
+        if self._mouse_is_down():
+            # Не трогаем текст/popup, пока пользователь выделяет мышью.
+            # Таймер сам перезапустится, когда кнопка будет отпущена.
+            try:
+                self._timer.start(_MOUSE_REFRESH_DELAY_MS)
+            except RuntimeError:
+                pass
             return
         self._refreshing = True
         try:

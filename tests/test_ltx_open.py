@@ -36,6 +36,7 @@ class _Ui:
         self.label = ""
         self.notice = ""
         self.line = None
+        self.readonly = None
 
     def show_text(self, text, label, readonly=True, source_path=None,
                   line_number=None, syntax=True, notice=None):
@@ -43,6 +44,7 @@ class _Ui:
         self.label = label
         self.notice = notice or ""
         self.line = line_number
+        self.readonly = readonly
 
     def set_status(self, *_args, **_kwargs):
         pass
@@ -82,11 +84,13 @@ class LtxRawOpenTest(unittest.TestCase):
         ui = self._open("items.ltx", 2)
         self.assertEqual(ui.label, "[Raw]items.ltx")
         self.assertIn("СЫРОЙ ФАЙЛ", ui.notice)
+        self.assertTrue(ui.readonly)
 
     def test_patch_file_line_accounts_for_header(self):
         ui = self._open("mod_items_patch.ltx", 2)
         self.assertTrue(ui.label.startswith("DLTX PATCH:"))
         self.assertIn("DLTX-ПАТЧ", ui.notice)
+        self.assertFalse(ui.readonly)
 
 
 if __name__ == "__main__":
