@@ -33,6 +33,7 @@ from .api import (
     TreeSummary,
     XmlResolveResult,
 )
+from .forest import forest_ref, unwrap_forest
 from .registrations import RegistrationHandle, remove_identity
 from .events import PLATFORM_OWNER, namespace_of
 
@@ -186,15 +187,17 @@ class CoreApiAdapter:
 
     def build_tree(self, scan_dir, system_root, log=None, clean=False,
                    overlay=None):
-        return self._provider.build_tree(
+        raw = self._provider.build_tree(
             scan_dir,
             system_root,
             log=log,
             clean=clean,
             overlay=overlay,
         )
+        return forest_ref(raw)
 
     def tree_summary(self, forest):
+        forest = unwrap_forest(forest)
         resolver_sections = getattr(forest, "resolver_sections", None)
         if resolver_sections is not None:
             try:
@@ -211,20 +214,24 @@ class CoreApiAdapter:
         )
 
     def relative_path(self, forest, path):
+        forest = unwrap_forest(forest)
         rel = getattr(self._provider, "relative_path", None)
         if callable(rel):
             return rel(forest, path)
         return self._provider.rel_path(forest, path)
 
     def forest_scan_dir(self, forest):
+        forest = unwrap_forest(forest)
         value = getattr(forest, "scan_dir", None)
         return Path(value) if value else None
 
     def forest_system_root(self, forest):
+        forest = unwrap_forest(forest)
         value = getattr(forest, "system_root", None)
         return Path(value) if value else None
 
     def game_root(self, forest):
+        forest = unwrap_forest(forest)
         fn = getattr(self._provider, "forest_game_root", None)
         if callable(fn):
             return fn(forest)
@@ -242,9 +249,14 @@ class CoreApiAdapter:
         return scan_dir.parent
 
     def add_virtual_file(self, forest, path, text):
-        return self._provider.add_virtual_file(forest, path, text)
+        return self._provider.add_virtual_file(
+            unwrap_forest(forest),
+            path,
+            text,
+        )
 
     def patch_target(self, forest, path):
+        forest = unwrap_forest(forest)
         parents = getattr(forest, "include_parents", {}).get(path) or ()
         if not parents:
             return None
@@ -266,6 +278,7 @@ class CoreApiAdapter:
         )
 
     def color_definitions(self, forest, overlay=None, config_dir=None):
+        forest = unwrap_forest(forest)
         provider = getattr(self._provider, "color_definitions", None)
         if callable(provider):
             return provider(
@@ -312,12 +325,13 @@ class CoreApiAdapter:
 
     def start_prebuild(self, forest, config_dir, overlay=None):
         return self._provider.start_prebuild(
-            forest,
+            unwrap_forest(forest),
             config_dir,
             overlay=overlay,
         )
 
     def ensure_prebuild(self, forest=None, config_dir=None, overlay=None):
+        forest = unwrap_forest(forest)
         fn = getattr(self._provider, "ensure_prebuild", None)
         if callable(fn):
             return fn(
@@ -346,6 +360,7 @@ class CoreApiAdapter:
     # --- резолвер и сборка ------------------------------------------------
 
     def run_resolver(self, forest, config_dir, log=None):
+        forest = unwrap_forest(forest)
         fn = getattr(self._provider, "run_resolver", None)
         if callable(fn):
             return fn(forest, config_dir, log=log)
@@ -358,6 +373,7 @@ class CoreApiAdapter:
 
     def assemble_text(self, root_path, forest, config_dir, log=None,
                       overlay=None):
+        forest = unwrap_forest(forest)
         fn = getattr(self._provider, "assemble_text", None)
         if callable(fn):
             return fn(
@@ -377,6 +393,7 @@ class CoreApiAdapter:
         )
 
     def assemble_to_file(self, root_path, forest):
+        forest = unwrap_forest(forest)
         fn = getattr(self._provider, "assemble_to_file", None)
         if callable(fn):
             return fn(root_path, forest)
@@ -385,6 +402,7 @@ class CoreApiAdapter:
 
     def assemble_resolved(self, root_path, forest, config_dir, log=None,
                           overlay=None):
+        forest = unwrap_forest(forest)
         fn = getattr(self._provider, "assemble_resolved", None)
         if callable(fn):
             return fn(
@@ -434,7 +452,7 @@ class CoreApiAdapter:
     # --- предметы и иконки -----------------------------------------------
 
     def item_catalog_root(self, forest):
-        raw = self._provider.item_catalog_root(forest)
+        raw = self._provider.item_catalog_root(unwrap_forest(forest))
         return Path(raw) if raw is not None else None
 
     def build_item_catalog(
@@ -446,7 +464,7 @@ class CoreApiAdapter:
         overlay=None,
     ):
         raw = self._provider.build_item_catalog(
-            forest,
+            unwrap_forest(forest),
             log=log,
             resolved_text=resolved_text,
             reuse_snapshot_cache=reuse_snapshot_cache,
@@ -499,7 +517,7 @@ class CoreApiAdapter:
         overlay=None,
     ):
         raw = self._provider.build_item_entry(
-            forest,
+            unwrap_forest(forest),
             resolved_text,
             section,
             log=log,
@@ -519,7 +537,7 @@ class CoreApiAdapter:
         overlay=None,
     ):
         raw = self._provider.build_item_entry_from_block(
-            forest,
+            unwrap_forest(forest),
             block_text,
             section,
             offset=offset,
@@ -581,7 +599,7 @@ class CoreApiAdapter:
     def build_section_graph(self, forest, section_name, vfs_mode=False,
                             log=None, overlay=None):
         graph = self._provider.build_section_graph(
-            forest,
+            unwrap_forest(forest),
             section_name,
             vfs_mode=vfs_mode,
             log=log,
@@ -970,7 +988,7 @@ class UiApiAdapter:
     def workspace_forest(self):
         fn = getattr(self._platform, "workspace_forest", None)
         if callable(fn):
-            return fn()
+            return forest_ref(fn())
         return None
 
     def publish_tree_ready(self, forest):
@@ -1317,7 +1335,7 @@ class UiApiAdapter:
         return self._platform.save_project_now()
 
     def open_resolved_tab(self, tab_id, title, text, line_sources, root_path,
-                          line_number=None):
+                          line_number=None, request_id=None):
         self._platform.open_resolved_tab(
             tab_id,
             title,
@@ -1325,6 +1343,7 @@ class UiApiAdapter:
             line_sources,
             root_path,
             line_number,
+            request_id=request_id,
         )
 
     def ensure_resolved_document(self, tab_id, root_path, title="", text="",
@@ -1344,7 +1363,8 @@ class UiApiAdapter:
         )
 
     def open_xml_resolved_tab(self, tab_id, title, text, root_path,
-                              line_sources=(), line_number=None):
+                              line_sources=(), line_number=None,
+                              request_id=None):
         self._platform.open_xml_resolved_tab(
             tab_id,
             title,
@@ -1352,6 +1372,7 @@ class UiApiAdapter:
             root_path,
             line_sources,
             line_number,
+            request_id=request_id,
         )
 
     def open_file_with_search(self, path, search_text):
@@ -1378,7 +1399,8 @@ class UiApiAdapter:
         return self._platform.ask_text(prompt, initial)
 
     def show_text(self, text, label, readonly=True, source_path=None,
-                  line_number=None, syntax=True, notice=None):
+                  line_number=None, syntax=True, notice=None,
+                  request_id=None, tab_id=None):
         self._platform.show_text(
             text,
             label,
@@ -1387,6 +1409,8 @@ class UiApiAdapter:
             line_number=line_number,
             syntax=syntax,
             notice=notice,
+            request_id=request_id,
+            tab_id=tab_id,
         )
 
     def show_module_window(self, key, window):
@@ -1462,11 +1486,18 @@ class UiApiAdapter:
     def open_raw(self, path):
         self._platform.commands.execute("ui.open_file_raw", path)
 
-    def notify_file_open_failed(self, path, reason=""):
+    def notify_file_open_failed(self, path, reason="", request_id=None):
         return self._platform.notify_file_open_failed(
             path,
             reason=reason,
+            request_id=request_id,
         )
+
+    def current_file_request_id(self):
+        fn = getattr(self._platform, "current_file_request_id", None)
+        if callable(fn):
+            return int(fn() or 0)
+        return 0
 
     def open_at_line(self, path, line_number):
         self._platform.commands.execute(

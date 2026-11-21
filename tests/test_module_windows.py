@@ -34,6 +34,18 @@ class ModuleWindowManagerTest(unittest.TestCase):
         self.manager.close("test.window")
         self.assertFalse(window.isVisible())
 
+    def test_focus_known_window_returns_true(self):
+        window = QWidget()
+        self.manager.show("test.window", window)
+        window.hide()
+
+        self.assertTrue(self.manager.focus("test.window"))
+        self.assertTrue(window.isVisible())
+        window.close()
+
+    def test_focus_unknown_window_returns_false(self):
+        self.assertFalse(self.manager.focus("missing.window"))
+
     def test_close_unknown_key_is_noop(self):
         self.assertIsNone(self.manager.close("missing.window"))
 

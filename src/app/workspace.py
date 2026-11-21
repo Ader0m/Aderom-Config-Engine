@@ -10,11 +10,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from sdk.forest import ForestRef, unwrap_forest
+
 
 class WorkspaceService:
     def __init__(self, services=None):
         self._services = services
         self._forest = None
+        self._forest_ref = None
         self._config_dir = None
         self._generation = 0
         self._virtual_paths = set()
@@ -26,6 +29,11 @@ class WorkspaceService:
     @property
     def forest(self):
         return self._forest
+
+    @property
+    def forest_ref(self):
+        """Read-only handle для модулей; сырой лес не покидает платформу."""
+        return self._forest_ref
 
     @property
     def config_dir(self):
@@ -40,12 +48,21 @@ class WorkspaceService:
         return self._virtual_paths
 
     def set_forest(self, forest, config_dir=None):
+        ref = forest if isinstance(forest, ForestRef) else None
+        forest = unwrap_forest(forest)
         if forest is not self._forest:
             # Новый лес мог быть построен сразу с overlay. Набор
             # виртуальных путей восстановится из ProjectOverlay.new_files
             # при следующем apply_overlay().
             self._virtual_paths.clear()
+            if ref is None and forest is not None:
+                ref = ForestRef(forest)
+            self._forest_ref = ref
         self._forest = forest
+        if forest is None:
+            self._forest_ref = None
+        elif self._forest_ref is None:
+            self._forest_ref = ForestRef(forest)
         if config_dir is not None:
             self._config_dir = Path(config_dir)
         self._generation += 1
@@ -125,6 +142,7 @@ class WorkspaceService:
 
     def clear(self):
         self._forest = None
+        self._forest_ref = None
         self._virtual_paths.clear()
         self._generation += 1
 

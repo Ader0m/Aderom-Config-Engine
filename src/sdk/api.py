@@ -18,8 +18,9 @@ import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Callable, Optional, Protocol, Sequence
+from typing import Callable, Mapping, Optional, Protocol, Sequence
 
+from .forest import ForestRef, forest_ref
 from .hints import HintsHandle
 from .registrations import RegistrationHandle
 
@@ -57,12 +58,27 @@ class ProjectOverlay:
         object.__setattr__(
             self,
             "source_files",
-            MappingProxyType(dict(self.source_files or {})),
+            MappingProxyType(
+                {
+                    path: str(text)
+                    for path, text in (self.source_files or {}).items()
+                }
+            ),
         )
+        normalized_edits = {}
+        for path, value in (self.resolved_edits or {}).items():
+            original = str(value[0] or "")
+            current = str(value[1] or "")
+            sources = value[2] if len(value) > 2 else ()
+            normalized_edits[path] = (
+                original,
+                current,
+                tuple(sources or ()),
+            )
         object.__setattr__(
             self,
             "resolved_edits",
-            MappingProxyType(dict(self.resolved_edits or {})),
+            MappingProxyType(normalized_edits),
         )
         object.__setattr__(
             self,
@@ -367,9 +383,23 @@ class SectionGraphContribution:
 
     children: tuple[GraphNode, ...] = field(default_factory=tuple)
     lost_children: tuple[GraphNode, ...] = field(default_factory=tuple)
-    edge_styles: dict = field(default_factory=dict)
+    edge_styles: Mapping = field(default_factory=dict)
     # edge_type -> callable(node): модуль сам открывает свои узлы.
-    openers: dict = field(default_factory=dict)
+    openers: Mapping = field(default_factory=dict)
+
+    def __post_init__(self):
+        # Модуль собирает contribution сам, но после возврата платформа
+        # и другие потребители должны видеть неизменяемый снимок.
+        object.__setattr__(
+            self,
+            "edge_styles",
+            MappingProxyType(dict(self.edge_styles or {})),
+        )
+        object.__setattr__(
+            self,
+            "openers",
+            MappingProxyType(dict(self.openers or {})),
+        )
 
 
 @dataclass(frozen=True)
@@ -387,11 +417,16 @@ class SectionGraph:
 class SectionGraphRequest:
     """Контекст для модулей, дополняющих граф связей секции."""
 
-    forest: object
+    forest: ForestRef
     section_name: str
     graph: SectionGraph
     vfs_mode: bool = False
-    overlay: object = None
+    overlay: Optional[ProjectOverlay] = None
+
+    def __post_init__(self):
+        # Даже если вызывающий передал сырой LtxForest, модуль получает
+        # только read-only handle.
+        object.__setattr__(self, "forest", forest_ref(self.forest))
 
 
 @dataclass(frozen=True)
@@ -577,7 +612,11 @@ class ItemCardRequest:
 
 @dataclass(frozen=True)
 class FileOpened:
-    """Факт открытия файла в конкретной вкладке."""
+    """Факт открытия файла в конкретной вкладке.
+
+    ``request_id`` — id запроса из ``UiApi.current_file_request_id()``;
+    ``0`` для открытий вне запроса.
+    """
 
     path: Path
     tab_id: str = ""
@@ -586,7 +625,10 @@ class FileOpened:
 
 @dataclass(frozen=True)
 class FileOpenFailed:
-    """Открытие файла не состоялось."""
+    """Открытие файла не состоялось.
+
+    ``request_id`` позволяет отменить ровно тот запрос, который упал.
+    """
 
     path: Path
     request_id: int = 0
@@ -632,31 +674,31 @@ class CoreApi(Protocol):
         log: Optional[Callable[[str], None]] = None,
         clean: bool = False,
         overlay=None,
-    ):
+    ) -> ForestRef:
         """Построить дерево и вернуть непрозрачный handle для SDK.
 
         ``overlay`` — карта ``{path: text}`` с черновиками проекта.
         """
 
-    def tree_summary(self, forest) -> TreeSummary:
+    def tree_summary(self, forest: ForestRef) -> TreeSummary:
         """Вернуть сводку по построенному дереву."""
 
-    def relative_path(self, forest, path: Path) -> str:
+    def relative_path(self, forest: ForestRef, path: Path) -> str:
         """Относительный путь файла в дереве."""
 
-    def forest_scan_dir(self, forest) -> Optional[Path]:
+    def forest_scan_dir(self, forest: ForestRef) -> Optional[Path]:
         """Каталог, который сканировало дерево (``gamedata/configs``)."""
 
-    def forest_system_root(self, forest) -> Optional[Path]:
+    def forest_system_root(self, forest: ForestRef) -> Optional[Path]:
         """Корневой ``system.ltx`` построенного дерева."""
 
-    def game_root(self, forest) -> Optional[Path]:
+    def game_root(self, forest: ForestRef) -> Optional[Path]:
         """Корень ``gamedata`` VFS, где лежат ``sounds``/``textures``/``meshes``."""
 
-    def add_virtual_file(self, forest, path: Path, text: str) -> bool:
+    def add_virtual_file(self, forest: ForestRef, path: Path, text: str) -> bool:
         """Добавить новый черновик в уже построенное дерево VFS."""
 
-    def patch_target(self, forest, path: Path) -> Optional[Path]:
+    def patch_target(self, forest: ForestRef, path: Path) -> Optional[Path]:
         """Базовый файл, к которому применяется DLTX-патч."""
 
     def read_text(self, path: Path) -> str:
@@ -667,7 +709,7 @@ class CoreApi(Protocol):
 
     def color_definitions(
         self,
-        forest,
+        forest: ForestRef,
         overlay=None,
         config_dir: Optional[Path] = None,
     ) -> dict:
@@ -710,10 +752,10 @@ class CoreApi(Protocol):
 
     # --- фоновая предсборка ----------------------------------------------
 
-    def start_prebuild(self, forest, config_dir: Path, overlay=None) -> None:
+    def start_prebuild(self, forest: ForestRef, config_dir: Path, overlay=None) -> None:
         """Запустить фоновую сборку всех LTX-файлов дерева."""
 
-    def ensure_prebuild(self, forest=None, config_dir=None, overlay=None) -> bool:
+    def ensure_prebuild(self, forest: Optional[ForestRef] = None, config_dir=None, overlay=None) -> bool:
         """Запустить/перезапустить сборку, если кеш устарел.
 
         Возвращает True, если сборка была запущена.
@@ -736,7 +778,7 @@ class CoreApi(Protocol):
 
     def run_resolver(
         self,
-        forest,
+        forest: ForestRef,
         config_dir: Path,
         log: Optional[Callable[[str], None]] = None,
     ):
@@ -745,20 +787,20 @@ class CoreApi(Protocol):
     def assemble_text(
         self,
         root_path: Path,
-        forest,
+        forest: ForestRef,
         config_dir: Path,
         log: Optional[Callable[[str], None]] = None,
         overlay: Optional[ProjectOverlay] = None,
     ) -> str:
         """Собрать итоговый текст файла так, как его видит игра."""
 
-    def assemble_to_file(self, root_path: Path, forest) -> Path:
+    def assemble_to_file(self, root_path: Path, forest: ForestRef) -> Path:
         """Собрать файл в каталог сгенерированных конфигов."""
 
     def assemble_resolved(
         self,
         root_path: Path,
-        forest,
+        forest: ForestRef,
         config_dir: Path,
         log: Optional[Callable[[str], None]] = None,
         overlay: Optional[ProjectOverlay] = None,
@@ -790,12 +832,12 @@ class CoreApi(Protocol):
 
     # --- предметы и иконки -----------------------------------------------
 
-    def item_catalog_root(self, forest) -> Optional[Path]:
+    def item_catalog_root(self, forest: ForestRef) -> Optional[Path]:
         """Корень каталога предметов: ``system.ltx`` или fallback-файл."""
 
     def build_item_catalog(
         self,
-        forest,
+        forest: ForestRef,
         log: Optional[Callable[[str], None]] = None,
         resolved_text: Optional[str] = None,
         reuse_snapshot_cache: bool = False,
@@ -817,7 +859,7 @@ class CoreApi(Protocol):
 
     def build_item_entry(
         self,
-        forest,
+        forest: ForestRef,
         resolved_text: str,
         section: str,
         log: Optional[Callable[[str], None]] = None,
@@ -832,7 +874,7 @@ class CoreApi(Protocol):
 
     def build_item_entry_from_block(
         self,
-        forest,
+        forest: ForestRef,
         block_text: str,
         section: str,
         offset: int = 0,
@@ -878,7 +920,7 @@ class CoreApi(Protocol):
 
     def build_section_graph(
         self,
-        forest,
+        forest: ForestRef,
         section_name: str,
         vfs_mode: bool = False,
         log: Optional[Callable[[str], None]] = None,
@@ -1054,14 +1096,18 @@ class UiApi(Protocol):
         публикует новое поколение дерева и сбрасывает зависимые кэши.
         """
 
-    def workspace_forest(self):
-        """Текущий лес — единственный экземпляр, которым владеет платформа."""
+    def workspace_forest(self) -> Optional[ForestRef]:
+        """Текущий лес как read-only handle.
 
-    def publish_tree_ready(self, forest) -> TreeReady:
+        Модуль может читать безопасные проекции и передавать handle в
+        ``ctx.services``, но не получает изменяемый ``LtxForest``.
+        """
+
+    def publish_tree_ready(self, forest: ForestRef) -> TreeReady:
         """Опубликовать новое поколение дерева.
 
         Платформа сохраняет лес у себя и рассылает лёгкий ``TreeReady``;
-        модули читают сам лес через ``workspace_forest()``.
+        модули читают его через ``workspace_forest()``.
         """
 
     def workspace_generation(self) -> int:
@@ -1290,8 +1336,14 @@ class UiApi(Protocol):
         line_sources: Sequence[Optional[LineSource]],
         root_path: Path,
         line_number: Optional[int] = None,
+        request_id: Optional[int] = None,
     ) -> None:
-        """Открыть вкладку резолв-вида с панелью источников."""
+        """Открыть вкладку резолв-вида с панелью источников.
+
+        ``request_id`` связывает событие ``FILE_OPENED`` с запросом
+        открытия. Асинхронный обработчик должен передать id, полученный
+        из ``ctx.ui.current_file_request_id()``.
+        """
 
     def ensure_resolved_document(
         self,
@@ -1318,10 +1370,12 @@ class UiApi(Protocol):
         root_path: Path,
         line_sources: Sequence[Optional[LineSource]] = (),
         line_number: Optional[int] = None,
+        request_id: Optional[int] = None,
     ) -> None:
         """Открыть вкладку с результатом XML-резолва.
 
         ``line_sources`` — владельцы строк в том же формате, что у LTX.
+        ``request_id`` связывает событие ``FILE_OPENED`` с запросом.
         """
 
     def open_file_with_search(self, path: Path, search_text: str) -> None:
@@ -1356,12 +1410,18 @@ class UiApi(Protocol):
         line_number: Optional[int] = None,
         syntax: bool = True,
         notice: Optional[str] = None,
+        request_id: Optional[int] = None,
+        tab_id: Optional[str] = None,
     ) -> None:
         """Показать текст в редакторе/просмотрщике платформы.
 
         ``source_path`` — файл, содержимое которого показано. Нужен, чтобы
         событие открытия можно было сопоставить с отложенной навигацией.
         ``line_number`` — перейти к строке после показа.
+        ``request_id`` — id запроса открытия; ``None`` — взять активный
+        запрос или ожидающий запрос для ``source_path``.
+        ``tab_id`` — открыть/переиспользовать отдельную текстовую вкладку;
+        ``None`` — зарезервированная вкладка ``ui.editor``.
         """
 
     def show_module_window(self, key: str, window) -> None:
@@ -1413,7 +1473,19 @@ class UiApi(Protocol):
         """Попросить модуль открыть/сфокусировать вкладку по ключу."""
 
     def request_file_open(self, path: Path) -> bool:
-        """Попросить открыть файл через перехватываемое действие."""
+        """Попросить открыть файл через перехватываемое действие.
+
+        Если никто не перехватил запрос, платформа открывает файл сама.
+        ``False`` означает, что открытие не удалось.
+        """
+
+    def current_file_request_id(self) -> int:
+        """id текущего запроса открытия (``0`` вне обработчика).
+
+        Асинхронный обработчик должен сохранить значение при старте и
+        передать его в ``open_resolved_tab``/``open_xml_resolved_tab``/
+        ``notify_file_open_failed``.
+        """
 
     def open_file(self, path: Path) -> None:
         """Открыть файл через общий маршрутизатор обработчиков."""
@@ -1421,8 +1493,17 @@ class UiApi(Protocol):
     def open_raw(self, path: Path) -> None:
         """Открыть файл в редакторе без обработчиков модуля."""
 
-    def notify_file_open_failed(self, path: Path, reason: str = "") -> None:
-        """Сообщить платформе, что открытие файла не состоялось."""
+    def notify_file_open_failed(
+        self,
+        path: Path,
+        reason: str = "",
+        request_id: Optional[int] = None,
+    ) -> None:
+        """Сообщить платформе, что открытие файла не состоялось.
+
+        ``request_id`` нужен асинхронным обработчикам: без него платформа
+        отменит самый старый ожидающий запрос для этого пути.
+        """
 
     def open_at_line(self, path: Path, line_number: int) -> None:
         """Открыть файл и перейти к строке."""

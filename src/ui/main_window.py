@@ -92,6 +92,9 @@ class MainWindow(QMainWindow):
         self.splitter.addWidget(self.editor)
         self.splitter.setStretchFactor(0, 1)
         self.splitter.setStretchFactor(1, 3)
+        # Стартовые пропорции: дерево ~25%, редактор ~75%. Без явных
+        # sizes пустой EditorTabs (без вкладок) схлопывается по sizeHint.
+        self.splitter.setSizes([350, 1050])
 
         self.setCentralWidget(self.splitter)
 
@@ -115,6 +118,8 @@ class MainWindow(QMainWindow):
         self.log_text = DiagnosticsLog()
         self.log_dock.setWidget(self.log_text)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
+        # Диагностика — компактная полоса внизу, а не половина окна.
+        self.resizeDocks([self.log_dock], [90], Qt.Vertical)
 
     def _init_menu(self):
         menubar = self.menuBar()
@@ -312,7 +317,7 @@ class MainWindow(QMainWindow):
 
     # -------------------------------------------------- события
     def _on_tree_ready(self, _payload=None):
-        forest = self.api.workspace_forest()
+        forest = self.api.workspace.forest
         if forest is None:
             return
         self.file_tree.load_forest(forest)

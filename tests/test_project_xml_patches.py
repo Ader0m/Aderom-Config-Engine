@@ -94,6 +94,40 @@ class ProjectXmlPatchTest(unittest.TestCase):
             any(name.endswith("_ace_proj.xml") for name in names)
         )
 
+    def test_xml_target_uses_draft_include_structure(self):
+        root = self.config_dir / "ui" / "root.xml"
+        child = self.config_dir / "ui" / "child.xml"
+        root.write_bytes(
+            b'<root>\n#include "ui\\child.xml"\n</root>\n'
+        )
+        child.write_bytes(b"<child/>\n")
+        self.forest.xml_files.extend([root, child])
+        self.forest.rel_paths[root] = r"ui\root.xml"
+        self.forest.rel_paths[child] = r"ui\child.xml"
+
+        self.project.create(
+            "proj-dxml",
+            save_mode="on_file",
+            xml_patch_mode="dxml_lua",
+        )
+        # Черновик корня больше не включает child.xml.
+        self.project.update_draft(root, "<root>\n</root>\n")
+        self.project.update_draft(
+            child,
+            "<child>\n  <value>1</value>\n</child>\n",
+        )
+
+        preview = self.project.build_preview(Services(), self.forest)
+        item = next(
+            item
+            for item in preview.items
+            if Path(item.source_path) == child
+        )
+
+        self.assertTrue(item.ok, item.error)
+        self.assertEqual(Path(item.plan.target.root_path), child)
+        self.assertEqual(item.plan.target.candidates, (child,))
+
     def test_script_reference_becomes_separate_preview_item(self):
         scripts = Path(self.temp.name) / "gamedata" / "scripts"
         scripts.mkdir(parents=True, exist_ok=True)

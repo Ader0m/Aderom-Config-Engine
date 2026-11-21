@@ -548,11 +548,12 @@ class CodeEditor(QWidget):
         self._set_hints_enabled(True)
 
     def open_file(self, file_path, text=None):
+        """Показать файл. Возвращает ``False``, если показать не удалось."""
         path = Path(file_path)
 
         if text is None:
             if not path.is_file():
-                return
+                return False
             text = self._read_text(path)
 
         self._show_content(
@@ -561,6 +562,7 @@ class CodeEditor(QWidget):
             source_path=path,
             readonly=False,
         )
+        return True
 
     # -------------------------------------------------- проект
     def set_editable(self, editable):

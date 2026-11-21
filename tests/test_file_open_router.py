@@ -85,6 +85,38 @@ class FileOpenRouterTest(unittest.TestCase):
         self.assertTrue(router.open(Path("a.ltx"), self.api))
         self.assertEqual(seen, [context])
 
+    def test_conflict_at_same_priority_is_reported(self):
+        router = FileOpenRouter()
+        first = _Handler("first", priority=10)
+        second = _Handler("second", priority=10)
+        router.register(first, owner="mod_a")
+        router.register(second, owner="mod_b")
+
+        with self.assertLogs("ui.file_open_router", level="WARNING") as logs:
+            self.assertTrue(router.open(Path("a.ltx"), self.api))
+
+        self.assertIn("Конфликт обработчиков открытия", "\n".join(logs.output))
+        self.assertEqual(first.calls, [Path("a.ltx")])
+        self.assertEqual(second.calls, [])
+
+    def test_can_open_error_skips_to_next_handler(self):
+        router = FileOpenRouter()
+        broken = _Handler("broken", priority=100)
+        working = _Handler("working", priority=0)
+
+        def fail_can_open(_path):
+            raise RuntimeError("broken matcher")
+
+        broken.can_open = fail_can_open
+        router.register(broken)
+        router.register(working)
+
+        with self.assertLogs("ui.file_open_router", level="ERROR"):
+            self.assertTrue(router.open(Path("a.ltx"), self.api))
+
+        self.assertEqual(broken.calls, [])
+        self.assertEqual(working.calls, [Path("a.ltx")])
+
     def test_default_handler_is_used_when_nobody_can_open(self):
         router = FileOpenRouter()
         handler = _Handler("handler", can_open=False)

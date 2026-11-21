@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from pathlib import Path
@@ -560,17 +561,80 @@ def _xml_include_targets(
     return []
 
 
-def _xml_target_index(forest):
+def _xml_overlay_texts(overlay):
+    """XML-черновики проекта: ``{нормализованный путь: текст}``."""
+    if overlay is None:
+        return {}
+    source_files = getattr(overlay, "source_files", None) or {}
+    result = {}
+    for path, text in source_files.items():
+        path = _as_path(path)
+        if path.suffix.lower() != ".xml":
+            continue
+        result[path] = str(text)
+    return result
+
+
+def _xml_overlay_key(overlay):
+    """Подпись XML-части overlay для кэша индекса."""
+    if overlay is None:
+        return ""
+
+    revision = getattr(overlay, "revision", None)
+    if revision:
+        return "revision:%s" % revision
+
+    texts = _xml_overlay_texts(overlay)
+    new_files = sorted(
+        (
+            _as_path(path)
+            for path in (getattr(overlay, "new_files", None) or ())
+            if _as_path(path).suffix.lower() == ".xml"
+        ),
+        key=lambda item: str(item).lower(),
+    )
+    if not texts and not new_files:
+        return ""
+
+    digest = hashlib.sha1()
+    for path, text in sorted(
+        texts.items(),
+        key=lambda item: str(item[0]).lower(),
+    ):
+        digest.update(str(path).lower().encode("utf-8", "replace"))
+        digest.update(b"\0")
+        digest.update(text.encode("utf-8", "replace"))
+        digest.update(b"\1")
+    for path in new_files:
+        digest.update(str(path).lower().encode("utf-8", "replace"))
+        digest.update(b"\2")
+    return "sha1:%s" % digest.hexdigest()
+
+
+def _xml_target_index(forest, overlay=None):
+    overlay_key = _xml_overlay_key(overlay)
     cached = getattr(forest, _XML_INDEX_ATTR, None)
-    if cached is not None:
+    if (
+        isinstance(cached, tuple)
+        and len(cached) == 4
+        and cached[2] == overlay_key
+    ):
         return cached
 
     from core.tools.fs import read_xml_text
 
-    files = [
+    overlay_texts = _xml_overlay_texts(overlay)
+    file_set = {
         _as_path(path)
         for path in (getattr(forest, "xml_files", None) or ())
-    ]
+    }
+    file_set.update(overlay_texts)
+    for path in (getattr(overlay, "new_files", None) or ()):
+        path = _as_path(path)
+        if path.suffix.lower() == ".xml":
+            file_set.add(path)
+    files = sorted(file_set, key=lambda item: str(item).lower())
+
     config_dir = forest_scan_dir(forest)
     parents = {}
 
@@ -584,10 +648,12 @@ def _xml_target_index(forest):
             for path in files
         }
         for path in files:
-            try:
-                text = read_xml_text(path)
-            except Exception:
-                continue
+            text = overlay_texts.get(path)
+            if text is None:
+                try:
+                    text = read_xml_text(path)
+                except Exception:
+                    continue
             for line in text.splitlines():
                 stripped = line.strip()
                 if not (stripped.startswith("#") and "#include" in stripped):
@@ -604,7 +670,7 @@ def _xml_target_index(forest):
                 ):
                     parents.setdefault(child, set()).add(path)
 
-    index = (frozenset(files), config_dir, parents)
+    index = (frozenset(files), config_dir, overlay_key, parents)
     try:
         setattr(forest, _XML_INDEX_ATTR, index)
     except Exception:
@@ -612,10 +678,19 @@ def _xml_target_index(forest):
     return index
 
 
-def xml_root_candidates(forest, source_path) -> Tuple[Path, ...]:
-    """Все XML-корни, в include-дерево которых входит файл."""
+def xml_root_candidates(forest, source_path,
+                        overlay=None) -> Tuple[Path, ...]:
+    """Все XML-корни, в include-дерево которых входит файл.
+
+    ``overlay`` — снимок черновиков проекта: XML-файлы из
+    ``source_files`` читаются из него, а не с диска. Это нужно, чтобы
+    правка ``#include`` в черновике сразу меняла цель патча.
+    """
     source = _as_path(source_path)
-    files, _config_parts, parents = _xml_target_index(forest)
+    files, _config_parts, _overlay_key, parents = _xml_target_index(
+        forest,
+        overlay=overlay,
+    )
 
     if source not in files and source not in parents:
         return (source,)

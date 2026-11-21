@@ -115,7 +115,7 @@ class ProjectControllerMixin:
             )
 
     def workspace_forest(self):
-        return self.workspace.forest
+        return self.workspace.forest_ref
 
     def workspace_generation(self):
         return self.workspace.generation
@@ -992,6 +992,7 @@ class ProjectControllerMixin:
             return
 
         source_path = record.get("source_path")
+        tab_id = str(record.get("tab_id") or "")
         title = str(record.get("title") or "")
         state = record.get("state")
         if not isinstance(state, dict):
@@ -1008,6 +1009,7 @@ class ProjectControllerMixin:
                     readonly=bool(state.get("readonly", False)),
                     source_path=source_path,
                     notice=state.get("notice") or None,
+                    tab_id=tab_id or None,
                 )
             else:
                 opener = getattr(editor, "open_file", None)
@@ -1106,8 +1108,23 @@ class ProjectControllerMixin:
         self.log(message)
         self.set_status(message, 5000)
 
+    def _require_project_tree(self):
+        """Проектные операции требуют уже собранный VFS-лес.
+
+        На старте приложения сканирование идёт в фоне. Если открыть
+        проект раньше, его виртуальные файлы не попадут в лес.
+        """
+        if self.has_forest():
+            return True
+        self.show_error(
+            "Дерево не построено: дождитесь окончания сборки."
+        )
+        return False
+
     def create_project(self):
         if self.window is None:
+            return
+        if not self._require_project_tree():
             return
 
         setting_definitions = self.project_setting_registry.settings()
@@ -1155,6 +1172,8 @@ class ProjectControllerMixin:
 
     def load_project(self):
         if self.window is None:
+            return
+        if not self._require_project_tree():
             return
 
         projects = self.project.list_projects()

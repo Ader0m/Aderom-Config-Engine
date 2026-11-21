@@ -18,6 +18,7 @@ from sdk.api import (
     TreeReady,
 )
 from sdk.events import Events, PLATFORM_OWNER
+from sdk.forest import unwrap_forest
 
 from app.projects import (
     ProjectAssetRegistry,
@@ -86,9 +87,13 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         # избавляет первую правку от повторной установки stylesheet.
         self._override_theme_enabled = False
 
-        # Отложенная навигация: ключ — нормализованный путь файла.
-        # Запрос живёт до события FILE_OPENED ровно для этого пути.
+        # Отложенная навигация: ключ — id запроса открытия.
+        # Несколько запросов на один путь не перетирают друг друга:
+        # путь -> очередь id, а событие FILE_OPENED/FAILED несёт request_id.
+        self._file_request_seq = 0
         self._pending_file_actions = {}
+        self._pending_file_request_ids = {}
+        self._active_file_request_ids = []
 
         # Живые resolved-документы: один владелец текста на tab_id.
         self._resolved_documents = {}
@@ -132,6 +137,100 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         )
         commands.register("ui.open_file_with_search", self.request_open_file_with_search)
 
+
+    # -------------------------------------------------- запросы открытия
+    def _next_file_request_id(self):
+        self._file_request_seq += 1
+        return self._file_request_seq
+
+    def _queue_file_action(self, path, kind, value):
+        """Запомнить навигацию и вернуть id запроса открытия."""
+        request_id = self._next_file_request_id()
+        key = _path_key(path)
+        self._pending_file_actions[request_id] = (key, kind, value)
+        self._pending_file_request_ids.setdefault(key, []).append(request_id)
+        return request_id
+
+    def _discard_file_request(self, request_id):
+        record = self._pending_file_actions.pop(int(request_id or 0), None)
+        if record is None:
+            return False
+        key = record[0]
+        ids = self._pending_file_request_ids.get(key)
+        if ids:
+            try:
+                ids.remove(int(request_id))
+            except ValueError:
+                pass
+            if not ids:
+                self._pending_file_request_ids.pop(key, None)
+        return True
+
+    def _discard_file_requests_for_path(self, path):
+        key = _path_key(path)
+        ids = self._pending_file_request_ids.pop(key, ())
+        for request_id in ids:
+            self._pending_file_actions.pop(request_id, None)
+        return len(ids)
+
+    def _oldest_file_request_id(self, path):
+        key = _path_key(path)
+        ids = self._pending_file_request_ids.get(key) or ()
+        return int(ids[0]) if ids else 0
+
+    def _active_file_request_id(self):
+        if not self._active_file_request_ids:
+            return 0
+        return int(self._active_file_request_ids[-1] or 0)
+
+    def current_file_request_id(self):
+        """id текущего запроса открытия (0 вне обработчика)."""
+        return self._active_file_request_id()
+
+    def _resolve_file_request_id(self, path, request_id=None, claim=False):
+        """Выбрать request_id для события открытия.
+
+        ``request_id`` передан явно — используем его. Иначе берём активный
+        запрос (синхронный обработчик) или, если ``claim``, самый старый
+        ожидающий запрос для этого пути (асинхронный обработчик).
+        """
+        if request_id is not None:
+            return int(request_id or 0)
+        active = self._active_file_request_id()
+        if active:
+            return active
+        if claim:
+            return self._oldest_file_request_id(path)
+        return 0
+
+    def _run_file_request(self, request_id, opener):
+        """Выполнить открытие, привязав к нему request_id."""
+        self._active_file_request_ids.append(int(request_id or 0))
+        try:
+            return bool(opener())
+        finally:
+            if self._active_file_request_ids:
+                self._active_file_request_ids.pop()
+
+    def _pop_oldest_file_request(self, path):
+        key = _path_key(path)
+        ids = self._pending_file_request_ids.get(key)
+        if not ids:
+            return None
+        while ids:
+            request_id = int(ids.pop(0))
+            record = self._pending_file_actions.pop(request_id, None)
+            if record is None:
+                continue
+            if not ids:
+                self._pending_file_request_ids.pop(key, None)
+            return request_id, record[1], record[2]
+        self._pending_file_request_ids.pop(key, None)
+        return None
+
+    def _clear_pending_file_actions(self):
+        self._pending_file_actions.clear()
+        self._pending_file_request_ids.clear()
 
     # Совместимые алиасы: раньше лес и виртуальные пути жили прямо в
     # PlatformApi. Теперь их владелец — WorkspaceService.
@@ -394,18 +493,19 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         return getattr(PALETTE, str(name), fallback)
 
     def workspace_forest(self):
-        return self.workspace.forest
+        return self.workspace.forest_ref
 
     def publish_tree_ready(self, forest):
         """Сохранить лес у платформы и разослать лёгкий TreeReady."""
+        raw = unwrap_forest(forest)
         self.workspace.set_forest(forest)
         summary = None
         try:
-            summary = self.services.tree_summary(forest)
+            summary = self.services.tree_summary(raw)
         except Exception:
             pass
         payload = TreeReady(
-            cache_id=str(getattr(forest, "cache_id", "") or ""),
+            cache_id=str(getattr(raw, "cache_id", "") or ""),
             generation=int(self.workspace.generation),
             summary=summary,
         )
@@ -434,29 +534,62 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         )
 
     def request_window(self, window_id):
-        return self.dispatch_action(
-            Events.UI_WINDOW_REQUESTED,
-            str(window_id or ""),
-        )
+        window_id = str(window_id or "")
+        if self.dispatch_action(Events.UI_WINDOW_REQUESTED, window_id):
+            return True
+        # Модуль мог уже показать окно, но не подписаться на запрос:
+        # платформа сама поднимает известное окно по ключу.
+        return self._window_manager.focus(window_id)
 
     def request_tab(self, tab_id):
-        return self.dispatch_action(
-            Events.UI_TAB_REQUESTED,
-            str(tab_id or ""),
-        )
+        tab_id = str(tab_id or "")
+        if self.dispatch_action(Events.UI_TAB_REQUESTED, tab_id):
+            return True
+        if self.window is None:
+            return False
+        editor = getattr(self.window, "editor", None)
+        setter = getattr(editor, "set_current_tab", None)
+        if not callable(setter):
+            return False
+        try:
+            return bool(setter(tab_id))
+        except Exception:
+            self.log(
+                "request_tab(%s): ошибка переключения вкладки:\n%s"
+                % (tab_id, traceback.format_exc())
+            )
+            return False
 
     def request_file_open(self, path):
-        if self.dispatch_action(Events.UI_FILE_OPEN_REQUESTED, Path(path)):
+        path = Path(path)
+        if self.dispatch_action(Events.UI_FILE_OPEN_REQUESTED, path):
             return True
-        self.commands.execute("ui.open_file", Path(path))
-        return True
+        try:
+            return bool(self.commands.execute("ui.open_file", path))
+        except Exception:
+            self.log(
+                "request_file_open(%s): ошибка открытия:\n%s"
+                % (path, traceback.format_exc())
+            )
+            return False
 
     # -------------------------------------------------- команды платформы
     def request_open_file(self, path):
-        self._pending_file_actions.pop(_path_key(path), None)
-        ok = self.router.open(path, self)
+        # Явное открытие без навигации отменяет ожидавшие её запросы.
+        self._discard_file_requests_for_path(path)
+        ok = self._run_file_request(
+            0,
+            lambda: self.router.open(path, self),
+        )
         if not ok:
-            self.show_error("Не найден обработчик для открытия файла: %s" % path)
+            self.notify_file_open_failed(
+                path,
+                "Не найден обработчик для открытия файла",
+                request_id=0,
+            )
+            self.show_error(
+                "Не найден обработчик для открытия файла: %s" % path
+            )
         return ok
 
     # -------------------------------------------------- регистрации (SDK)
@@ -507,12 +640,16 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
 
     # -------------------------------------------------- ui-сервисы
     def show_text(self, text, label, readonly=True, source_path=None,
-                  line_number=None, syntax=True, notice=None):
-        # Новое явное отображение отменяет старую отложенную навигацию
-        # для этого же файла.
-        if source_path is not None:
-            self._pending_file_actions.pop(_path_key(source_path), None)
+                  line_number=None, syntax=True, notice=None,
+                  request_id=None, tab_id=None):
         if self.window is not None:
+            # Показ текста может завершать отложенный запрос открытия:
+            # событие FILE_OPENED должно нести его request_id.
+            resolved_id = self._resolve_file_request_id(
+                source_path,
+                request_id,
+                claim=source_path is not None,
+            )
             self.window.editor.show_text(
                 text,
                 label,
@@ -521,22 +658,41 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
                 line_number=line_number,
                 syntax=syntax,
                 notice=notice,
+                request_id=resolved_id,
+                tab_id=tab_id,
             )
         else:
             self._log_buffer.append("[show_text до окна] %s" % label)
 
     def request_open_file_raw(self, path):
-        self._pending_file_actions.pop(_path_key(path), None)
-        ok = self.router.open_default(path, self)
+        self._discard_file_requests_for_path(path)
+        ok = self._run_file_request(
+            0,
+            lambda: self.router.open_default(path, self),
+        )
         if not ok:
+            self.notify_file_open_failed(
+                path,
+                "Нет обработчика по умолчанию",
+                request_id=0,
+            )
             self.show_error("Нет обработчика по умолчанию для: %s" % path)
         return ok
 
-    def notify_file_open_failed(self, path, reason=""):
+    def notify_file_open_failed(self, path, reason="", request_id=None):
         """Опубликовать факт неудачного открытия от имени платформы."""
+        resolved_id = self._resolve_file_request_id(
+            path,
+            request_id,
+            claim=request_id is None,
+        )
         self.events.publish(
             Events.FILE_OPEN_FAILED,
-            FileOpenFailed(path=Path(path), reason=str(reason or "")),
+            FileOpenFailed(
+                path=Path(path),
+                request_id=resolved_id,
+                reason=str(reason or ""),
+            ),
         )
 
     def request_editor_undo(self):
@@ -574,22 +730,46 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         )
         return text if ok and text else ""
 
+    def _request_open_with_action(
+        self,
+        path,
+        kind,
+        value,
+        opener,
+        missing_message,
+    ):
+        """Запросить открытие с отложенной навигацией.
+
+        У каждого запроса свой id: два запроса на один путь не затирают
+        друг друга и получают ровно своё событие открытия.
+        """
+        path = Path(path)
+        request_id = self._queue_file_action(path, kind, value)
+        ok = self._run_file_request(request_id, opener)
+        if not ok:
+            self._discard_file_request(request_id)
+            self.notify_file_open_failed(
+                path,
+                missing_message,
+                request_id=request_id,
+            )
+            self.show_error("%s: %s" % (missing_message, path))
+        return ok
+
     def request_open_file_at_line(self, path, line_number: int):
         """Открыть файл и перейти к указанной строке.
 
         Навигация применяется не сразу: файл может открываться асинхронно
-        (резолв .ltx). Запрос ждёт события :attr:`Events.FILE_OPENED` для
-        этого же пути.
+        (резолв .ltx). Запрос ждёт события :attr:`Events.FILE_OPENED`
+        с собственным ``request_id``.
         """
-        key = _path_key(path)
-        self._pending_file_actions.pop(key, None)
-        self._pending_file_actions[key] = ("line", int(line_number))
-
-        ok = self.router.open(path, self)
-        if not ok:
-            self._pending_file_actions.pop(key, None)
-            self.show_error("Не найден обработчик для открытия файла: %s" % path)
-        return ok
+        return self._request_open_with_action(
+            path,
+            "line",
+            int(line_number),
+            lambda: self.router.open(path, self),
+            "Не найден обработчик для открытия файла",
+        )
 
     def request_open_file_with_search(self, path, search_text):
         """Открыть файл и перейти к первому вхождению ``search_text``.
@@ -597,15 +777,13 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         Навигация откладывается до факта открытия именно этого пути:
         для резолва .ltx виджет создаётся позже, после фоновой сборки.
         """
-        key = _path_key(path)
-        self._pending_file_actions.pop(key, None)
-        self._pending_file_actions[key] = ("search", search_text)
-
-        ok = self.router.open(path, self)
-        if not ok:
-            self._pending_file_actions.pop(key, None)
-            self.show_error("Не найден обработчик для: %s" % path)
-        return ok
+        return self._request_open_with_action(
+            path,
+            "search",
+            search_text,
+            lambda: self.router.open(path, self),
+            "Не найден обработчик для открытия файла",
+        )
 
     # -------------------------------------------------- факты открытия
     def _on_file_opened(self, opened):
@@ -618,12 +796,33 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
             return
         path = opened.path
         tab_id = str(opened.tab_id or "")
-        if path is None or not tab_id:
+        if path is None or not tab_id or self.window is None:
             return
 
-        pending = self._pending_file_actions.pop(_path_key(path), None)
-        if pending is None or self.window is None:
-            return
+        key = _path_key(path)
+        request_id = int(opened.request_id or 0)
+        pending = None
+
+        if request_id:
+            record = self._pending_file_actions.get(request_id)
+            if record is None:
+                # Запрос уже отменён или устарел: чужую навигацию не
+                # подставляем даже при совпадении пути.
+                return
+            if record[0] != key:
+                self.log(
+                    "[open] request_id=%s относится к другому пути: %s"
+                    % (request_id, path)
+                )
+                return
+            self._discard_file_request(request_id)
+            pending = (record[1], record[2])
+        else:
+            oldest = self._pop_oldest_file_request(path)
+            if oldest is None:
+                return
+            request_id, kind, value = oldest
+            pending = (kind, value)
 
         kind, value = pending
         widget = self.window.editor.get_tab(tab_id)
@@ -657,10 +856,19 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
                 "получено: %r" % type(failed).__name__
             )
             return
-        if self._pending_file_actions.pop(
-            _path_key(failed.path),
-            None,
-        ) is not None:
+        request_id = int(failed.request_id or 0)
+        if request_id:
+            record = self._pending_file_actions.get(request_id)
+            if record is not None and record[0] != _path_key(failed.path):
+                self.log(
+                    "[open] request_id=%s относится к другому пути: %s"
+                    % (request_id, failed.path)
+                )
+                return
+            removed = self._discard_file_request(request_id)
+        else:
+            removed = self._pop_oldest_file_request(failed.path) is not None
+        if removed:
             self.log(
                 "[open] навигация отменена, файл не открыт: %s"
                 % failed.path
@@ -683,24 +891,20 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         открывает исходный файл. Это нужно для перехода к объявлению
         строки локализации: ``line`` относится к исходному XML.
         """
-        key = _path_key(path)
-        self._pending_file_actions.pop(key, None)
-        self._pending_file_actions[key] = ("line", int(line_number))
-
-        ok = self.router.open_default(path, self)
-        if not ok:
-            self._pending_file_actions.pop(key, None)
-            self.show_error("Нет обработчика по умолчанию для: %s" % path)
-        return ok
+        return self._request_open_with_action(
+            path,
+            "line",
+            int(line_number),
+            lambda: self.router.open_default(path, self),
+            "Нет обработчика по умолчанию",
+        )
 
     def request_open_file_raw_with_search(self, path, search_text):
         """Открыть файл как сырой текст и перейти к строке поиска."""
-        key = _path_key(path)
-        self._pending_file_actions.pop(key, None)
-        self._pending_file_actions[key] = ("search", search_text)
-
-        ok = self.router.open_default(path, self)
-        if not ok:
-            self._pending_file_actions.pop(key, None)
-            self.show_error("Нет обработчика по умолчанию для: %s" % path)
-        return ok
+        return self._request_open_with_action(
+            path,
+            "search",
+            search_text,
+            lambda: self.router.open_default(path, self),
+            "Нет обработчика по умолчанию",
+        )

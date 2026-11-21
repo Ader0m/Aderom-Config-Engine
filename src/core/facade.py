@@ -740,6 +740,7 @@ class CoreServices:
         draft_text,
         forest,
         options=None,
+        overlay=None,
     ):
         """Построить план изменения сырого XML-файла."""
         return self.patch.plan_xml_document_change(
@@ -748,6 +749,7 @@ class CoreServices:
             draft_text,
             forest,
             options=options,
+            overlay=overlay,
         )
 
     def plan_xml_resolved_patch(
@@ -758,6 +760,7 @@ class CoreServices:
         line_sources=(),
         forest=None,
         options=None,
+        overlay=None,
     ):
         """Построить план правки resolved-вида XML."""
         return self.patch.plan_xml_resolved_edit(
@@ -767,6 +770,7 @@ class CoreServices:
             line_sources=line_sources,
             forest=forest,
             options=options,
+            overlay=overlay,
         )
 
     def plan_xml_fork(
@@ -871,6 +875,7 @@ class CoreServices:
         forest=None,
         options=None,
         project_mode=None,
+        overlay=None,
     ):
         """Единый вход XML: auto/fork, full_copy, dxml_lua."""
         return self.xml_patch.plan(
@@ -882,6 +887,7 @@ class CoreServices:
             forest=forest,
             options=options,
             project_mode=project_mode,
+            overlay=overlay,
         )
 
     def generate_patch(self, plan):

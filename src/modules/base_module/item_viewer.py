@@ -885,7 +885,7 @@ class ItemViewerFeature:
         self._disposed = False
         if not self.session.has_tree:
             self.ctx.ui.show_error(
-                "Дерево не построено: сначала «Пересобрать VFS»."
+                "Дерево не построено: дождитесь окончания сборки."
             )
             return
 
@@ -2435,7 +2435,7 @@ class ItemViewerFeature:
         forest = self.session.forest
         if forest is None:
             self.ctx.ui.show_error(
-                "Дерево не построено: сначала «Пересобрать VFS»."
+                "Дерево не построено: дождитесь окончания сборки."
             )
             return False
 

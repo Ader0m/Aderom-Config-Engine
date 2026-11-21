@@ -118,6 +118,7 @@ def _build_xml_plan(
     diff: XmlDocumentDiff,
     options: PatchOptions,
     forest=None,
+    overlay=None,
     resolved: bool = False,
     line_sources=(),
     after_text: str = "",
@@ -190,7 +191,11 @@ def _build_xml_plan(
 
     anchor_path = source_path
     if mode in ("new_file", "mixed") and forest is not None:
-        candidates = xml_root_candidates(forest, source_path)
+        candidates = xml_root_candidates(
+            forest,
+            source_path,
+            overlay=overlay,
+        )
         if candidates and source_path not in candidates:
             anchor_path = candidates[0]
             if len(candidates) > 1:
@@ -208,7 +213,11 @@ def _build_xml_plan(
 
     if mode == "dxml_lua":
         if forest is not None:
-            roots = xml_root_candidates(forest, source_path)
+            roots = xml_root_candidates(
+                forest,
+                source_path,
+                overlay=overlay,
+            )
         if not roots:
             roots = (source_path,)
         if config_dir is None:
@@ -460,6 +469,7 @@ class XmlPlanner:
         draft_text: str,
         forest=None,
         options: Optional[PatchOptions] = None,
+        overlay=None,
     ) -> PatchPlan:
         """Построить план изменения сырого XML-файла."""
         source_path = Path(source_path)
@@ -483,6 +493,7 @@ class XmlPlanner:
             diff,
             options,
             forest=forest,
+            overlay=overlay,
             resolved=False,
             after_text=draft_text,
         )
@@ -495,6 +506,7 @@ class XmlPlanner:
         line_sources=(),
         forest=None,
         options: Optional[PatchOptions] = None,
+        overlay=None,
     ) -> PatchPlan:
         """Построить план правки resolved-вида XML (DXML).
 
@@ -523,6 +535,7 @@ class XmlPlanner:
             diff,
             options,
             forest=forest,
+            overlay=overlay,
             resolved=True,
             line_sources=line_sources,
             after_text=edited_text,

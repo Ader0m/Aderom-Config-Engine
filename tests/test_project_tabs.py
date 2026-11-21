@@ -199,6 +199,31 @@ class RestoreProjectTabsTest(unittest.TestCase):
                 "ogg_editor.abc",
             )
 
+    def test_named_raw_tab_is_restored_in_its_own_tab(self):
+        with tempfile.TemporaryDirectory() as d:
+            source = Path(d) / "mod_items_patch.ltx"
+            source.write_text("[a]\nx = 1\n", encoding="windows-1251")
+
+            api, window, _project = self._api(d)
+            tab_id = "base.raw:mod_items_patch.ltx"
+            window.editor.show_text(
+                "[a]\nx = 1\n",
+                "DLTX PATCH: mod_items_patch.ltx",
+                readonly=False,
+                source_path=source,
+                notice="DLTX-ПАТЧ",
+                tab_id=tab_id,
+            )
+
+            self.assertTrue(api._save_open_tabs())
+            window.editor.close_all_tabs()
+            api._restore_editor_tabs()
+
+            restored = window.editor.get_tab(tab_id)
+            self.assertIsNotNone(restored)
+            self.assertIn("x = 1", restored.text())
+            self.assertEqual(window.editor.current_tab_id, tab_id)
+
     def test_project_activation_replaces_tabs_from_session(self):
         with tempfile.TemporaryDirectory() as d:
             source = Path(d) / "a.ltx"

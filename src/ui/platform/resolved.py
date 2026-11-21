@@ -54,7 +54,7 @@ class ResolvedDocumentMixin:
                     unbind(document)
             document.unbind_view()
         self._resolved_documents.clear()
-        self._pending_file_actions.clear()
+        self._clear_pending_file_actions()
         self._patch_preview_ready = False
         apply_label = getattr(self, "_apply_patch_action_label", None)
         if callable(apply_label):
@@ -984,11 +984,16 @@ class ResolvedDocumentMixin:
 
 
     def open_resolved_tab(self, tab_id, title, text, line_sources, root_path,
-                          line_number=None):
+                          line_number=None, request_id=None):
         """Открыть (или сфокусировать) вкладку живого resolved-документа."""
         if self.window is None:
             return
 
+        request_id = self._resolve_file_request_id(
+            root_path,
+            request_id,
+            claim=True,
+        )
         tab_id = str(tab_id or "")
         existing_widget = self.window.editor.get_tab(tab_id)
         from ..editor import ResolvedView
@@ -1032,6 +1037,7 @@ class ResolvedDocumentMixin:
                 title,
                 existing_widget,
                 source_path=str(root_path),
+                request_id=request_id,
             )
             if line_number is not None:
                 existing_widget.goto_line(int(line_number))
@@ -1097,6 +1103,7 @@ class ResolvedDocumentMixin:
             title,
             view,
             source_path=root_path,
+            request_id=request_id,
         )
         tab_elapsed = time.perf_counter() - started
         self._log_slow_view("resolved", title, content_elapsed, tab_elapsed)
@@ -1150,12 +1157,18 @@ class ResolvedDocumentMixin:
         return True
 
     def open_xml_resolved_tab(self, tab_id, title, text, root_path,
-                              line_sources=None, line_number=None):
+                              line_sources=None, line_number=None,
+                              request_id=None):
         """Открыть XML-резолв в отдельной вкладке с панелью источников."""
         if self.window is None:
             return
         from ..editor import ResolvedView
 
+        request_id = self._resolve_file_request_id(
+            root_path,
+            request_id,
+            claim=True,
+        )
         sources = list(line_sources or [])
         has_sources = any(src is not None for src in sources)
         started = time.perf_counter()
@@ -1213,6 +1226,7 @@ class ResolvedDocumentMixin:
                 title,
                 existing_widget,
                 source_path=str(root_path),
+                request_id=request_id,
             )
             if line_number is not None:
                 existing_widget.goto_line(int(line_number))
@@ -1255,6 +1269,7 @@ class ResolvedDocumentMixin:
             title,
             view,
             source_path=str(root_path),
+            request_id=request_id,
         )
         tab_elapsed = time.perf_counter() - started
         self._log_slow_view("xml-resolved", title, content_elapsed, tab_elapsed)

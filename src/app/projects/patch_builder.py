@@ -14,6 +14,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import List, Tuple
 
+from sdk.api import ProjectOverlay
+
 from core import (
     GeneratedPatch,
     PatchFile,
@@ -536,6 +538,28 @@ class ProjectPreviewMixin:
                 )
             ]
 
+        # Снимок для XML-целей патча: индекс include должен строиться
+        # по тем же черновикам, что и сами патчи, а не по диску.
+        overlay = ProjectOverlay(
+            source_files={
+                Path(draft.path): str(draft.current_text)
+                for draft in raw_drafts
+            },
+            resolved_edits={
+                Path(draft.root_path): (
+                    str(draft.original_text),
+                    str(draft.current_text),
+                    tuple(draft.line_sources or ()),
+                )
+                for draft in resolved_drafts
+            },
+            new_files=frozenset(
+                Path(draft.path)
+                for draft in raw_drafts
+                if draft.is_new
+            ),
+        )
+
         items: List[PreviewItem] = []
         script_seen = set()
 
@@ -759,6 +783,7 @@ class ProjectPreviewMixin:
                         forest=forest,
                         options=options,
                         project_mode=self.patch_mode(),
+                        overlay=overlay,
                     )
                 else:
                     result = services.plan_ltx_patch(

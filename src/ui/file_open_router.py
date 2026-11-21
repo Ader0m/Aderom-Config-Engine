@@ -34,8 +34,17 @@ class TextEditorHandler(FileOpenHandler):
                     5000,
                 )
 
-        self.editor.open_file(str(path), text=text)
-        return True
+        request_id = 0
+        current = getattr(api, "current_file_request_id", None)
+        if callable(current):
+            request_id = int(current() or 0)
+        return bool(
+            self.editor.open_file(
+                str(path),
+                text=text,
+                request_id=request_id,
+            )
+        )
 
 
 class _HandlerEntry:
@@ -47,6 +56,23 @@ class _HandlerEntry:
         self.handler = handler
         self.context = context
         self.owner = str(owner or "")
+
+
+def _priority(handler):
+    try:
+        return int(getattr(handler, "priority", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _handler_label(entry):
+    handler = entry.handler
+    owner = entry.owner or "<platform>"
+    return "%s(owner=%s, priority=%s)" % (
+        type(handler).__name__,
+        owner,
+        _priority(handler),
+    )
 
 
 class FileOpenRouter:
@@ -88,16 +114,50 @@ class FileOpenRouter:
 
     def open(self, path, api):
         p = Path(path)
-
-        for entry in sorted(
+        entries = sorted(
             tuple(self._handlers),
-            key=lambda item: -item.handler.priority,
-        ):
+            key=lambda item: -_priority(item.handler),
+        )
+
+        index = 0
+        while index < len(entries):
+            priority = _priority(entries[index].handler)
+            group = []
+            while (
+                index < len(entries)
+                and _priority(entries[index].handler) == priority
+            ):
+                group.append(entries[index])
+                index += 1
+
+            candidates = []
+            for entry in group:
+                try:
+                    if entry.handler.can_open(p):
+                        candidates.append(entry)
+                except Exception:
+                    log.exception(
+                        "can_open обработчика открытия упал: %r",
+                        entry.handler,
+                    )
+
+            if not candidates:
+                continue
+
+            if len(candidates) > 1:
+                log.warning(
+                    "Конфликт обработчиков открытия %s на priority=%d: %s; "
+                    "выбран %s",
+                    p,
+                    priority,
+                    ", ".join(_handler_label(item) for item in candidates),
+                    _handler_label(candidates[0]),
+                )
+
+            entry = candidates[0]
             handler = entry.handler
             context = entry.context
             try:
-                if not handler.can_open(p):
-                    continue
                 # Модульный обработчик получает свой ModuleContext, а не
                 # сырой PlatformApi. Платформенный default — PlatformApi.
                 result = handler.open(

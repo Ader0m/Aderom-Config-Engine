@@ -11,6 +11,11 @@ def resolved_tab_id(relative_path) -> str:
     return "base.resolved:%s" % relative_path
 
 
+def raw_tab_id(relative_path) -> str:
+    """Единый id сырой вкладки базового модуля."""
+    return "base.raw:%s" % relative_path
+
+
 class LtxFileOpener:
     """Показывает .ltx так, как его видит игра, либо как исходный патч."""
 
@@ -35,7 +40,7 @@ class LtxFileOpener:
         if not self.session.has_tree:
             self._open_failed(path)
             self.ctx.ui.show_error(
-                "Дерево не построено: сначала «Пересобрать VFS»."
+                "Дерево не построено: дождитесь окончания сборки."
             )
             return False
 
@@ -44,9 +49,77 @@ class LtxFileOpener:
 
         return self._open_resolved(path)
 
-    def _open_failed(self, path):
+    def _current_request_id(self):
+        """id запроса открытия для асинхронного продолжения."""
+        getter = getattr(self.ctx.ui, "current_file_request_id", None)
+        if not callable(getter):
+            return 0
+        try:
+            return int(getter() or 0)
+        except Exception:
+            return 0
+
+    def _open_failed(self, path, request_id=0):
         """Сообщить платформе, что открытие этого пути не состоится."""
-        self.ctx.ui.notify_file_open_failed(path)
+        self.ctx.ui.notify_file_open_failed(
+            path,
+            request_id=request_id or None,
+        )
+
+    def _relative(self, path) -> str:
+        """Относительный путь файла в текущем лесу (имя как запасной)."""
+        forest = self.session.forest
+        if forest is None:
+            return Path(path).name
+        try:
+            return self.ctx.services.relative_path(forest, path)
+        except Exception:
+            return Path(path).name
+
+    def _focus_open_tab(self, tab_id, line_number=None) -> bool:
+        """Активировать уже открытую resolved-вкладку без пересборки.
+
+        ``request_tab`` возвращает ``True`` только если вкладка существует;
+        ``open_resolved_document`` публикует ``FILE_OPENED`` с текущим
+        ``request_id`` (нужен для отложенного перехода) и переходит к
+        строке. Повторный резолв и перерисовка не выполняются.
+        """
+        ui = self.ctx.ui
+        request_tab = getattr(ui, "request_tab", None)
+        if not callable(request_tab):
+            return False
+        try:
+            if not request_tab(tab_id):
+                return False
+        except Exception as exc:
+            ui.log("Не удалось переключиться на вкладку %s: %s" % (tab_id, exc))
+            return False
+
+        opener = getattr(ui, "open_resolved_document", None)
+        if not callable(opener):
+            # Вкладка уже активна; без публикации события её можно
+            # считать открытой, но отложенная навигация не сработает.
+            return True
+        try:
+            activated = bool(opener(tab_id, line_number))
+        except Exception as exc:
+            ui.log("Не удалось активировать вкладку %s: %s" % (tab_id, exc))
+            return False
+        if not activated:
+            # Вкладка осиротела (нет живого документа и черновика):
+            # обычный резолв восстановит её содержимое.
+            return False
+        return True
+
+    def _activate_existing(self, path, line_number=None) -> bool:
+        """Переключиться на уже открытую вкладку файла, если она есть."""
+        rel = self._relative(path)
+        tab_id = resolved_tab_id(rel)
+        if not self._focus_open_tab(tab_id, line_number):
+            return False
+        self.ctx.ui.set_status("Файл уже открыт: %s" % rel, 3000)
+        self.ctx.ui.log("Файл уже открыт: %s" % rel)
+        return True
 
     # -------------------------------------------------- сырой просмотр
     def open_raw(self, path, line_number=None) -> bool:
@@ -61,7 +134,7 @@ class LtxFileOpener:
         if not self.session.has_tree:
             self._open_failed(path)
             self.ctx.ui.show_error(
-                "Дерево не построено: сначала «Пересобрать VFS»."
+                "Дерево не построено: дождитесь окончания сборки."
             )
             return False
 
@@ -91,6 +164,7 @@ class LtxFileOpener:
             ),
             syntax=True,
             notice="\n".join(header).strip(),
+            tab_id=raw_tab_id(rel),
         )
         self.ctx.ui.set_status("Открыт %s: %s" % (label.lower(), rel), 5000)
         return True
@@ -170,9 +244,15 @@ class LtxFileOpener:
         return self._open_resolved(path, line_number=line_number)
 
     def _open_resolved(self, path: Path, line_number=None) -> bool:
+        # Уже открытая вкладка не требует повторного резолва: достаточно
+        # сделать её активной (и перейти к строке, если он задан).
+        if self._activate_existing(path, line_number):
+            return True
+
         self.ctx.ui.set_status("Резолв: %s…" % path.name)
         self.ctx.ui.log("Резолв файла: %s" % path.name)
 
+        request_id = self._current_request_id()
         forest = self.session.forest
         config_dir = self.session.config_dir
         overlay = self._project_overlay()
@@ -196,20 +276,22 @@ class LtxFileOpener:
                     result,
                     err,
                     line_number,
+                    request_id,
                 ),
                 on_log=self.ctx.ui.log,
             )
         except Exception as exc:
-            self._open_failed(path)
+            self._open_failed(path, request_id)
             self.ctx.ui.show_error(
                 "Не удалось запустить сборку %s:\n%s" % (path.name, exc)
             )
             return False
         return True
 
-    def _on_resolved(self, path: Path, result, err, line_number=None):
+    def _on_resolved(self, path: Path, result, err, line_number=None,
+                     request_id=0):
         if err is not None:
-            self._open_failed(path)
+            self._open_failed(path, request_id)
             self.ctx.ui.set_status("Ошибка")
             self.ctx.ui.log(
                 "Ошибка резолва %s: %s" % (path.name, err)
@@ -222,7 +304,7 @@ class LtxFileOpener:
             return
 
         text, line_sources = result
-        rel = self.ctx.services.relative_path(self.session.forest, path)
+        rel = self._relative(path)
 
         # Уникальный tab_id — чтобы можно было держать несколько резолвов открытыми
         tab_id = resolved_tab_id(rel)
@@ -233,6 +315,7 @@ class LtxFileOpener:
             line_sources,
             str(path),
             line_number=line_number,
+            request_id=request_id or None,
         )
         self.ctx.ui.set_status("Открыт резолв: %s" % rel, 5000)
         self.ctx.ui.log("Резолв готов: %s" % rel)

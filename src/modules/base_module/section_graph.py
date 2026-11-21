@@ -103,7 +103,7 @@ class SectionGraphFeature:
     def show(self):
         if not self.session.has_tree:
             self.ctx.ui.show_error(
-                "Дерево не построено: сначала «Пересобрать VFS»."
+                "Дерево не построено: дождитесь окончания сборки."
             )
             return
 

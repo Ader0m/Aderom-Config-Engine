@@ -54,7 +54,8 @@ class EditorTabsBusyTest(unittest.TestCase):
         self.addCleanup(self.tabs.deleteLater)
 
     def test_busy_icon_is_set_and_cleared(self):
-        index = self.tabs.indexOf(self.tabs._default_editor)
+        editor = self.tabs.ensure_default_tab()
+        index = self.tabs.indexOf(editor)
         self.assertFalse(self.tabs.is_busy)
         self.assertTrue(self.tabs.tabIcon(index).isNull())
 

@@ -9,13 +9,14 @@ from tests.support import SRC  # noqa: F401
 from sdk import (
     FileOpened,
     FileOpenFailed,
+    ForestRef,
     ProjectSetting,
     ProjectSettingChoice,
     TreeReady,
 )
 from sdk.events import Events
 from ui.bus import EventBus
-from ui.platform_api import PlatformApi, _path_key
+from ui.platform_api import PlatformApi
 from app.projects import PreviewItem, ProjectService
 
 
@@ -30,6 +31,9 @@ class FakeEvents:
     def publish(self, name, payload=None):
         for callback in self._subscribers.get(name, ()):
             callback(payload)
+
+    def dispatch(self, name, payload=None):
+        return False
 
 
 class FakeCommands:
@@ -75,6 +79,13 @@ class FakeEditor:
 
     def setCurrentWidget(self, widget):
         self.current = widget
+
+    def set_current_tab(self, tab_id):
+        widget = self.tabs.get(str(tab_id))
+        if widget is None:
+            return False
+        self.current = widget
+        return True
 
     def set_editable(self, editable):
         self.calls.append(("editable", bool(editable)))
@@ -155,7 +166,7 @@ class PlatformApiTest(unittest.TestCase):
         api.window = window
 
         path = Path("a.ltx")
-        api._pending_file_actions[_path_key(path)] = ("line", 77)
+        api._queue_file_action(path, "line", 77)
         events.publish(
             Events.FILE_OPENED,
             FileOpened(path=path, tab_id="a"),
@@ -240,8 +251,8 @@ class PlatformApiTest(unittest.TestCase):
         self.assertEqual(api.window.editor.widget.lines, [])
         self.assertTrue(
             any(
-                Path(key).name == path.name
-                for key in api._pending_file_actions
+                Path(record[0]).name == path.name
+                for record in api._pending_file_actions.values()
             ),
             api._pending_file_actions,
         )
@@ -265,6 +276,131 @@ class PlatformApiTest(unittest.TestCase):
 
         self.assertEqual(api._pending_file_actions, {})
         self.assertEqual(api.window.editor.widget.lines, [])
+
+    def test_each_open_request_gets_its_own_request_id(self):
+        events = FakeEvents()
+        commands = FakeCommands()
+        api = PlatformApi(events, commands, None, None, None)
+        api.window = FakeWindow()
+
+        class RequestAwareHandler:
+            def __init__(self):
+                self.ids = []
+
+            def open(self, path, api):
+                request_id = api.current_file_request_id()
+                self.ids.append(request_id)
+                api.events.publish(
+                    Events.FILE_OPENED,
+                    FileOpened(
+                        path=Path(path),
+                        tab_id="ui.editor",
+                        request_id=request_id,
+                    ),
+                )
+                return True
+
+        handler = RequestAwareHandler()
+        api.router.set_default(handler)
+        path = Path("a.ltx")
+
+        self.assertTrue(api.request_open_file_at_line(path, 42))
+        self.assertTrue(api.request_open_file_at_line(path, 77))
+
+        self.assertEqual(handler.ids, [1, 2])
+        self.assertEqual(api.window.editor.widget.lines, [42, 77])
+        self.assertEqual(api._pending_file_actions, {})
+
+    def test_two_pending_requests_for_same_path_are_independent(self):
+        events = FakeEvents()
+        api = PlatformApi(events, FakeCommands(), None, None, None)
+        api.window = FakeWindow()
+        api.router.set_default(SilentHandler())
+        path = Path("a.ltx")
+
+        self.assertTrue(api.request_open_file_at_line(path, 42))
+        self.assertTrue(api.request_open_file_at_line(path, 77))
+        first_id, second_id = list(api._pending_file_actions)
+
+        events.publish(
+            Events.FILE_OPENED,
+            FileOpened(path=path, tab_id="ui.editor", request_id=second_id),
+        )
+        self.assertEqual(api.window.editor.widget.lines, [77])
+        self.assertIn(first_id, api._pending_file_actions)
+
+        events.publish(
+            Events.FILE_OPENED,
+            FileOpened(path=path, tab_id="ui.editor", request_id=first_id),
+        )
+        self.assertEqual(api.window.editor.widget.lines, [77, 42])
+        self.assertEqual(api._pending_file_actions, {})
+
+    def test_failed_open_publishes_request_id_and_cancels_it(self):
+        events = FakeEvents()
+        api = PlatformApi(events, FakeCommands(), None, None, None)
+        api.window = FakeWindow()
+        seen = []
+        events.subscribe(Events.FILE_OPEN_FAILED, seen.append)
+        path = Path("missing.ltx")
+
+        self.assertFalse(api.request_open_file_at_line(path, 10))
+
+        self.assertEqual(len(seen), 1)
+        self.assertIsInstance(seen[0], FileOpenFailed)
+        self.assertGreater(seen[0].request_id, 0)
+        self.assertEqual(api._pending_file_actions, {})
+        self.assertEqual(api._pending_file_request_ids, {})
+
+    def test_notify_failed_fills_request_id(self):
+        events = FakeEvents()
+        api = PlatformApi(events, FakeCommands(), None, None, None)
+        api.window = FakeWindow()
+        seen = []
+        events.subscribe(Events.FILE_OPEN_FAILED, seen.append)
+        path = Path("broken.xml")
+        request_id = api._queue_file_action(path, "line", 5)
+
+        api.notify_file_open_failed(path, "broken")
+
+        self.assertEqual(seen[0].request_id, request_id)
+        self.assertEqual(api._pending_file_actions, {})
+
+    def test_request_tab_focuses_existing_tab(self):
+        api = PlatformApi(FakeEvents(), FakeCommands(), None, None, None)
+        api.window = FakeWindow()
+        other = FakeWidget()
+        api.window.editor.tabs["other"] = other
+
+        self.assertTrue(api.request_tab("other"))
+        self.assertIs(api.window.editor.current, other)
+        self.assertFalse(api.request_tab("missing"))
+
+    def test_request_window_falls_back_to_window_manager(self):
+        api = PlatformApi(FakeEvents(), FakeCommands(), None, None, None)
+        focused = []
+
+        class Windows:
+            def focus(self, key):
+                focused.append(key)
+                return key == "known"
+
+        api._window_manager = Windows()
+
+        self.assertTrue(api.request_window("known"))
+        self.assertFalse(api.request_window("missing"))
+        self.assertEqual(focused, ["known", "missing"])
+
+    def test_request_file_open_returns_command_result(self):
+        events = FakeEvents()
+        commands = FakeCommands()
+        api = PlatformApi(events, commands, None, None, None)
+        commands.register("ui.open_file", lambda path: False)
+
+        self.assertFalse(api.request_file_open(Path("a.ltx")))
+
+        commands.register("ui.open_file", lambda path: True)
+        self.assertTrue(api.request_file_open(Path("a.ltx")))
 
 
     def test_project_activation_locks_tabs_and_marks_busy(self):
@@ -319,6 +455,48 @@ class PlatformApiTest(unittest.TestCase):
 
             self.assertFalse(api.window.editor.busy)
             self.assertEqual(api.window.editor.tab_busy, set())
+
+
+class ProjectDialogsRequireTreeTest(unittest.TestCase):
+    def _api(self, root):
+        api = PlatformApi(
+            FakeEvents(),
+            FakeCommands(),
+            None,
+            None,
+            SimpleNamespace(
+                projects_dir=Path(root) / "projects",
+                app_dir=Path(root),
+            ),
+        )
+        api.window = FakeWindow()
+        errors = []
+        api.show_error = errors.append
+        return api, errors
+
+    def test_create_project_requires_built_tree(self):
+        with tempfile.TemporaryDirectory() as d:
+            api, errors = self._api(d)
+
+            api.create_project()
+
+            self.assertEqual(
+                errors,
+                ["Дерево не построено: дождитесь окончания сборки."],
+            )
+            self.assertFalse(api.project.is_active)
+
+    def test_load_project_requires_built_tree(self):
+        with tempfile.TemporaryDirectory() as d:
+            api, errors = self._api(d)
+
+            api.load_project()
+
+            self.assertEqual(
+                errors,
+                ["Дерево не построено: дождитесь окончания сборки."],
+            )
+            self.assertFalse(api.project.is_active)
 
 
 class ProjectSettingPlatformTest(unittest.TestCase):
@@ -426,7 +604,10 @@ class TreeReadyPayloadTest(unittest.TestCase):
 
             payload = api.publish_tree_ready(forest)
 
-            self.assertIs(api.workspace_forest(), forest)
+            ref = api.workspace_forest()
+            self.assertIsInstance(ref, ForestRef)
+            self.assertEqual(ref.cache_id, "forest-1")
+            self.assertIs(api._forest, forest)
             self.assertIsInstance(payload, TreeReady)
             self.assertEqual(payload.cache_id, "forest-1")
             self.assertFalse(hasattr(payload, "forest"))

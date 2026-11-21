@@ -42,6 +42,7 @@ class PatchPlanner:
         draft_text: str,
         forest=None,
         options: Optional[PatchOptions] = None,
+        overlay=None,
     ) -> PatchPlan:
         """Построить план изменения сырого XML-файла."""
         return self.xml.plan_xml_document_change(
@@ -50,6 +51,7 @@ class PatchPlanner:
             draft_text,
             forest=forest,
             options=options,
+            overlay=overlay,
         )
 
     def plan_xml_resolved_edit(
@@ -60,6 +62,7 @@ class PatchPlanner:
         line_sources=(),
         forest=None,
         options: Optional[PatchOptions] = None,
+        overlay=None,
     ) -> PatchPlan:
         """Построить план правки resolved-вида XML (DXML)."""
         return self.xml.plan_xml_resolved_edit(
@@ -69,6 +72,7 @@ class PatchPlanner:
             line_sources=line_sources,
             forest=forest,
             options=options,
+            overlay=overlay,
         )
 
     # -------------------------------------------------- LTX

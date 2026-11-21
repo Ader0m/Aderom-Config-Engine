@@ -41,6 +41,16 @@ class ModuleWindowManager:
         window.raise_()
         window.activateWindow()
 
+    def focus(self, key):
+        """Поднять уже показанное окно по ключу. ``True`` при успехе."""
+        window = self._windows.get(str(key or ""))
+        if window is None:
+            return False
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        return True
+
     def owner_of(self, key):
         return self._owners.get(key, "")
 

@@ -17,7 +17,6 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from types import SimpleNamespace
 
 # Открытый файл диагностики держим на уровне модуля: faulthandler не
 # копирует дескриптор и должен иметь живой объект.
@@ -87,7 +86,7 @@ def main():
     from core.tools.cache import ResolvedCache
     from core.xml.service import XmlResolveService
 
-    from sdk import SDK_VERSION, ModuleContext
+    from sdk import SDK_VERSION, AppPaths, ModuleContext
     from ui.module_loader import ModuleLoader
     from sdk.events import Events
     from ui.bus import CommandBus, EventBus
@@ -165,7 +164,7 @@ def main():
     events = EventBus()
     commands = CommandBus()
     tasks = TaskService()
-    paths = SimpleNamespace(
+    paths = AppPaths(
         app_dir=app_dir,
         generated_dir=services.generated_dir,
         projects_dir=app_dir.parent / "projects",
@@ -179,7 +178,9 @@ def main():
         services=services,
         events=events,
         tasks=tasks,
-        forest_getter=api.workspace_forest,
+        # Подсказкам нужен сырой лес: они работают внутри платформы,
+        # а не через публичный SDK-контракт.
+        forest_getter=lambda: api.workspace.forest,
         overlay_getter=api.project_overlay,
         log_fn=api.log,
     )

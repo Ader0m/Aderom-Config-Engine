@@ -882,6 +882,7 @@ class XmlForkService:
         forest=None,
         options: Optional[PatchOptions] = None,
         project_mode: str = "root",
+        overlay=None,
     ) -> XmlForkResult:
         source_path = Path(source_path)
         options = options or PatchOptions()
@@ -968,6 +969,7 @@ class XmlForkService:
                 new_nodes,
                 keys,
                 warning_list=warnings,
+                overlay=overlay,
             )
             new_xml_rel = new_plan.xml_new_file_rel
             generated_parts.append(self.services.generate_patch(new_plan))
@@ -1014,6 +1016,7 @@ class XmlForkService:
                 options,
                 config_dir,
                 warnings,
+                overlay=overlay,
             )
         )
 
@@ -1123,14 +1126,26 @@ class XmlForkService:
             xml_mode="xml_fork",
             xml_new_file_rel=new_xml_rel,
             xml_roots=(
-                tuple(xml_root_candidates(forest, source_path))
+                tuple(
+                    xml_root_candidates(
+                        forest,
+                        source_path,
+                        overlay=overlay,
+                    )
+                )
                 if forest is not None
                 else (source_path,)
             ),
             xml_root_names=(
                 xml_root_virtual_names(
                     config_dir,
-                    tuple(xml_root_candidates(forest, source_path)),
+                    tuple(
+                        xml_root_candidates(
+                            forest,
+                            source_path,
+                            overlay=overlay,
+                        )
+                    ),
                 )
                 if forest is not None
                 else ()
@@ -1170,10 +1185,15 @@ class XmlForkService:
         node_xmls,
         keys,
         warning_list,
+        overlay=None,
     ) -> PatchPlan:
         anchor = source_path
         if forest is not None:
-            roots = xml_root_candidates(forest, source_path)
+            roots = xml_root_candidates(
+                forest,
+                source_path,
+                overlay=overlay,
+            )
             if roots and source_path not in roots:
                 anchor = roots[0]
 
@@ -1533,6 +1553,7 @@ class XmlForkService:
         options,
         config_dir,
         warnings,
+        overlay=None,
     ) -> List[GeneratedPatch]:
         """Перепривязать XML-ссылки по настройке DXML проекта.
 
@@ -1555,7 +1576,11 @@ class XmlForkService:
                     from core.patching.xml.planner import _xml_script_suffix
 
                     roots = (
-                        xml_root_candidates(forest, path)
+                        xml_root_candidates(
+                            forest,
+                            path,
+                            overlay=overlay,
+                        )
                         if forest is not None
                         else (path,)
                     ) or (path,)

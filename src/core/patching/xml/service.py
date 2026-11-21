@@ -54,6 +54,7 @@ class XmlPatchService:
         forest=None,
         options: Optional[PatchOptions] = None,
         project_mode: Optional[str] = None,
+        overlay=None,
     ) -> PatchResult:
         mode = (mode or "auto").lower().replace("-", "_")
         options = options or PatchOptions()
@@ -67,6 +68,7 @@ class XmlPatchService:
                 forest=forest,
                 options=options,
                 project_mode=project_mode or "root",
+                overlay=overlay,
             )
             return PatchResult(
                 plan=result.plan,
@@ -86,6 +88,7 @@ class XmlPatchService:
                 after_text,
                 forest=forest,
                 options=options,
+                overlay=overlay,
             )
         elif mode in ("resolved", "dxml_lua"):
             plan = self.planner.plan_xml_resolved_edit(
@@ -95,6 +98,7 @@ class XmlPatchService:
                 line_sources=line_sources,
                 forest=forest,
                 options=options,
+                overlay=overlay,
             )
         else:
             raise ValueError("Неизвестный режим XML-патча: %s" % mode)

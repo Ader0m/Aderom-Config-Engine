@@ -54,7 +54,8 @@ from .engine_text import (
     parse_color_definitions,
     parse_engine_text,
 )
-from .paths import path_key, same_path
+from .forest import ForestRef
+from .paths import AppPaths, path_key, same_path
 from .api import (
     CoreApi,
     UiApi,
@@ -150,6 +151,8 @@ __all__ = [
     "parse_engine_text",
     "path_key",
     "same_path",
+    "AppPaths",
+    "ForestRef",
     "FileOpenHandler",
     "FileReader",
     "CoreApi",

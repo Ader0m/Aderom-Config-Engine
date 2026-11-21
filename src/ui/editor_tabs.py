@@ -77,13 +77,8 @@ class EditorTabs(QTabWidget):
         tab_bar.setContextMenuPolicy(Qt.CustomContextMenu)
         tab_bar.customContextMenuRequested.connect(self._on_tab_context_menu)
 
-        self._ensure_default_tab()
-
     # -------------------------------------------------- базовая вкладка
-    def _ensure_default_tab(self):
-        if self._default_editor is not None:
-            return self._default_editor
-
+    def _create_editor(self):
         editor = CodeEditor(hint_attach=self._hint_attach)
         editor.set_editable(self._can_edit())
         editor.content_changed.connect(
@@ -96,8 +91,27 @@ class EditorTabs(QTabWidget):
             lambda dirty, e=editor: self._on_editor_dirty(e, dirty)
         )
         editor.lexer_status.connect(self.lexer_status.emit)
+        return editor
+
+    def _ensure_default_tab(self):
+        if self._default_editor is not None:
+            return self._default_editor
+
+        editor = self._create_editor()
         self._default_editor = editor
         self._add_tab(DEFAULT_TAB_ID, "Редактор", editor)
+        return editor
+
+    def _ensure_text_tab(self, tab_id, title):
+        """Вернуть текстовую вкладку по id, создав её при необходимости."""
+        existing = self._tab_ids.get(tab_id)
+        if isinstance(existing, CodeEditor):
+            return existing
+        if existing is not None:
+            self.close_tab(tab_id)
+
+        editor = self._create_editor()
+        self._add_tab(tab_id, title, editor)
         return editor
 
     # -------------------------------------------------- проект и черновик
@@ -387,12 +401,14 @@ class EditorTabs(QTabWidget):
         return widget
 
     # -------------------------------------------------- вкладки модулей
-    def open_tab(self, tab_id, title, widget, source_path=None):
+    def open_tab(self, tab_id, title, widget, source_path=None,
+                 request_id=0):
         """Открыть вкладку модуля и опубликовать факт её размещения.
 
         ``source_path`` — файл, который показывает вкладка. Он попадает в
         событие :attr:`Events.FILE_OPENED`; по нему платформа понимает,
         к какому именно открытию относится отложенная навигация.
+        ``request_id`` связывает событие с конкретным запросом открытия.
         """
         if not tab_id:
             raise ValueError("tab_id не может быть пустым")
@@ -410,7 +426,11 @@ class EditorTabs(QTabWidget):
             self.setCurrentIndex(index)
             self._tab_source_paths[tab_id] = source_path
             self._publish(Events.UI_TAB_OPENED, tab_id)
-            self._publish_file_opened(source_path, tab_id)
+            self._publish_file_opened(
+                source_path,
+                tab_id,
+                request_id,
+            )
             return
 
         if existing is not None:
@@ -419,7 +439,11 @@ class EditorTabs(QTabWidget):
         self._add_tab(tab_id, title, widget)
         self._tab_source_paths[tab_id] = source_path
         self._publish(Events.UI_TAB_OPENED, tab_id)
-        self._publish_file_opened(source_path, tab_id)
+        self._publish_file_opened(
+            source_path,
+            tab_id,
+            request_id,
+        )
 
     def flush_pending(self):
         """Зафиксировать отложенный текст всех вкладок."""
@@ -487,20 +511,72 @@ class EditorTabs(QTabWidget):
         editor = self._active_editor()
         return editor.current_file if editor is not None else None
 
-    def open_file(self, file_path, text=None):
+    def open_file(self, file_path, text=None, request_id=0):
+        """Открыть файл в базовом редакторе.
+
+        Возвращает ``True`` только если содержимое действительно показано:
+        событие ``FILE_OPENED`` после ошибки чтения не публикуется.
+        """
         path = Path(file_path)
         editor = self._ensure_default_tab()
         self.setCurrentWidget(editor)
         editor.set_editable(self._can_edit())
-        editor.open_file(file_path, text=text)
+        try:
+            opened = editor.open_file(file_path, text=text)
+        except Exception:
+            log.exception("Не удалось открыть файл в редакторе: %s", path)
+            opened = False
+
+        if not opened:
+            return False
 
         if path.is_file() or text is not None:
-            self._present_default_tab(path.name, str(path), path)
+            self._present_default_tab(
+                path.name,
+                str(path),
+                path,
+                request_id,
+            )
+        return True
 
     def show_text(self, text, label, readonly=True, source_path=None,
-                  line_number=None, syntax=True, notice=None):
-        editor = self._ensure_default_tab()
+                  line_number=None, syntax=True, notice=None, request_id=0,
+                  tab_id=None):
+        """Показать текст в базовой или в отдельной именованной вкладке.
+
+        ``tab_id=None`` — прежнее поведение: зарезервированная вкладка
+        ``ui.editor``. Именованная вкладка создаётся один раз и затем
+        переиспользуется; это позволяет держать открытыми несколько
+        сырых файлов (например, DLTX-патчей) одновременно.
+        """
+        title = str(label)
+        tab_text = _short_title(title)
+        tab_id = str(tab_id or "")
+
+        if not tab_id or tab_id == DEFAULT_TAB_ID:
+            editor = self._ensure_default_tab()
+            self.setCurrentWidget(editor)
+            editor.set_editable(self._can_edit())
+            editor.show_text(
+                text,
+                label,
+                readonly=readonly,
+                source_path=source_path,
+                line_number=line_number,
+                syntax=syntax,
+                notice=notice,
+            )
+            self._present_default_tab(
+                tab_text,
+                title,
+                source_path,
+                request_id,
+            )
+            return
+
+        editor = self._ensure_text_tab(tab_id, tab_text)
         self.setCurrentWidget(editor)
+        editor.set_editable(self._can_edit())
         editor.show_text(
             text,
             label,
@@ -510,25 +586,44 @@ class EditorTabs(QTabWidget):
             syntax=syntax,
             notice=notice,
         )
-
-        title = str(label)
-        self._present_default_tab(
-            _short_title(title),
+        self._present_tab(
+            tab_id,
+            tab_text,
             title,
             source_path,
+            request_id,
         )
 
-    def _present_default_tab(self, tab_text, tooltip, source_path):
+    def _present_default_tab(self, tab_text, tooltip, source_path,
+                             request_id=0):
         """Обновить заголовок дефолтной вкладки и опубликовать открытие."""
-        index = self.indexOf(self._default_editor)
+        self._present_tab(
+            DEFAULT_TAB_ID,
+            tab_text,
+            tooltip,
+            source_path,
+            request_id,
+        )
+
+    def _present_tab(self, tab_id, tab_text, tooltip, source_path,
+                     request_id=0):
+        """Обновить заголовок вкладки и опубликовать факт открытия."""
+        widget = self._tab_ids.get(tab_id)
+        if widget is None:
+            return
+        index = self.indexOf(widget)
         self.setTabText(index, tab_text)
         self.setTabToolTip(index, tooltip)
-        self._tab_source_paths[DEFAULT_TAB_ID] = source_path
-        self._publish(Events.UI_TAB_OPENED, DEFAULT_TAB_ID)
-        self._publish_file_opened(
-            source_path if source_path is not None else tooltip,
-            DEFAULT_TAB_ID,
-        )
+        self._tab_source_paths[tab_id] = source_path
+        self._publish(Events.UI_TAB_OPENED, tab_id)
+        # Текст без source_path — не открытие файла: не подставляем
+        # заголовок вместо пути и не будим отложенную навигацию.
+        if source_path is not None:
+            self._publish_file_opened(
+                source_path,
+                tab_id,
+                request_id,
+            )
 
     def goto_line(self, line_number):
         widget = self._active_widget()
@@ -687,11 +782,15 @@ class EditorTabs(QTabWidget):
         if self._events is not None:
             self._events.publish(name, payload)
 
-    def _publish_file_opened(self, path, tab_id=""):
+    def _publish_file_opened(self, path, tab_id="", request_id=0):
         if path is not None:
             self._publish(
                 Events.FILE_OPENED,
-                FileOpened(path=Path(path), tab_id=str(tab_id or "")),
+                FileOpened(
+                    path=Path(path),
+                    tab_id=str(tab_id or ""),
+                    request_id=int(request_id or 0),
+                ),
             )
 
 
