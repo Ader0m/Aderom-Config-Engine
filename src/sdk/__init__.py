@@ -3,6 +3,7 @@
 
 from .version import SDK_VERSION, parse_version, is_compatible
 from .constants import DEFAULT_SEARCH_DELAY_MS
+from .registrations import RegistrationHandle, RegistrationScope
 from .dragdrop import (
     ITEM_SECTION_MIME,
     ItemSectionData,
@@ -11,6 +12,7 @@ from .dragdrop import (
 )
 from .contracts import (
     ModuleManifest,
+    ModuleRequirement,
     ModuleBase,
     ModuleContext,
     FileOpenHandler,
@@ -60,6 +62,8 @@ from .api import (
     EventApi,
     CommandApi,
     TreeSummary,
+    TreeReady,
+    ProjectChanged,
     AssetDraftInfo,
     FileView,
     ProjectAssetType,
@@ -101,12 +105,15 @@ __all__ = [
     "SDK_VERSION",
     "parse_version",
     "is_compatible",
+    "RegistrationHandle",
+    "RegistrationScope",
     "DEFAULT_SEARCH_DELAY_MS",
     "ITEM_SECTION_MIME",
     "ItemSectionData",
     "decode_item_section",
     "encode_item_section",
     "ModuleManifest",
+    "ModuleRequirement",
     "ModuleBase",
     "ModuleContext",
     "Events",
@@ -151,6 +158,8 @@ __all__ = [
     "EventApi",
     "CommandApi",
     "TreeSummary",
+    "TreeReady",
+    "ProjectChanged",
     "AssetDraftInfo",
     "FileView",
     "ProjectAssetType",

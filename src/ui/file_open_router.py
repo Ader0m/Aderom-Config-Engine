@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 
 from sdk.contracts import FileOpenHandler
+from sdk.registrations import RegistrationHandle, remove_identity
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +38,17 @@ class TextEditorHandler(FileOpenHandler):
         return True
 
 
+class _HandlerEntry:
+    """Обработчик открытия вместе с владельцем-модулем."""
+
+    __slots__ = ("handler", "context", "owner")
+
+    def __init__(self, handler, context, owner):
+        self.handler = handler
+        self.context = context
+        self.owner = str(owner or "")
+
+
 class FileOpenRouter:
     """Выбирает обработчик открытия файла.
 
@@ -45,11 +57,31 @@ class FileOpenRouter:
     """
 
     def __init__(self):
-        self._handlers = []  # (handler, module_context|None)
+        self._handlers = []  # [_HandlerEntry]
         self.default = None
 
-    def register(self, handler, context=None):
-        self._handlers.append((handler, context))
+    def register(self, handler, context=None, owner=None):
+        """Зарегистрировать обработчик и вернуть handle для снятия."""
+        entry = _HandlerEntry(handler, context, owner)
+        self._handlers.append(entry)
+        return RegistrationHandle(
+            lambda: self._remove(entry),
+            entry.owner,
+        )
+
+    def unregister(self, handler, owner=None):
+        """Снять обработчик. ``owner=None`` — внутренняя очистка платформы."""
+        wanted = None if owner is None else str(owner)
+        for entry in tuple(self._handlers):
+            if entry.handler is not handler:
+                continue
+            if wanted is not None and entry.owner != wanted:
+                continue
+            return self._remove(entry)
+        return False
+
+    def _remove(self, entry):
+        return remove_identity(self._handlers, entry)
 
     def set_default(self, handler):
         self.default = handler
@@ -57,10 +89,12 @@ class FileOpenRouter:
     def open(self, path, api):
         p = Path(path)
 
-        for handler, context in sorted(
-            self._handlers,
-            key=lambda item: -item[0].priority,
+        for entry in sorted(
+            tuple(self._handlers),
+            key=lambda item: -item.handler.priority,
         ):
+            handler = entry.handler
+            context = entry.context
             try:
                 if not handler.can_open(p):
                     continue

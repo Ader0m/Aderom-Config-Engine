@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from .api import (
@@ -32,9 +33,13 @@ from .api import (
     TreeSummary,
     XmlResolveResult,
 )
+from .registrations import RegistrationHandle, remove_identity
+from .events import PLATFORM_OWNER, namespace_of
 
 
 _SDK_API_MARKER = "_sdk_api_kind"
+
+log = logging.getLogger(__name__)
 
 
 def _to_localization_string(value):
@@ -117,7 +122,14 @@ class CoreApiAdapter:
 
     def __init__(self, provider):
         self._provider = provider
+        self._owner = ""
+        self._scope = None
         self._section_graph_contributors = self._shared_contributors()
+
+    def bind_owner(self, owner, scope=None):
+        """Привязать адаптер к модулю: его имя и набор регистраций."""
+        self._owner = str(owner or "")
+        self._scope = scope
 
     def _shared_contributors(self):
         """Один реестр на провайдера, даже если адаптеров несколько.
@@ -580,22 +592,43 @@ class CoreApiAdapter:
     def register_section_graph_contributor(self, contributor):
         if not callable(contributor):
             raise TypeError("contributor должен быть вызываемым")
-        if contributor not in self._section_graph_contributors:
-            self._section_graph_contributors.append(contributor)
+        entry = (self._owner, contributor)
+        if entry not in self._section_graph_contributors:
+            self._section_graph_contributors.append(entry)
+        handle = RegistrationHandle(
+            lambda: self._remove_contributor(contributor, self._owner),
+            self._owner,
+        )
+        if self._scope is not None:
+            self._scope.track(handle)
+        return handle
 
-    def unregister_section_graph_contributor(self, contributor):
-        try:
-            self._section_graph_contributors.remove(contributor)
-        except ValueError:
-            return False
-        return True
+    def unregister_section_graph_contributor(self, contributor, owner=None):
+        return self._remove_contributor(
+            contributor,
+            self._owner if owner is None else owner,
+        )
+
+    def _remove_contributor(self, contributor, owner=None):
+        wanted = None if owner is None else str(owner)
+        for entry in tuple(self._section_graph_contributors):
+            entry_owner, entry_contributor = entry
+            if entry_contributor is not contributor:
+                continue
+            if wanted is not None and entry_owner != wanted:
+                continue
+            return remove_identity(
+                self._section_graph_contributors,
+                entry,
+            )
+        return False
 
     def collect_section_graph_contribution(self, request, log=None):
         children = []
         lost_children = []
         edge_styles = {}
         openers = {}
-        for contributor in tuple(self._section_graph_contributors):
+        for _owner, contributor in tuple(self._section_graph_contributors):
             try:
                 result = contributor(request)
             except Exception as exc:
@@ -652,8 +685,18 @@ class EventApiAdapter:
 
     _sdk_api_kind = "events"
 
-    def __init__(self, bus):
+    def __init__(self, bus, scope=None):
         self._bus = bus
+        self._scope = scope
+        self._owner = PLATFORM_OWNER
+
+    def bind_scope(self, scope):
+        """Все подписки модуля попадут в его RegistrationScope."""
+        self._scope = scope
+
+    def bind_owner(self, owner):
+        """Имя модуля-владельца для снятия только своих подписок."""
+        self._owner = str(owner or "")
 
     @classmethod
     def wrap(cls, bus):
@@ -662,12 +705,35 @@ class EventApiAdapter:
         return cls(bus)
 
     def subscribe(self, name, handler, priority=0):
-        return self._bus.subscribe(name, handler, priority=priority)
+        subscription = self._bus.subscribe(
+            name,
+            handler,
+            priority=priority,
+            owner=self._owner,
+        )
+        if self._scope is not None:
+            self._scope.track(subscription)
+        return subscription
 
     def unsubscribe(self, name, handler=None):
-        return self._bus.unsubscribe(name, handler)
+        return self._bus.unsubscribe(
+            name,
+            handler,
+            owner=self._owner,
+        )
 
     def publish(self, name, payload=None):
+        prefix = namespace_of(name)
+        if (
+            self._owner
+            and self._owner != PLATFORM_OWNER
+            and prefix not in ("", "app", "ui", self._owner)
+        ):
+            log.warning(
+                "Модуль %s публикует событие чужого namespace: %s",
+                self._owner,
+                name,
+            )
         return self._bus.publish(name, payload)
 
     def dispatch(self, name, payload=None):
@@ -685,12 +751,16 @@ class CommandApiAdapter:
 
     _sdk_api_kind = "commands"
 
-    def __init__(self, bus):
+    def __init__(self, bus, scope=None):
         self._bus = bus
         self._owner = None
+        self._scope = scope
 
     def bind_owner(self, owner):
         self._owner = str(owner or "") or None
+
+    def bind_scope(self, scope):
+        self._scope = scope
 
     @classmethod
     def wrap(cls, bus):
@@ -704,7 +774,14 @@ class CommandApiAdapter:
                 "Команда модуля %s должна начинаться с '%s.': %s"
                 % (self._owner, self._owner, name)
             )
-        return self._bus.register(name, handler, owner=self._owner)
+        result = self._bus.register(name, handler, owner=self._owner)
+        if self._scope is not None:
+            command_name = str(name)
+            owner = self._owner
+            self._scope.track_callable(
+                lambda: self._bus.unregister(command_name, owner=owner)
+            )
+        return result
 
     def unregister(self, name):
         return self._bus.unregister(name, owner=self._owner)
@@ -726,6 +803,10 @@ class TaskApiAdapter:
 
     def __init__(self, service):
         self._service = service
+        self._owner = ""
+
+    def bind_owner(self, owner):
+        self._owner = str(owner or "")
 
     @classmethod
     def wrap(cls, service):
@@ -734,7 +815,24 @@ class TaskApiAdapter:
         return cls(service)
 
     def run(self, fn, on_done=None, on_log=None):
-        return self._service.run(fn, on_done=on_done, on_log=on_log)
+        return self._service.run(
+            fn,
+            on_done=on_done,
+            on_log=on_log,
+            owner=self._owner,
+        )
+
+    def cancel_owner(self):
+        fn = getattr(self._service, "cancel_owner", None)
+        if callable(fn):
+            return fn(self._owner)
+        return 0
+
+    def wait_owner(self, timeout_ms=5000):
+        fn = getattr(self._service, "wait_owner", None)
+        if callable(fn):
+            return fn(self._owner, timeout_ms=timeout_ms)
+        return True
 
 
 # ---------------------------------------------------------------- ui
@@ -747,10 +845,14 @@ class UiApiAdapter:
     def __init__(self, platform):
         self._platform = platform
         self._context = None
+        self._owner = ""
+        self._scope = None
 
     def bind_context(self, context):
         """Связать адаптер с ModuleContext конкретного модуля."""
         self._context = context
+        self._scope = getattr(context, "registrations", None)
+        self._owner = getattr(self._scope, "owner", "") or ""
 
     @classmethod
     def wrap(cls, platform):
@@ -758,36 +860,59 @@ class UiApiAdapter:
             return platform
         return cls(platform)
 
+    def _track(self, handle):
+        if self._scope is not None:
+            self._scope.track(handle)
+        return handle
+
     # --- регистрация возможностей модуля ---------------------------------
 
     def register_menu(self, menu_title, label, callback, shortcut=None, action=None):
-        self._platform.register_menu(
+        handle = self._platform.register_menu(
             menu_title,
             label,
             callback,
             shortcut,
             action,
+            owner=self._owner,
         )
+        return self._track(handle)
 
     def register_tree_context_action(self, label, handler, predicate=None):
-        self._platform.register_tree_context_action(label, handler, predicate)
+        handle = self._platform.register_tree_context_action(
+            label,
+            handler,
+            predicate,
+            owner=self._owner,
+        )
+        return self._track(handle)
 
     def register_file_action(self, label, handler, predicate=None):
-        self._platform.register_file_action(label, handler, predicate)
+        handle = self._platform.register_file_action(
+            label,
+            handler,
+            predicate,
+            owner=self._owner,
+        )
+        return self._track(handle)
 
     def register_open_handler(self, handler):
-        self._platform.register_open_handler(
+        handle = self._platform.register_open_handler(
             handler,
             context=self._context,
+            owner=self._owner,
         )
+        return self._track(handle)
 
     def register_shortcut(self, key, callback, scope="global", action=None):
-        self._platform.register_shortcut(
+        handle = self._platform.register_shortcut(
             key,
             callback,
             scope=scope,
             action=action,
+            owner=self._owner,
         )
+        return self._track(handle)
 
     def register_mouse_binding(
         self,
@@ -798,21 +923,25 @@ class UiApiAdapter:
         event="press",
         action=None,
     ):
-        self._platform.register_mouse_binding(
+        handle = self._platform.register_mouse_binding(
             button,
             modifiers,
             callback,
             scope=scope,
             event=event,
             action=action,
+            owner=self._owner,
         )
+        return self._track(handle)
 
     def register_action_handler(self, action, handler, priority=0):
-        return self._platform.register_action_handler(
+        subscription = self._platform.register_action_handler(
             action,
             handler,
             priority,
+            owner=self._owner,
         )
+        return self._track(subscription)
 
     def dispatch_action(self, action, payload=None):
         return self._platform.dispatch_action(action, payload)
@@ -843,6 +972,9 @@ class UiApiAdapter:
         if callable(fn):
             return fn()
         return None
+
+    def publish_tree_ready(self, forest):
+        return self._platform.publish_tree_ready(forest)
 
     def workspace_generation(self):
         fn = getattr(self._platform, "workspace_generation", None)
@@ -888,10 +1020,26 @@ class UiApiAdapter:
         return self._platform.write_project_texts(files)
 
     def register_project_asset_type(self, asset_type):
-        return self._platform.register_project_asset_type(asset_type)
+        ok = self._platform.register_project_asset_type(
+            asset_type,
+            owner=self._owner,
+        )
+        if ok:
+            key = str(getattr(asset_type, "key", "") or "")
+            self._track(RegistrationHandle(
+                lambda: self._platform.unregister_project_asset_type(
+                    key,
+                    owner=self._owner,
+                ),
+                self._owner,
+            ))
+        return bool(ok)
 
     def unregister_project_asset_type(self, key):
-        return self._platform.unregister_project_asset_type(key)
+        return self._platform.unregister_project_asset_type(
+            key,
+            owner=self._owner,
+        )
 
     def project_asset_types(self):
         result = []
@@ -916,13 +1064,23 @@ class UiApiAdapter:
         fn = getattr(self._platform, "register_project_setting", None)
         if not callable(fn):
             return False
-        return bool(fn(setting))
+        ok = bool(fn(setting, owner=self._owner))
+        if ok:
+            key = str(getattr(setting, "key", "") or "")
+            self._track(RegistrationHandle(
+                lambda: self._platform.unregister_project_setting(
+                    key,
+                    owner=self._owner,
+                ),
+                self._owner,
+            ))
+        return ok
 
     def unregister_project_setting(self, key):
         fn = getattr(self._platform, "unregister_project_setting", None)
         if not callable(fn):
             return False
-        return bool(fn(key))
+        return bool(fn(key, owner=self._owner))
 
     def project_settings(self):
         fn = getattr(
@@ -973,7 +1131,8 @@ class UiApiAdapter:
         return bool(fn(key, value))
 
     def register_file_reader(self, reader):
-        return self._platform.register_file_reader(reader)
+        subscription = self._platform.register_file_reader(reader)
+        return self._track(subscription)
 
     def read_file_view(self, path, data=None):
         view = self._platform.read_file_view(path, data)
@@ -1231,7 +1390,11 @@ class UiApiAdapter:
         )
 
     def show_module_window(self, key, window):
-        self._platform.show_module_window(key, window)
+        return self._platform.show_module_window(
+            key,
+            window,
+            owner=self._owner,
+        )
 
     def close_module_window(self, key):
         self._platform.close_module_window(key)
@@ -1241,6 +1404,23 @@ class UiApiAdapter:
 
     def close_editor_tab(self, tab_id):
         self._platform.close_editor_tab(tab_id)
+
+    def release_owner(self):
+        """Закрыть окна и вкладки, принадлежащие модулю."""
+        closed = 0
+        windows = getattr(self._platform, "close_module_windows", None)
+        if callable(windows):
+            try:
+                windows(owner=self._owner)
+            except TypeError:
+                pass
+        tabs = getattr(self._platform, "close_module_tabs", None)
+        if callable(tabs):
+            try:
+                closed = int(tabs(self._owner) or 0)
+            except TypeError:
+                pass
+        return closed
 
     def copy_to_clipboard(self, text):
         self._platform.clipboard_set(text)
@@ -1281,6 +1461,12 @@ class UiApiAdapter:
 
     def open_raw(self, path):
         self._platform.commands.execute("ui.open_file_raw", path)
+
+    def notify_file_open_failed(self, path, reason=""):
+        return self._platform.notify_file_open_failed(
+            path,
+            reason=reason,
+        )
 
     def open_at_line(self, path, line_number):
         self._platform.commands.execute(

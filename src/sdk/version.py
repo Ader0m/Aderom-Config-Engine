@@ -19,3 +19,8 @@ def parse_version(v):
 def is_compatible(sdk_min):
     """Модуль совместим, если требуемая им версия SDK не выше текущей."""
     return parse_version(sdk_min) <= parse_version(SDK_VERSION)
+
+
+def version_at_least(actual, required):
+    """Версия ``actual`` не ниже ``required``."""
+    return parse_version(actual) >= parse_version(required)

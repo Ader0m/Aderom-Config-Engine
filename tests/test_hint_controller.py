@@ -232,6 +232,19 @@ class ColorHintPopupTest(unittest.TestCase):
         self.assertTrue(text.endswith("]"), text)
         self.assertTrue(self.edit.is_editing())
 
+    def test_popup_slot_has_enlarged_space(self):
+        popup = self.handle._popup
+        self.assertGreaterEqual(popup.width(), 320)
+        delegate = popup.view.itemDelegate()
+        for row in range(popup.model.rowCount()):
+            item = popup.model.item_at(row)
+            expected = 46 if item.description else 30
+            size = delegate.sizeHint(
+                popup.view.viewOptions(),
+                popup.model.index(row, 0),
+            )
+            self.assertGreaterEqual(size.height(), expected)
+
     def test_event_filter_swallows_adapter_errors(self):
         original = self.handle._adapter
 

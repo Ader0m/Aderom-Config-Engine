@@ -6,6 +6,7 @@ PlatformApi — сервисы UI-платформы и точка регист�
 """
 
 from pathlib import Path
+import traceback
 
 from PyQt5.QtWidgets import QApplication, QFileDialog, QMessageBox
 
@@ -13,8 +14,10 @@ from sdk.api import (
     AssetDraftInfo,
     FileOpened,
     FileOpenFailed,
+    ProjectChanged,
+    TreeReady,
 )
-from sdk.events import Events
+from sdk.events import Events, PLATFORM_OWNER
 
 from app.projects import (
     ProjectAssetRegistry,
@@ -108,10 +111,6 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
             Events.FILE_OPEN_FAILED,
             self._on_file_open_failed,
         )
-        self._tree_ready_sub = events.subscribe(
-            Events.TREE_READY,
-            self._on_tree_ready,
-        )
         self._tab_closed_sub = events.subscribe(
             Events.UI_TAB_CLOSED,
             self._on_tab_closed,
@@ -149,45 +148,62 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         return self.workspace.virtual_paths
 
     # -------------------------------------------------- регистрации (SDK)
-    def register_menu(self, menu_title, label, callback, shortcut=None, action=None):
-        self.registrations.register_menu(
+    def register_menu(self, menu_title, label, callback, shortcut=None,
+                      action=None, owner=None):
+        return self.registrations.register_menu(
             menu_title,
             label,
             callback,
             shortcut,
             action,
+            owner=owner,
         )
 
-    def register_tree_context_action(self, label, handler, predicate=None):
+    def register_tree_context_action(self, label, handler, predicate=None,
+                                     owner=None):
         """Добавить действие в контекстное меню дерева.
 
         ``predicate(path)`` — необязательный фильтр: действие показывается
         только для путей, для которых он вернул truthy.
         """
-        self.registrations.register_tree_context_action(
+        return self.registrations.register_tree_context_action(
             label,
             handler,
             predicate,
+            owner=owner,
         )
 
-    def register_file_action(self, label, handler, predicate=None):
+    def register_file_action(self, label, handler, predicate=None,
+                             owner=None):
         """Действие в контекстном меню вкладки файла.
 
         ``handler(path)`` вызывается платформой; имя модуля и его команды
         здесь не участвуют.
         """
-        self.registrations.register_file_action(
+        return self.registrations.register_file_action(
             label,
             handler,
             predicate,
+            owner=owner,
         )
 
     @property
     def file_actions(self):
         return self.registrations.file_actions
 
-    def register_shortcut(self, key, callback, scope="global", action=None):
-        self._shortcut_manager.register(key, callback, scope=scope, action=action)
+    def add_registration_listener(self, listener):
+        """Уведомлять UI об изменении модульных меню."""
+        return self.registrations.add_listener(listener)
+
+    def register_shortcut(self, key, callback, scope="global", action=None,
+                          owner=None):
+        return self._shortcut_manager.register(
+            key,
+            callback,
+            scope=scope,
+            action=action,
+            owner=owner,
+        )
 
     def register_mouse_binding(
         self,
@@ -197,35 +213,57 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         scope="global",
         event="press",
         action=None,
+        owner=None,
     ):
-        self._mouse_manager.register(
+        return self._mouse_manager.register(
             button,
             modifiers,
             callback,
             scope=scope,
             event=event,
             action=action,
+            owner=owner,
         )
 
-    def register_action_handler(self, action, handler, priority=0):
-        return self.events.subscribe(action, handler, priority)
+    def register_action_handler(self, action, handler, priority=0, owner=None):
+        return self.events.subscribe(
+            action,
+            handler,
+            priority,
+            owner=PLATFORM_OWNER if owner is None else owner,
+        )
 
     def dispatch_action(self, action, payload=None):
         return self.events.dispatch(action, payload)
+
+    def _safe_callback(self, label, callback):
+        if not callable(callback):
+            self.log("Действие %s: callback не задан" % label)
+            return False
+        try:
+            result = callback()
+        except Exception:
+            self.log(
+                "Ошибка действия %s:\n%s"
+                % (label, traceback.format_exc())
+            )
+            self.set_status("Ошибка действия: %s" % label, 5000)
+            return False
+        return bool(result)
 
     def trigger_action(self, action, callback, payload=None, fallback=None):
         """Выполнить UI-действие с возможностью перехвата.
 
         Сначала рассылается конкретное ``action``, затем общее действие
         ``fallback`` (например, ``ui.shortcut``). Если любое из них
-        перехвачено, ``callback`` не вызывается.
+        перехвачено, ``callback`` не вызывается. Ошибка callback'а
+        логируется и не выходит в Qt event loop.
         """
         if action and self.events.dispatch(action, payload):
             return True
         if fallback and self.events.dispatch(fallback, payload):
             return True
-        result = callback()
-        return bool(result)
+        return self._safe_callback(action or "<callback>", callback)
 
     @property
     def menu_registrations(self):
@@ -257,9 +295,6 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         self._update_project_status()
 
     # -------------------------------------------------- проект
-    def _on_tree_ready(self, forest):
-        self._forest = forest
-
     def _invalidate_resolver_cache(self):
         """Сбросить кеш и пометить предсборку устаревшей."""
         # Полная инвалидация отменяет и точечный набор корней: иначе
@@ -361,6 +396,22 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
     def workspace_forest(self):
         return self.workspace.forest
 
+    def publish_tree_ready(self, forest):
+        """Сохранить лес у платформы и разослать лёгкий TreeReady."""
+        self.workspace.set_forest(forest)
+        summary = None
+        try:
+            summary = self.services.tree_summary(forest)
+        except Exception:
+            pass
+        payload = TreeReady(
+            cache_id=str(getattr(forest, "cache_id", "") or ""),
+            generation=int(self.workspace.generation),
+            summary=summary,
+        )
+        self.events.publish(Events.TREE_READY, payload)
+        return payload
+
     def workspace_generation(self):
         return self.workspace.generation
 
@@ -409,14 +460,14 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         return ok
 
     # -------------------------------------------------- регистрации (SDK)
-    def register_open_handler(self, handler, context=None):
+    def register_open_handler(self, handler, context=None, owner=None):
         """Модуль регистрирует своего обработчика открытия файла."""
-        self.router.register(handler, context=context)
+        return self.router.register(handler, context=context, owner=owner)
 
     # -------------------------------------------------- окна модулей
-    def show_module_window(self, key, window):
+    def show_module_window(self, key, window, owner=None):
         """Показать окно, созданное модулем."""
-        self._window_manager.show(key, window)
+        self._window_manager.show(key, window, owner=owner)
         self.events.publish(Events.UI_WINDOW_SHOWN, key)
 
     def close_module_window(self, key):
@@ -424,12 +475,15 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         self._window_manager.close(key)
         self.events.publish(Events.UI_WINDOW_CLOSED, key)
 
-    def close_module_windows(self):
-        """Закрыть все окна, открытые модулями."""
-        self._window_manager.close_all()
+    def close_module_windows(self, owner=None):
+        """Закрыть окна модулей (все или конкретного владельца)."""
+        if owner is None:
+            self._window_manager.close_all()
+        else:
+            self._window_manager.close_owner(owner)
 
     # -------------------------------------------------- вкладки редактора
-    def open_editor_tab(self, tab_id, title, widget):
+    def open_editor_tab(self, tab_id, title, widget, owner=None):
         """Открыть вкладку, созданную модулем."""
         if self.window is None:
             self.log("[open_editor_tab до окна] %s" % tab_id)
@@ -441,6 +495,15 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         if self.window is None:
             return
         self.window.editor.close_tab(tab_id)
+
+    def close_module_tabs(self, owner):
+        """Закрыть все вкладки, принадлежащие модулю."""
+        if self.window is None:
+            return 0
+        closer = getattr(self.window.editor, "close_owner_tabs", None)
+        if not callable(closer):
+            return 0
+        return closer(owner)
 
     # -------------------------------------------------- ui-сервисы
     def show_text(self, text, label, readonly=True, source_path=None,
@@ -468,6 +531,13 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         if not ok:
             self.show_error("Нет обработчика по умолчанию для: %s" % path)
         return ok
+
+    def notify_file_open_failed(self, path, reason=""):
+        """Опубликовать факт неудачного открытия от имени платформы."""
+        self.events.publish(
+            Events.FILE_OPEN_FAILED,
+            FileOpenFailed(path=Path(path), reason=str(reason or "")),
+        )
 
     def request_editor_undo(self):
         if self.window is not None:

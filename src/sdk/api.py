@@ -21,6 +21,7 @@ from types import MappingProxyType
 from typing import Callable, Optional, Protocol, Sequence
 
 from .hints import HintsHandle
+from .registrations import RegistrationHandle
 
 
 # ---------------------------------------------------------------- модели данных
@@ -251,6 +252,29 @@ class TreeSummary:
     system_tree_files: int
     resolver_sections: Optional[int] = None
     xml_files: int = 0
+
+
+@dataclass(frozen=True)
+class TreeReady:
+    """Лёгкий payload события ``ui.tree_ready``.
+
+    Сам ``LtxForest`` живёт в ``WorkspaceService`` платформы; подписчики
+    получают стабильный ключ поколения и сводку, а лес — через
+    ``ctx.ui.workspace_forest()``/``workspace``.
+    """
+
+    cache_id: str
+    generation: int = 0
+    summary: Optional[TreeSummary] = None
+
+
+@dataclass(frozen=True)
+class ProjectChanged:
+    """Лёгкий payload события ``ui.project_changed``."""
+
+    project_id: str = ""
+    name: str = ""
+    active: bool = False
 
 
 @dataclass(frozen=True)
@@ -574,17 +598,12 @@ class SavedDraft:
     """Сохранённый черновик проекта (payload ``PROJECT_SAVED``).
 
     ``kind``: ``file`` | ``resolved`` | ``asset``. Содержимое в событии
-    намеренно не передаётся: ``text`` оставлен для совместимости и
-    обычно пуст, а ``revision``/``size`` позволяют отличить снимок.
+    не передаётся; ``revision``/``size`` позволяют отличить снимок.
     """
 
     kind: str
     key: str
     path: Path
-    # Текст больше не кладётся в событие: для system.ltx это десятки
-    # мегабайт на каждое автосохранение. Подписчику достаточно kind/key,
-    # а редактору — revision/size для сверки актуальности.
-    text: str = ""
     revision: int = 0
     size: int = 0
 
@@ -876,16 +895,21 @@ class CoreApi(Protocol):
     def register_section_graph_contributor(
         self,
         contributor: Callable[[SectionGraphRequest], Sequence[GraphNode]],
-    ) -> None:
+    ) -> RegistrationHandle:
         """Добавить поставщика дополнительных узлов графа.
 
         Модуль может зарегистрировать функцию, которая получает
         :class:`SectionGraphRequest` и возвращает узлы своего типа
-        (например, .ogg-файлы для ``snd_*``-полей).
+        (например, .ogg-файлы для ``snd_*``-полей). Возвращает handle,
+        привязанный к модулю: снять можно только свою регистрацию.
         """
 
     def unregister_section_graph_contributor(self, contributor) -> bool:
-        """Удалить ранее зарегистрированного поставщика узлов."""
+        """Удалить ранее зарегистрированного поставщика узлов.
+
+        Снимается только регистрация текущего модуля; чужой contributor
+        удалить нельзя.
+        """
 
     def collect_section_graph_nodes(
         self,
@@ -924,11 +948,12 @@ class UiApi(Protocol):
         callback: Callable,
         shortcut: Optional[str] = None,
         action: Optional[str] = None,
-    ) -> None:
+    ) -> RegistrationHandle:
         """Добавить пункт меню.
 
         Если задан ``action``, нажатие сначала проходит через ``dispatch``:
         другой модуль может перехватить действие и не дать вызвать ``callback``.
+        Возвращённый handle снимает пункт меню.
         """
 
     def register_tree_context_action(
@@ -936,7 +961,7 @@ class UiApi(Protocol):
         label: str,
         handler: Callable,
         predicate: Optional[Callable[[Path], bool]] = None,
-    ) -> None:
+    ) -> RegistrationHandle:
         """Добавить действие в контекстное меню дерева.
 
         ``predicate(path)`` — необязательный фильтр видимости действия
@@ -948,15 +973,18 @@ class UiApi(Protocol):
         label: str,
         handler: Callable,
         predicate: Optional[Callable[[Path], bool]] = None,
-    ) -> None:
+    ) -> RegistrationHandle:
         """Добавить действие в контекстное меню вкладки файла.
 
         ``handler(path)`` вызывается платформой. ``predicate(path)``
         необязателен и решает, показывать ли действие для файла.
         """
 
-    def register_open_handler(self, handler) -> None:
-        """Зарегистрировать обработчик открытия файлов."""
+    def register_open_handler(self, handler) -> RegistrationHandle:
+        """Зарегистрировать обработчик открытия файлов.
+
+        Обработчик принадлежит модулю и снимается вместе с его scope.
+        """
 
     def register_shortcut(
         self,
@@ -964,7 +992,7 @@ class UiApi(Protocol):
         callback: Callable,
         scope: str = "global",
         action: Optional[str] = None,
-    ) -> None:
+    ) -> RegistrationHandle:
         """Зарегистрировать горячую клавишу.
 
         ``scope``: ``global``, ``editor`` или ``tree``.
@@ -981,7 +1009,7 @@ class UiApi(Protocol):
         scope: str = "global",
         event: str = "press",
         action: Optional[str] = None,
-    ) -> None:
+    ) -> RegistrationHandle:
         """Зарегистрировать мышиную привязку.
 
         ``button``: ``left``/``right``/``middle`` или Qt-кнопка.
@@ -1000,8 +1028,11 @@ class UiApi(Protocol):
     ):
         """Подписаться на перехватываемое UI-действие.
 
-        Чем выше ``priority``, тем раньше вызывается обработчик.
-        Truthy-результат останавливает цепочку.
+        Это механизм замены реакции: обработчики вызываются от большего
+        ``priority`` к меньшему, первый truthy-результат останавливает
+        цепочку. Модуль может заменить реакцию платформы или другого
+        модуля, зарегистрировав обработчик с более высоким приоритетом.
+        Чужие подписки при этом не удаляются.
         """
 
     def dispatch_action(self, action: str, payload=None) -> bool:
@@ -1025,6 +1056,13 @@ class UiApi(Protocol):
 
     def workspace_forest(self):
         """Текущий лес — единственный экземпляр, которым владеет платформа."""
+
+    def publish_tree_ready(self, forest) -> TreeReady:
+        """Опубликовать новое поколение дерева.
+
+        Платформа сохраняет лес у себя и рассылает лёгкий ``TreeReady``;
+        модули читают сам лес через ``workspace_forest()``.
+        """
 
     def workspace_generation(self) -> int:
         """Номер поколения workspace (меняется при пересборке/VFS)."""
@@ -1383,6 +1421,9 @@ class UiApi(Protocol):
     def open_raw(self, path: Path) -> None:
         """Открыть файл в редакторе без обработчиков модуля."""
 
+    def notify_file_open_failed(self, path: Path, reason: str = "") -> None:
+        """Сообщить платформе, что открытие файла не состоялось."""
+
     def open_at_line(self, path: Path, line_number: int) -> None:
         """Открыть файл и перейти к строке."""
 
@@ -1421,19 +1462,30 @@ class TaskApi(Protocol):
 class EventApi(Protocol):
     """Шина событий, доступная модулю через ``ctx.events``.
 
-    ``publish`` — уведомить о факте. Вызываются все подписчики.
-    ``dispatch`` — разослать перехватываемое UI-действие. Первый обработчик,
-    вернувший truthy, останавливает цепочку.
+    Имена событий следуют политике ``<owner>.<name>``: ``app.*``/``ui.*``
+    принадлежат платформе, ``<module>.*`` — модулю. ``publish`` уведомляет
+    о факте и вызывает всех подписчиков. ``dispatch`` рассылает
+    перехватываемое UI-действие: первый обработчик, вернувший truthy,
+    останавливает цепочку.
 
     ``publish`` можно вызывать из фонового потока: подписчики получат
     событие в потоке UI. ``dispatch`` предназначен для вызова из UI-потока.
     """
 
     def subscribe(self, name: str, handler: Callable, priority: int = 0):
-        """Подписаться. Возвращает объект с методом ``unsubscribe()``."""
+        """Подписаться. Возвращает объект с методом ``unsubscribe()``.
+
+        Подписка принадлежит текущему модулю: снять её можно только своим
+        handle или ``unsubscribe`` с тем же owner.
+        """
 
     def unsubscribe(self, name: str, handler: Optional[Callable] = None) -> int:
-        """Отписаться от события по функции или от всех подписок события."""
+        """Отписаться от своих подписок события.
+
+        Без ``handler`` снимаются все подписки **текущего модуля** на это
+        событие. Чужие подписки (платформы и других модулей) не
+        затрагиваются.
+        """
 
     def publish(self, name: str, payload=None) -> None:
         """Опубликовать факт."""

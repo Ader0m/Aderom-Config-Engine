@@ -13,6 +13,8 @@ from sdk.hints import (
 )
 from ui.hints.triggers import key_trigger
 
+from .flags import LTX_HINTS_ENABLED
+
 _SURFACES = frozenset({SURFACE_RAW, SURFACE_RESOLVED})
 _MAX_DEPTH = 5
 
@@ -38,6 +40,7 @@ class KeyProvider:
     surfaces = _SURFACES
     languages = frozenset({LANGUAGE_LTX})
     allow_in_comment = False
+    enabled = LTX_HINTS_ENABLED
 
     def __init__(self, catalogs):
         self._catalogs = catalogs

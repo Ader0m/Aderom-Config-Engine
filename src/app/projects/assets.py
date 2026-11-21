@@ -29,6 +29,7 @@ class ProjectAssetRegistry:
 
     def __init__(self, types: Iterable[ProjectAssetType] = ()):
         self._types: Dict[str, ProjectAssetType] = {}
+        self._owners: Dict[str, str] = {}
         self._lock = threading.RLock()
         for asset_type in types:
             self.register(asset_type)
@@ -38,18 +39,22 @@ class ProjectAssetRegistry:
         self,
         asset_type: ProjectAssetType,
         replace: bool = False,
+        owner: Optional[str] = None,
     ) -> ProjectAssetType:
         with self._lock:
-            return self._register_locked(asset_type, replace)
+            return self._register_locked(asset_type, replace, owner=owner)
 
     def _register_locked(
         self,
         asset_type: ProjectAssetType,
         replace: bool = False,
+        owner: Optional[str] = None,
     ) -> ProjectAssetType:
         key = str(getattr(asset_type, "key", "") or "").strip()
         if not key:
             raise ProjectAssetTypeError("Ключ типа ресурса не может быть пустым")
+
+        owner_value = str(owner or "")
 
         root = str(getattr(asset_type, "vfs_root", "") or "").strip()
         root = root.replace("\\", "/").strip("/")
@@ -92,6 +97,18 @@ class ProjectAssetRegistry:
             raise ProjectAssetTypeError(
                 "Тип ресурса уже зарегистрирован: %s" % key
             )
+        existing_owner = self._owners.get(key, "")
+        if (
+            existing is not None
+            and replace
+            and existing_owner
+            and owner_value
+            and existing_owner != owner_value
+        ):
+            raise ProjectAssetTypeError(
+                "Тип ресурса %s принадлежит модулю %s"
+                % (key, existing_owner)
+            )
 
         for registered in self._types.values():
             if registered.key == key:
@@ -119,11 +136,20 @@ class ProjectAssetRegistry:
             vfs_root=root.lower(),
         )
         self._types[key] = normalized
+        self._owners[key] = owner_value
         return normalized
 
-    def unregister(self, key: str) -> bool:
+    def unregister(self, key: str, owner: Optional[str] = None) -> bool:
+        key = str(key or "").strip()
         with self._lock:
-            return self._types.pop(str(key or "").strip(), None) is not None
+            if (
+                owner is not None
+                and self._owners.get(key, "") != str(owner)
+            ):
+                return False
+            removed = self._types.pop(key, None)
+            self._owners.pop(key, None)
+            return removed is not None
 
     def types(self) -> Tuple[ProjectAssetType, ...]:
         with self._lock:

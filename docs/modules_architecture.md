@@ -123,10 +123,13 @@ On-file использует обычное планирование Root на �
 ## 3. Lifecycle
 
 Загрузчик находит пакеты `modules.<name>`, проверяет `manifest.sdk_min`,
-зависимости `manifest.requires` и вызывает фазы жизненного цикла. Модуль с
-незагруженной зависимостью пропускается с сообщением в журнале; ошибка
-`init`/`register`/`activate` одного модуля логируется и не останавливает
-остальные. Например, `ogg_editor` объявляет `requires=("base",)` и может
+зависимости и вызывает фазы жизненного цикла. Зависимости описываются
+через `requires`/`optional_requires` (строки или `ModuleRequirement` с
+`min_version`) и `provides`/`needs` для возможностей. Модуль с
+незагруженной или несовместимой обязательной зависимостью пропускается с
+причиной в `loader.skipped`; ошибка `init`/`register`/`activate` одного
+модуля логируется, снимает его регистрации и не останавливает остальные.
+Например, `ogg_editor` объявляет `requires=("base",)` и может
 рассчитывать на обязательное окно предметов базового модуля.
 
 ```text
@@ -173,12 +176,29 @@ deactivate  — закрыть окна, остановить свою акти�
 - не удалять чужие данные и не менять состояние других модулей.
 
 `ctx.events.subscribe(...)` возвращает подписку с методом `unsubscribe()`.
-Модуль обязан хранить подписки и отписываться в `deactivate`, иначе после
-выгрузки модуля его обработчики продолжат получать события.
+Подписки, как и остальные регистрации, автоматически попадают в
+`ctx.registrations`; загрузчик снимет их при `deactivate`, даже если модуль
+забыл отписаться явно.
 
 `publish` можно вызывать из фонового потока: подписчики получат событие в
 потоке UI. `ctx.tasks.run(...)` также гарантирует, что `on_done` и `on_log`
-вызываются в потоке UI.
+вызываются в потоке UI. Исключение в `on_done`/`on_log` или в callback
+пункта меню логируется и не выходит в Qt event loop: остальные действия и
+задачи продолжают работать. При завершении приложения `TaskService.shutdown`
+дожидается фоновых задач.
+
+### Выгрузка и перезагрузка
+
+`ModuleLoader.unload(name)` снимает регистрации, закрывает окна и вкладки
+владельца, дожидается его фоновых задач и удаляет пакет из `sys.modules`.
+`reload(name)` загружает пакет заново и, если модуль был активен, снова
+вызывает `activate`. Если от модуля зависят другие активные модули,
+выгрузка отклоняется; `unload(..., force=True)` выгружает зависимых
+каскадом.
+
+Состояния записи загрузчика: `IMPORTED`, `INITIALIZED`, `REGISTERED`,
+`ACTIVE`, `FAILED`, `SKIPPED`, `UNLOADED`. Причины пропуска доступны в
+`loader.skipped` (`ModuleSkip`).
 
 ## 4. Параллельная работа модулей
 
@@ -194,6 +214,9 @@ deactivate  — закрыть окна, остановить свою акти�
   исключения `init`/`register`/`activate`, шина событий логирует ошибки
   подписчиков, задачи возвращают ошибку в `on_done`.
 - Общие ресурсы (`core`-сервисы) не мутируются модулями напрямую.
+- Модули считаются доверенным кодом. Изоляция на уровне процесса или
+  файловой системы не реализуется: для сторонних/недоверенных модулей
+  нужен отдельный plugin-host, а не текущий загрузчик.
 
 `base_module` — исключение: он является обязательной частью платформы.
 Дополнительные модули могут использовать его публичные команды и события,
@@ -243,6 +266,81 @@ deactivate  — закрыть окна, остановить свою акти�
 значение, а не собственные интервалы, чтобы поведение поиска было
 одинаковым во всех окнах.
 
+### Владение регистрациями
+
+Все методы регистрации возвращают `sdk.RegistrationHandle`: пока handle
+жив, регистрация действует; `handle.unsubscribe()` снимает её. `ModuleContext`
+создаёт `RegistrationScope` и автоматически собирает в него все регистрации
+модуля — меню, действия, обработчики открытия, горячие клавиши, команды,
+подписки, типы ресурсов, настройки и contributor'ов графа.
+
+```python
+from sdk.events import Events
+
+def register(self, ctx):
+    self._menu = ctx.ui.register_menu(
+        "Инструменты", "Мой модуль", self.show,
+    )
+    self._events = ctx.events.subscribe(
+        Events.TREE_READY, self.on_tree,
+    )
+
+def deactivate(self, ctx):
+    # Можно снять явно, но загрузчик всё равно вызовет
+    # ctx.registrations.dispose() после deactivate.
+    self._menu.unsubscribe()
+```
+
+Загрузчик вызывает `ctx.registrations.dispose()` после `deactivate` (и при
+откате упавшего `init`/`register`), поэтому модуль не обязан помнить о каждом
+обработчике. `unregister_project_asset_type`, `unregister_project_setting` и
+`unregister_section_graph_contributor` снимают только регистрацию текущего
+модуля: чужой ключ или contributor удалить нельзя.
+
+### События и перехват реакций
+
+Имена событий следуют политике `<owner>.<name>`:
+
+- `app.*` — жизненный цикл приложения (`app.started`, `app.error`);
+- `ui.*` — факты и действия платформы (`ui.tree_ready`, `ui.file_opened`,
+  `ui.project_saved`, `ui.item_card_requested`);
+- `base.*` — события базового модуля (`base.clean_run_started`);
+- `<module>.*` — события конкретного модуля.
+
+У каждой подписки `EventBus` есть владелец. `ctx.events.subscribe(...)`
+подписывает текущий модуль, а `ctx.events.unsubscribe(name)` снимает только
+его подписки на это событие — платформа и другие модули не затрагиваются.
+`unsubscribe(name, handler)` дополнительно фильтрует по функции.
+
+Для замены реакции используется не `publish`, а `dispatch`:
+`publish` — свершившийся факт, его получают все подписчики; `dispatch` —
+перехватываемое UI-действие. Обработчики вызываются от большего `priority`
+к меньшему, первый truthy-результат останавливает цепочку:
+
+```python
+def register(self, ctx):
+    # Заменяет реакцию платформы/другого модуля на действие.
+    self._draw = ctx.ui.register_action_handler(
+        "draw.element.1",
+        self.draw_element,
+        priority=100,
+    )
+
+def draw_element(self, payload):
+    ...
+    return True   # действие перехвачено
+```
+
+Регистрация обработчика не удаляет чужие подписки: если вернуть `False`,
+цепочка продолжит работу. Снять можно только свою регистрацию — через
+handle или `ctx.registrations.dispose()`.
+
+Публикация из фонового потока идёт через ограниченную очередь
+(`EventBus(max_pending=...)`): UI будится одним сигналом на пачку, а при
+переполнении старые события отбрасываются с диагностикой. Payload событий
+должен быть лёгким: для дерева используется `TreeReady` с `cache_id`, сам
+лес читается через `ctx.ui.workspace_forest()`.
+
 ### Подсказки в текстовых полях
 
 Модуль не создаёт собственный popup и не обрабатывает клавиши
@@ -278,7 +376,7 @@ handle = ctx.ui.attach_text_hints(
 - `ctx.ui.update_project_asset(path, data)` — изменить черновик в памяти;
 - `ctx.ui.save_project_asset(path, data=None)` — записать в каталог проекта;
 - `ctx.ui.project_asset_drafts()` — список `AssetDraftInfo`;
-- `Events.PROJECT_SAVED` (`project_saved`) — черновик записан (payload —
+- `Events.PROJECT_SAVED` (`ui.project_saved`) — черновик записан (payload —
   `SavedDraft` с `kind == "asset"`).
 
 Двоичные черновики участвуют в обычном автосохранении, `Ctrl+S`, закрытии
@@ -542,7 +640,7 @@ CR/LF/TAB в шрифтовом атласе имеют нулевую шири�
 момент клика по названию/описанию и в момент открытия редактора ячейки
 таблицы. Поэтому проект, созданный уже после открытия окна или вкладки
 предмета, включает редактирование без пересборки этих окон. На
-`project_changed` модуль возвращает удержанный resolved-документ
+`ui.project_changed` модуль возвращает удержанный resolved-документ
 каталога в реестр платформы (она освобождает живые документы при смене
 проекта); каталог и окно при этом не пересобираются, а без активного
 проекта правка остаётся запрещённой.
@@ -604,10 +702,16 @@ sub.unsubscribe()
 События платформы:
 
 ```text
-file_opened              (FileOpened)      publish
-file_open_failed         (FileOpenFailed)  publish
-project_saved            (SavedDraft)      publish
-project_changed          (Project|None)    publish
+app.started              ()                publish
+app.error                (str)             publish
+ui.tree_ready            (TreeReady)       publish
+ui.file_opened           (FileOpened)      publish
+ui.file_open_failed      (FileOpenFailed)  publish
+ui.project_saved         (SavedDraft)      publish
+ui.project_changed       (ProjectChanged)  publish
+ui.project_settings_changed ({key: value}) publish
+ui.item_card_requested   (ItemCardRequest) dispatch
+ui.resolved_document_changed (ResolvedDocumentChange) publish
 ui.window.shown          (key)             publish
 ui.window.closed         (key)             publish
 ui.tab.opened            (tab_id)          publish
@@ -617,7 +721,7 @@ ui.shortcut              ({key, scope})    dispatch
 ui.mouse                 ({scope, button, modifiers, event}) dispatch
 ```
 
-`file_opened` публикуется UI-слоем **после** размещения виджета и
+`ui.file_opened` публикуется UI-слоем **после** размещения виджета и
 переключения на него, а не маршрутизатором в момент выбора обработчика.
 Событие приходит из всех путей открытия: модульная вкладка (`open_tab`,
 включая повторное использование виджета), сырой файл (`open_file`) и
@@ -791,6 +895,9 @@ MODULE = MyModule()
 - `PROJECT_SAVED` payload типизирован как `sdk.SavedDraft`.
 - `FILE_OPENED` payload — `sdk.FileOpened`; `FILE_OPEN_FAILED` —
   `sdk.FileOpenFailed`. Старые строковые payload не поддерживаются.
+- `TREE_READY` payload — `sdk.TreeReady` (cache_id/generation/сводка), без
+  самого `LtxForest`; лес читается через `ctx.ui.workspace_forest()`.
+- `PROJECT_CHANGED` payload — `sdk.ProjectChanged`, без объекта `Project`.
 - Старые resolved-черновики читаются, но при сохранении переводятся в
   компактный формат v3: уникальные `LineSource`, сжатые индексы строк и
   zlib-сжатие крупных текстовых полей. `original_text`/`saved_text` не

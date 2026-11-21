@@ -36,6 +36,7 @@ class ProjectSettingsRegistry:
 
     def __init__(self, settings: Iterable[ProjectSetting] = ()):
         self._settings: Dict[str, ProjectSetting] = {}
+        self._owners: Dict[str, str] = {}
         self._lock = threading.RLock()
         for setting in settings:
             self.register(setting)
@@ -45,14 +46,16 @@ class ProjectSettingsRegistry:
         self,
         setting: ProjectSetting,
         replace: bool = False,
+        owner: Optional[str] = None,
     ) -> ProjectSetting:
         with self._lock:
-            return self._register_locked(setting, replace)
+            return self._register_locked(setting, replace, owner=owner)
 
     def _register_locked(
         self,
         setting: ProjectSetting,
         replace: bool = False,
+        owner: Optional[str] = None,
     ) -> ProjectSetting:
         key = str(getattr(setting, "key", "") or "").strip()
         if not key:
@@ -60,10 +63,23 @@ class ProjectSettingsRegistry:
                 "Ключ настройки проекта не может быть пустым"
             )
 
+        owner_value = str(owner or "")
         existing = self._settings.get(key)
         if existing is not None and not replace:
             raise ProjectSettingError(
                 "Настройка уже зарегистрирована: %s" % key
+            )
+        existing_owner = self._owners.get(key, "")
+        if (
+            existing is not None
+            and replace
+            and existing_owner
+            and owner_value
+            and existing_owner != owner_value
+        ):
+            raise ProjectSettingError(
+                "Настройка %s принадлежит модулю %s"
+                % (key, existing_owner)
             )
 
         kind = str(getattr(setting, "kind", "") or "choice").strip().lower()
@@ -118,14 +134,20 @@ class ProjectSettingsRegistry:
             description=str(getattr(setting, "description", "") or ""),
         )
         self._settings[key] = normalized
+        self._owners[key] = owner_value
         return normalized
 
-    def unregister(self, key: str) -> bool:
+    def unregister(self, key: str, owner: Optional[str] = None) -> bool:
+        key = str(key or "").strip()
         with self._lock:
-            return self._settings.pop(
-                str(key or "").strip(),
-                None,
-            ) is not None
+            if (
+                owner is not None
+                and self._owners.get(key, "") != str(owner)
+            ):
+                return False
+            removed = self._settings.pop(key, None)
+            self._owners.pop(key, None)
+            return removed is not None
 
     # ------------------------------------------------------------ чтение
     def settings(self) -> Tuple[ProjectSetting, ...]:

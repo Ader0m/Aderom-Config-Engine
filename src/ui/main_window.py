@@ -123,26 +123,16 @@ class MainWindow(QMainWindow):
         # регистрации модулей не меняли их порядок.
         file_menu = menubar.addMenu("Файл")
         project_menu = menubar.addMenu("Проект")
-        menus = {"Файл": file_menu, "Проект": project_menu}
+        self._static_menus = {
+            "Файл": file_menu,
+            "Проект": project_menu,
+        }
+        self._module_menus = {}
+        self._module_menu_actions = []
 
-        for title, label, callback, shortcut, action in self.api.menu_registrations:
-            m = menus.get(title)
-            if m is None:
-                m = menubar.addMenu(title)
-                menus[title] = m
-
-            a = QAction(label, self)
-            if shortcut:
-                a.setShortcut(shortcut)
-            a.triggered.connect(
-                lambda _=False, cb=callback, act=action: self.api.trigger_action(
-                    act,
-                    cb,
-                )
-            )
-            m.addAction(a)
-
-        file_menu.addSeparator()
+        # Якоря, перед которыми вставляются пункты модулей. Так порядок
+        # статических пунктов не зависит от момента регистрации модуля.
+        self._file_menu_anchor = file_menu.addSeparator()
 
         exit_action = QAction("Выход", self)
         exit_action.setShortcut("Ctrl+Q")
@@ -179,6 +169,72 @@ class MainWindow(QMainWindow):
         project_menu.addAction(self.project_patch_action)
 
         project_menu.aboutToShow.connect(self._update_project_menu)
+
+        self._rebuild_module_menus()
+
+        add_listener = getattr(self.api, "add_registration_listener", None)
+        if callable(add_listener):
+            self._menu_rebuild_sub = add_listener(
+                self._rebuild_module_menus
+            )
+
+    def _rebuild_module_menus(self):
+        """Пересобрать пункты меню, принадлежащие модулям.
+
+        Реестр регистраций меняется при выгрузке/перезагрузке модуля;
+        статические пункты платформы при этом не трогаются.
+        """
+        for menu, action in self._module_menu_actions:
+            try:
+                menu.removeAction(action)
+                action.deleteLater()
+            except RuntimeError:
+                pass
+        self._module_menu_actions = []
+
+        for title, menu in list(self._module_menus.items()):
+            if not menu.isEmpty():
+                continue
+            try:
+                self.menuBar().removeAction(menu.menuAction())
+                menu.deleteLater()
+            except RuntimeError:
+                pass
+            del self._module_menus[title]
+
+        menus = dict(self._static_menus)
+        menus.update(self._module_menus)
+
+        for title, label, callback, shortcut, action in self.api.menu_registrations:
+            menu = menus.get(title)
+            if menu is None:
+                menu = self.menuBar().addMenu(title)
+                menus[title] = menu
+                self._module_menus[title] = menu
+
+            item = QAction(label, self)
+            if shortcut:
+                item.setShortcut(shortcut)
+            item.triggered.connect(
+                lambda _=False, cb=callback, act=action: self.api.trigger_action(
+                    act,
+                    cb,
+                )
+            )
+
+            anchor = self._menu_anchor(title)
+            if anchor is not None and anchor in menu.actions():
+                menu.insertAction(anchor, item)
+            else:
+                menu.addAction(item)
+            self._module_menu_actions.append((menu, item))
+
+    def _menu_anchor(self, title):
+        if title == "Файл":
+            return self._file_menu_anchor
+        if title == "Проект":
+            return self.project_create_action
+        return None
 
     def _init_statusbar(self):
         self.statusBar().showMessage("Готов")
@@ -255,7 +311,10 @@ class MainWindow(QMainWindow):
         return self.api.services.tree_query.search_nodes(forest, query)
 
     # -------------------------------------------------- события
-    def _on_tree_ready(self, forest):
+    def _on_tree_ready(self, _payload=None):
+        forest = self.api.workspace_forest()
+        if forest is None:
+            return
         self.file_tree.load_forest(forest)
         self.search_bar.refresh()
 
@@ -324,6 +383,9 @@ class MainWindow(QMainWindow):
                 pass
 
         self._tree_ready_sub.unsubscribe()
+        menu_sub = getattr(self, "_menu_rebuild_sub", None)
+        if menu_sub is not None:
+            menu_sub.unsubscribe()
         if hasattr(self, "_prebuild_timer"):
             self._prebuild_timer.stop()
         if hasattr(self, "_autosave_timer"):

@@ -13,6 +13,8 @@ from sdk.hints import (
 )
 from ui.hints.triggers import directive_trigger, include_trigger
 
+from .flags import LTX_HINTS_ENABLED
+
 
 class IncludePathProvider:
     id = "ui.include_path"
@@ -20,6 +22,7 @@ class IncludePathProvider:
     surfaces = frozenset({SURFACE_RAW})
     languages = frozenset({LANGUAGE_LTX})
     allow_in_comment = False
+    enabled = LTX_HINTS_ENABLED
 
     def __init__(self, catalogs):
         self._catalogs = catalogs
@@ -91,6 +94,7 @@ class DirectiveProvider:
     surfaces = frozenset({SURFACE_RAW})
     languages = frozenset({LANGUAGE_LTX})
     allow_in_comment = False
+    enabled = LTX_HINTS_ENABLED
 
     def __init__(self, catalogs=None):
         self._catalogs = catalogs

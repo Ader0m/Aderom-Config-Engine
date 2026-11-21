@@ -8,6 +8,7 @@ from contextlib import redirect_stderr
 from tests.support import SRC  # noqa: F401
 
 from ui.bus import CommandBus, CommandError, EventBus
+from sdk.events import PLATFORM_OWNER
 
 
 class EventBusTest(unittest.TestCase):
@@ -101,6 +102,79 @@ class EventBusTest(unittest.TestCase):
         bus.subscribe("e", lambda payload: None)
         bus.clear("e")
         self.assertFalse(bus.has("e"))
+
+    def test_unsubscribe_is_owner_scoped(self):
+        bus = EventBus()
+        seen = []
+
+        bus.subscribe("e", lambda payload: seen.append("a"), owner="a")
+        bus.subscribe("e", lambda payload: seen.append("b"), owner="b")
+
+        self.assertEqual(bus.unsubscribe("e", owner="a"), 1)
+        bus.publish("e", None)
+        self.assertEqual(seen, ["b"])
+        self.assertTrue(bus.has("e", owner="b"))
+        self.assertFalse(bus.has("e", owner="a"))
+
+        # Без owner снимаются только платформенные подписки.
+        self.assertEqual(bus.unsubscribe("e"), 0)
+        bus.publish("e", None)
+        self.assertEqual(seen, ["b", "b"])
+
+        self.assertEqual(bus.unsubscribe("e", owner="b"), 1)
+        self.assertFalse(bus.has("e"))
+
+    def test_clear_can_remove_one_owner(self):
+        bus = EventBus()
+        bus.subscribe("e", lambda payload: None, owner="a")
+        bus.subscribe("e", lambda payload: None, owner="b")
+
+        self.assertEqual(bus.clear("e", owner="a"), 1)
+        self.assertTrue(bus.has("e", owner="b"))
+        self.assertFalse(bus.has("e", owner="a"))
+
+        self.assertEqual(bus.clear("e"), 1)
+        self.assertFalse(bus.has("e"))
+
+    def test_dispatch_lets_a_module_replace_platform_reaction(self):
+        bus = EventBus()
+        calls = []
+
+        bus.subscribe(
+            "draw.element",
+            lambda payload: calls.append("platform") or False,
+            priority=0,
+            owner=PLATFORM_OWNER,
+        )
+        bus.subscribe(
+            "draw.element",
+            lambda payload: calls.append("module") or True,
+            priority=100,
+            owner="demo",
+        )
+
+        self.assertTrue(bus.dispatch("draw.element", None))
+        self.assertEqual(calls, ["module"])
+
+    def test_lower_priority_module_handler_does_not_replace(self):
+        bus = EventBus()
+        calls = []
+
+        bus.subscribe(
+            "draw.element",
+            lambda payload: calls.append("platform") or False,
+            priority=10,
+            owner=PLATFORM_OWNER,
+        )
+        bus.subscribe(
+            "draw.element",
+            lambda payload: calls.append("module") or True,
+            priority=0,
+            owner="demo",
+        )
+
+        self.assertTrue(bus.dispatch("draw.element", None))
+        self.assertEqual(calls, ["platform", "module"])
 
 
 class CommandBusTest(unittest.TestCase):

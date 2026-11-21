@@ -116,7 +116,7 @@ class ProjectServiceTest(unittest.TestCase):
 
             self.assertEqual(len(saved), 1)
             self.assertEqual(saved[0].kind, "file")
-            self.assertEqual(saved[0].text, "")
+            self.assertFalse(hasattr(saved[0], "text"))
             self.assertGreater(saved[0].size, 0)
 
     def test_delete_active_project_removes_directory(self):

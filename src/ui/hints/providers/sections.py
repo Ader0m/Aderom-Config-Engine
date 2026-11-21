@@ -13,6 +13,8 @@ from sdk.hints import (
 )
 from ui.hints.triggers import parent_trigger, section_trigger
 
+from .flags import LTX_HINTS_ENABLED
+
 _SURFACES = frozenset({SURFACE_RAW, SURFACE_RESOLVED})
 
 
@@ -41,6 +43,7 @@ class SectionProvider:
     surfaces = _SURFACES
     languages = frozenset({LANGUAGE_LTX})
     allow_in_comment = False
+    enabled = LTX_HINTS_ENABLED
 
     def __init__(self, catalogs):
         self._catalogs = catalogs
@@ -121,6 +124,7 @@ class ParentProvider:
     surfaces = _SURFACES
     languages = frozenset({LANGUAGE_LTX})
     allow_in_comment = False
+    enabled = LTX_HINTS_ENABLED
 
     def __init__(self, catalogs):
         self._catalogs = catalogs

@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from core import read_text_safe, read_xml_text
 from sdk.events import Events
-from sdk.api import AssetDraftInfo, SavedDraft
+from sdk.api import AssetDraftInfo, ProjectChanged, SavedDraft
 
 from app.projects import (
     ProjectAssetTypeError,
@@ -132,7 +132,7 @@ class ProjectControllerMixin:
             services=self.services,
         )
         if added or removed:
-            self.events.publish(Events.TREE_READY, forest)
+            self.publish_tree_ready(forest)
             try:
                 roots = self.workspace.roots_for(
                     self.workspace.last_added_paths
@@ -417,10 +417,13 @@ class ProjectControllerMixin:
         self._update_project_status()
         return True
 
-    def register_project_asset_type(self, asset_type):
+    def register_project_asset_type(self, asset_type, owner=None):
         """Зарегистрировать тип двоичного ресурса от имени модуля."""
         try:
-            registered = self.asset_types.register(asset_type)
+            registered = self.asset_types.register(
+                asset_type,
+                owner=owner,
+            )
         except ProjectAssetTypeError as exc:
             self.log("Проект: тип ресурса не зарегистрирован: %s" % exc)
             return False
@@ -436,8 +439,8 @@ class ProjectControllerMixin:
         )
         return True
 
-    def unregister_project_asset_type(self, key):
-        if not self.asset_types.unregister(key):
+    def unregister_project_asset_type(self, key, owner=None):
+        if not self.asset_types.unregister(key, owner=owner):
             return False
         self.project.invalidate_preview_cache()
         self.log("Проект: тип ресурса снят: %s" % key)
@@ -447,10 +450,13 @@ class ProjectControllerMixin:
         return self.asset_types.types()
 
     # -------------------------------------------------- настройки модулей
-    def register_project_setting(self, setting):
+    def register_project_setting(self, setting, owner=None):
         """Зарегистрировать настройку проекта от имени модуля."""
         try:
-            registered = self.project_setting_registry.register(setting)
+            registered = self.project_setting_registry.register(
+                setting,
+                owner=owner,
+            )
         except ProjectSettingError as exc:
             self.log("Проект: настройка не зарегистрирована: %s" % exc)
             return False
@@ -462,8 +468,8 @@ class ProjectControllerMixin:
         )
         return True
 
-    def unregister_project_setting(self, key):
-        if not self.project_setting_registry.unregister(key):
+    def unregister_project_setting(self, key, owner=None):
+        if not self.project_setting_registry.unregister(key, owner=owner):
             return False
         self.project.invalidate_preview_cache()
         self.log("Проект: настройка снята: %s" % key)
@@ -573,7 +579,6 @@ class ProjectControllerMixin:
             kind="asset",
             key=self.project.path_key(draft.path),
             path=draft.path,
-            text="",
         )
         self.events.publish(Events.PROJECT_SAVED, saved)
         self.set_status(
@@ -1077,7 +1082,14 @@ class ProjectControllerMixin:
         self._update_project_status()
         # Сначала освобождаем старые живые документы, затем заново
         # привязываем открытые вкладки к черновикам нового проекта.
-        self.events.publish(Events.PROJECT_CHANGED, project)
+        self.events.publish(
+            Events.PROJECT_CHANGED,
+            ProjectChanged(
+                project_id=str(getattr(project, "id", "") or ""),
+                name=str(getattr(project, "name", "") or ""),
+                active=True,
+            ),
+        )
         # Вкладки принадлежат конкретному проекту: старые закрываем,
         # сохранённые в проекте — восстанавливаем ниже.
         self._reset_editor_tabs()
@@ -1190,7 +1202,10 @@ class ProjectControllerMixin:
             self._restore_project_virtual_files()
             self._invalidate_resolver_cache()
             self._update_project_status()
-            self.events.publish(Events.PROJECT_CHANGED, None)
+            self.events.publish(
+                Events.PROJECT_CHANGED,
+                ProjectChanged(active=False),
+            )
             self._reset_editor_tabs()
             editor = self._editor_widget()
             ensure = getattr(editor, "ensure_default_tab", None)

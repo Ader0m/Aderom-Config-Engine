@@ -143,11 +143,11 @@ class _Platform:
         self.settings = {}
         self.values = {}
 
-    def register_project_setting(self, setting):
+    def register_project_setting(self, setting, owner=None):
         self.settings[setting.key] = setting
         return True
 
-    def unregister_project_setting(self, key):
+    def unregister_project_setting(self, key, owner=None):
         return self.settings.pop(key, None) is not None
 
     def project_setting_definitions(self):

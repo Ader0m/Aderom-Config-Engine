@@ -1,27 +1,50 @@
 # -*- coding: utf-8 -*-
-"""Имена системных событий и UI-действий."""
+"""Имена системных событий и UI-действий.
+
+Политика namespace: ``<owner>.<name>``.
+
+- ``app.*`` — жизненный цикл приложения;
+- ``ui.*`` — факты/действия платформы (включая проект и workspace);
+- ``<module>.*`` — события конкретного модуля.
+"""
+
+# Владелец платформенных подписок. Модули получают имя из manifest.name,
+# поэтому их подписки не смешиваются с подписками платформы.
+PLATFORM_OWNER = "<platform>"
+
+
+def namespace_of(name):
+    """Префикс события до первой точки."""
+    return str(name or "").partition(".")[0]
+
+
+def is_namespaced(name):
+    """Есть ли у имени непустой namespace и само имя."""
+    prefix, separator, rest = str(name or "").partition(".")
+    return bool(prefix and separator and rest)
+
 
 class Events:
     # -------------------------------------------------- жизненный цикл
-    APP_STARTED = "app_started"
-    TREE_READY = "tree_ready"
+    APP_STARTED = "app.started"
+    TREE_READY = "ui.tree_ready"
     # Файл действительно открыт: виджет размещён и стал текущим (payload — путь).
-    FILE_OPENED = "file_opened"
+    FILE_OPENED = "ui.file_opened"
     # Открытие не состоялось (payload — путь): отложенная навигация сбрасывается.
-    FILE_OPEN_FAILED = "file_open_failed"
-    CLEAN_RUN_STARTED = "clean_run_started"
-    CLEAN_RUN_FINISHED = "clean_run_finished"
-    ERROR = "error"
+    FILE_OPEN_FAILED = "ui.file_open_failed"
+    CLEAN_RUN_STARTED = "base.clean_run_started"
+    CLEAN_RUN_FINISHED = "base.clean_run_finished"
+    ERROR = "app.error"
     # Черновики проекта записаны в каталог проекта (payload — SavedDraft).
-    PROJECT_SAVED = "project_saved"
+    PROJECT_SAVED = "ui.project_saved"
     # Активный проект создан, загружен или удалён.
-    PROJECT_CHANGED = "project_changed"
+    PROJECT_CHANGED = "ui.project_changed"
     # Изменены настройки активного проекта (payload — {key: value}).
-    PROJECT_SETTINGS_CHANGED = "project_settings_changed"
+    PROJECT_SETTINGS_CHANGED = "ui.project_settings_changed"
     # Изменился живой resolved-документ (payload — ResolvedDocumentChange).
-    RESOLVED_DOCUMENT_CHANGED = "resolved.document.changed"
+    RESOLVED_DOCUMENT_CHANGED = "ui.resolved_document_changed"
     # Запрошено открытие карточки предмета по секции (payload — ItemCardRequest).
-    ITEM_CARD_REQUESTED = "item.card.requested"
+    ITEM_CARD_REQUESTED = "ui.item_card_requested"
 
     # -------------------------------------------------- UI-факты
     # Публикуются платформой после того, как действие уже выполнено.

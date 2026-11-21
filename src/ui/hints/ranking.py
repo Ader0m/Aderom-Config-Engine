@@ -21,6 +21,10 @@ def dedupe_items(items, limit=MAX_ITEMS):
 
 
 def provider_applies(provider, context):
+    # Провайдер может оставаться в реестре, но быть временно выключенным
+    # (см. ui/hints/providers/flags.py). Отсутствие атрибута = включён.
+    if not bool(getattr(provider, "enabled", True)):
+        return False
     surfaces = getattr(provider, "surfaces", frozenset()) or frozenset()
     languages = getattr(provider, "languages", frozenset()) or frozenset()
     if surfaces and "*" not in surfaces and context.surface not in surfaces:

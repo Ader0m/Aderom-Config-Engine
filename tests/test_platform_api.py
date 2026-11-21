@@ -6,8 +6,15 @@ from types import SimpleNamespace
 
 from tests.support import SRC  # noqa: F401
 
-from sdk import FileOpened, FileOpenFailed, ProjectSetting, ProjectSettingChoice
+from sdk import (
+    FileOpened,
+    FileOpenFailed,
+    ProjectSetting,
+    ProjectSettingChoice,
+    TreeReady,
+)
 from sdk.events import Events
+from ui.bus import EventBus
 from ui.platform_api import PlatformApi, _path_key
 from app.projects import PreviewItem, ProjectService
 
@@ -396,6 +403,116 @@ class _RestoreForest:
     def __init__(self):
         self.files = []
         self.xml_files = []
+
+
+class TreeReadyPayloadTest(unittest.TestCase):
+    def test_tree_ready_is_lightweight_and_sets_workspace(self):
+        with tempfile.TemporaryDirectory() as d:
+            events = FakeEvents()
+            api = PlatformApi(
+                events,
+                FakeCommands(),
+                None,
+                None,
+                SimpleNamespace(
+                    projects_dir=Path(d) / "projects",
+                    app_dir=Path(d),
+                ),
+            )
+            forest = _RestoreForest()
+            forest.cache_id = "forest-1"
+            seen = []
+            events.subscribe(Events.TREE_READY, seen.append)
+
+            payload = api.publish_tree_ready(forest)
+
+            self.assertIs(api.workspace_forest(), forest)
+            self.assertIsInstance(payload, TreeReady)
+            self.assertEqual(payload.cache_id, "forest-1")
+            self.assertFalse(hasattr(payload, "forest"))
+            self.assertEqual(seen, [payload])
+
+    def test_file_open_failed_is_published_by_platform(self):
+        with tempfile.TemporaryDirectory() as d:
+            events = FakeEvents()
+            api = PlatformApi(
+                events,
+                FakeCommands(),
+                None,
+                None,
+                SimpleNamespace(
+                    projects_dir=Path(d) / "projects",
+                    app_dir=Path(d),
+                ),
+            )
+            seen = []
+            events.subscribe(Events.FILE_OPEN_FAILED, seen.append)
+            path = Path("gamedata/configs/items/test.xml")
+
+            api.notify_file_open_failed(path, "broken")
+
+            self.assertEqual(len(seen), 1)
+            self.assertIsInstance(seen[0], FileOpenFailed)
+            self.assertEqual(seen[0].path, path)
+            self.assertEqual(seen[0].reason, "broken")
+
+
+class TriggerActionIsolationTest(unittest.TestCase):
+    def _api(self):
+        return PlatformApi(
+            EventBus(),
+            FakeCommands(),
+            None,
+            None,
+            None,
+        )
+
+    def test_callback_error_is_logged_and_does_not_escape(self):
+        api = self._api()
+
+        def fail():
+            raise RuntimeError("action failed")
+
+        self.assertFalse(api.trigger_action("demo.action", fail))
+        log_text = "\n".join(api._log_buffer)
+        self.assertIn("Ошибка действия demo.action", log_text)
+        self.assertIn("RuntimeError", log_text)
+
+        self.assertTrue(api.trigger_action("demo.action", lambda: True))
+
+    def test_intercepted_action_does_not_call_callback(self):
+        api = self._api()
+        calls = []
+        api.register_action_handler(
+            "demo.action",
+            lambda payload: calls.append("handler") or True,
+            priority=10,
+        )
+
+        self.assertTrue(
+            api.trigger_action(
+                "demo.action",
+                lambda: calls.append("callback"),
+            )
+        )
+        self.assertEqual(calls, ["handler"])
+
+    def test_intercepted_fallback_does_not_call_callback(self):
+        api = self._api()
+        calls = []
+        api.register_action_handler(
+            "ui.shortcut",
+            lambda payload: calls.append("fallback") or True,
+        )
+
+        self.assertTrue(
+            api.trigger_action(
+                None,
+                lambda: calls.append("callback"),
+                fallback="ui.shortcut",
+            )
+        )
+        self.assertEqual(calls, ["fallback"])
 
 
 class ProjectVfsRestoreTest(unittest.TestCase):

@@ -21,6 +21,10 @@ class _Manifest:
         self.version = "0.1.0"
         self.sdk_min = "0.1.0"
         self.requires = tuple(requires)
+        self.optional_requires = ()
+        self.provides = ()
+        self.needs = ()
+        self.optional_needs = ()
         self.package = package or name
 
 
@@ -102,7 +106,7 @@ class ModuleLoaderTest(unittest.TestCase):
         logs = []
         loader._start_module(entry, {}, logs.append)
 
-        self.assertEqual(loader.loaded, [])
+        self.assertEqual(loader.records, {})
         self.assertTrue(entry.instance.init_called)
         self.assertTrue(entry.instance.register_called)
         self.assertTrue(entry.instance.deactivate_called)

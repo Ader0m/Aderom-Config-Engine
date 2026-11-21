@@ -6,6 +6,7 @@ from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import QApplication, QShortcut
 
 from sdk.events import Events
+from sdk.registrations import RegistrationHandle, remove_identity
 
 
 _MODIFIERS = {
@@ -80,17 +81,34 @@ class ShortcutManager:
         self._registrations = []
         self._installed = set()
 
-    def register(self, key, callback, scope="global", action=None):
+    def register(self, key, callback, scope="global", action=None, owner=None):
         registration = {
             "key": key,
             "callback": callback,
             "scope": scope or "global",
             "action": action,
             "object": None,
+            "owner": str(owner or ""),
         }
         self._registrations.append(registration)
         if self._window is not None:
             self._install(registration)
+        return RegistrationHandle(
+            lambda: self._unregister(registration),
+            registration["owner"],
+        )
+
+    def _unregister(self, registration):
+        shortcut = registration.get("object")
+        if shortcut is not None:
+            try:
+                shortcut.setEnabled(False)
+                shortcut.deleteLater()
+            except RuntimeError:
+                pass
+            self._installed.discard(id(registration))
+            registration["object"] = None
+        return remove_identity(self._registrations, registration)
 
     def attach(self, window):
         self._window = window
@@ -151,6 +169,7 @@ class MouseBindingManager:
         scope="global",
         event="press",
         action=None,
+        owner=None,
     ):
         registration = {
             "button": normalize_button(button),
@@ -159,10 +178,37 @@ class MouseBindingManager:
             "scope": scope or "global",
             "event_type": normalize_mouse_event(event),
             "action": action,
+            "owner": str(owner or ""),
         }
         self._registrations.append(registration)
         if self._window is not None:
             self._ensure_filter(registration["scope"])
+        return RegistrationHandle(
+            lambda: self._unregister(registration),
+            registration["owner"],
+        )
+
+    def _unregister(self, registration):
+        if not remove_identity(self._registrations, registration):
+            return False
+
+        scope = registration["scope"]
+        if any(item["scope"] == scope for item in self._registrations):
+            return True
+
+        event_filter = self._filters.pop(scope, None)
+        if event_filter is not None:
+            target = self._target(scope)
+            if target is not None:
+                try:
+                    target.removeEventFilter(event_filter)
+                except RuntimeError:
+                    pass
+            try:
+                event_filter.deleteLater()
+            except RuntimeError:
+                pass
+        return True
 
     def attach(self, window):
         self._window = window

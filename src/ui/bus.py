@@ -14,6 +14,7 @@
 import logging
 import threading
 import traceback
+from collections import deque
 
 try:  # Qt нужен только для доставки событий в главный поток.
     from PyQt5.QtCore import QCoreApplication, QObject, QThread, pyqtSignal, pyqtSlot
@@ -26,6 +27,11 @@ except ImportError:  # pragma: no cover - среда без PyQt
 
 log = logging.getLogger(__name__)
 
+try:
+    from sdk.events import PLATFORM_OWNER
+except ImportError:  # pragma: no cover - ui всегда импортирует sdk
+    PLATFORM_OWNER = "<platform>"
+
 
 class Subscription:
     """Подписка на событие. Позволяет отписаться без знания внутренностей шины."""
@@ -35,6 +41,7 @@ class Subscription:
         self._name = name
         self._entry = entry
         self._active = True
+        self.owner = entry.owner
 
     @property
     def active(self):
@@ -48,21 +55,22 @@ class Subscription:
 
 
 class _Entry:
-    __slots__ = ("priority", "order", "fn", "active")
+    __slots__ = ("priority", "order", "fn", "owner", "active")
 
-    def __init__(self, priority, order, fn):
+    def __init__(self, priority, order, fn, owner=PLATFORM_OWNER):
         self.priority = priority
         self.order = order
         self.fn = fn
+        self.owner = str(owner or "")
         self.active = True
 
 
 if QObject is not None:
 
     class _EventRelay(QObject):
-        """Переносит вызов подписчика в поток, где создана шина."""
+        """Переносит вызов подписчиков в поток, где создана шина."""
 
-        deliver = pyqtSignal(object, str, object)
+        deliver = pyqtSignal()
 
         def __init__(self, bus):
             super().__init__()
@@ -71,9 +79,9 @@ if QObject is not None:
             # потоке, поэтому emit из фонового потока ставится в очередь.
             self.deliver.connect(self._on_deliver)
 
-        @pyqtSlot(object, str, object)
-        def _on_deliver(self, entry, name, payload):
-            self._bus._call(entry, name, payload)
+        @pyqtSlot()
+        def _on_deliver(self):
+            self._bus._drain_pending()
 
 else:  # pragma: no cover - среда без PyQt
     _EventRelay = None
@@ -85,62 +93,104 @@ class EventBus:
     ``subscribe`` принимает приоритет: чем выше, тем раньше вызывается
     обработчик. Для ``dispatch`` первый обработчик, вернувший truthy,
     останавливает цепочку. Для ``publish`` вызываются все подписчики.
+
+    Фоновая публикация складывается в ограниченную очередь и будит UI
+    одним сигналом на пачку, а не сигналом на каждого подписчика.
     """
 
-    def __init__(self):
+    def __init__(self, max_pending=4096):
         self._subs = {}
         self._lock = threading.RLock()
         self._order = 0
         self._relay = _EventRelay(self) if _EventRelay is not None else None
 
-    def subscribe(self, name, fn, priority=0):
+        # Очередь фоновой доставки. Один queued-сигнал будит главный поток,
+        # дальше он разбирает пачку целиком — вместо сигнала на каждого
+        # подписчика. max_pending ограничивает рост очереди.
+        self._pending = deque()
+        self._pending_lock = threading.RLock()
+        self._delivery_scheduled = False
+        self.max_pending = max(0, int(max_pending or 0))
+        self.dropped_events = 0
+
+    def subscribe(self, name, fn, priority=0, owner=PLATFORM_OWNER):
+        """Подписаться на событие.
+
+        ``owner`` — модуль-владелец. Платформенные подписки используют
+        ``PLATFORM_OWNER``; модули получают своё имя через SDK-адаптер.
+        """
         with self._lock:
             self._order += 1
-            entry = _Entry(priority, self._order, fn)
+            entry = _Entry(priority, self._order, fn, owner)
             self._subs.setdefault(name, []).append(entry)
         return Subscription(self, name, entry)
 
-    def unsubscribe(self, name, fn=None):
-        """Удалить подписку по функции. Без ``fn`` — все подписки события."""
+    def unsubscribe(self, name, fn=None, owner=PLATFORM_OWNER):
+        """Удалить подписки указанного владельца.
+
+        ``owner=None`` — внутренняя очистка без фильтра. Модуль через
+        ``ctx.events.unsubscribe`` всегда передаёт свой owner и не может
+        снять чужую подписку.
+        """
+        wanted = None if owner is None else str(owner)
         with self._lock:
             entries = self._subs.get(name)
             if not entries:
                 return 0
 
-            if fn is None:
-                removed = len(entries)
-                self._subs.pop(name, None)
-                for entry in entries:
-                    entry.active = False
-                return removed
-
             kept = []
             removed = 0
             for entry in entries:
-                if entry.fn is fn:
+                owner_matches = (
+                    wanted is None or entry.owner == wanted
+                )
+                fn_matches = fn is None or entry.fn is fn
+                if owner_matches and fn_matches:
                     entry.active = False
                     removed += 1
                 else:
                     kept.append(entry)
+
             if kept:
                 self._subs[name] = kept
             else:
                 self._subs.pop(name, None)
             return removed
 
-    def clear(self, name=None):
-        with self._lock:
-            if name is None:
-                entries = [e for group in self._subs.values() for e in group]
-                self._subs.clear()
-            else:
-                entries = self._subs.pop(name, ())
-            for entry in entries:
-                entry.active = False
+    def clear(self, name=None, owner=None):
+        """Очистить подписки (внутренняя операция платформы).
 
-    def has(self, name):
+        ``owner=None`` — все подписки; иначе только указанного владельца.
+        """
         with self._lock:
-            return bool(self._subs.get(name))
+            wanted = None if owner is None else str(owner)
+            if name is None:
+                groups = list(self._subs.items())
+            else:
+                groups = [(name, self._subs.get(name, ()))]
+
+            entries = []
+            for event_name, items in groups:
+                kept = []
+                for entry in items:
+                    if wanted is None or entry.owner == wanted:
+                        entry.active = False
+                        entries.append(entry)
+                    else:
+                        kept.append(entry)
+                if kept:
+                    self._subs[event_name] = kept
+                else:
+                    self._subs.pop(event_name, None)
+            return len(entries)
+
+    def has(self, name, owner=None):
+        with self._lock:
+            entries = self._subs.get(name, ())
+            if owner is None:
+                return bool(entries)
+            wanted = str(owner)
+            return any(entry.owner == wanted for entry in entries)
 
     def _remove_entry(self, name, entry):
         with self._lock:
@@ -162,14 +212,72 @@ class EventBus:
         return entries
 
     def publish(self, name, payload=None):
-        """Опубликовать факт. Вызываются все подписчики, ошибки не прерывают цепочку."""
-        for entry in self._snapshot(name):
-            if not entry.active:
-                continue
-            if self._needs_queued_delivery():
-                self._relay.deliver.emit(entry, name, payload)
-            else:
+        """Опубликовать факт. Вызываются все подписчики."""
+        entries = [
+            entry for entry in self._snapshot(name)
+            if entry.active
+        ]
+        if not entries:
+            return
+
+        if self._needs_queued_delivery():
+            self._enqueue(entries, name, payload)
+            return
+
+        for entry in entries:
+            self._call(entry, name, payload)
+
+    def _enqueue(self, entries, name, payload):
+        schedule = False
+        with self._pending_lock:
+            for entry in entries:
+                if (
+                    self.max_pending
+                    and len(self._pending) >= self.max_pending
+                ):
+                    self._pending.popleft()
+                    self.dropped_events += 1
+                    if (
+                        self.dropped_events == 1
+                        or self.dropped_events % 1000 == 0
+                    ):
+                        log.warning(
+                            "EventBus: очередь переполнена, "
+                            "отброшено событий: %d",
+                            self.dropped_events,
+                        )
+                self._pending.append((entry, name, payload))
+            if not self._delivery_scheduled:
+                self._delivery_scheduled = True
+                schedule = True
+        if schedule and self._relay is not None:
+            self._relay.deliver.emit()
+
+    def _drain_pending(self):
+        while True:
+            with self._pending_lock:
+                if not self._pending:
+                    self._delivery_scheduled = False
+                    return
+                batch = list(self._pending)
+                self._pending.clear()
+
+            for entry, name, payload in batch:
+                if not entry.active:
+                    continue
                 self._call(entry, name, payload)
+
+    @property
+    def pending_count(self):
+        with self._pending_lock:
+            return len(self._pending)
+
+    def clear_pending(self):
+        with self._pending_lock:
+            dropped = len(self._pending)
+            self._pending.clear()
+            self._delivery_scheduled = False
+        return dropped
 
     def dispatch(self, name, payload=None):
         """Разослать перехватываемое UI-действие.

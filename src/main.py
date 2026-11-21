@@ -192,6 +192,8 @@ def main():
         KeyProvider,
         DirectiveProvider,
     ):
+        # LTX-провайдеры регистрируются всегда, но временно отключены
+        # флагом LTX_HINTS_ENABLED (ui/hints/providers/flags.py).
         hints.register(provider_type(hints.catalogs))
     api.hints = hints
 
@@ -225,6 +227,12 @@ def main():
     services.stop_prebuild()
     hints.close()
     loader.deactivate_all(log=api.log)
+    shutdown_tasks = getattr(tasks, "shutdown", None)
+    if callable(shutdown_tasks):
+        if not shutdown_tasks():
+            api.log(
+                "Не все фоновые задачи завершились за отведённое время"
+            )
     sys.exit(code)
 
 

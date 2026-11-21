@@ -57,6 +57,19 @@ class ModuleWindowManagerTest(unittest.TestCase):
         self.assertFalse(first.isVisible())
         self.assertTrue(second.isVisible())
 
+    def test_close_owner_closes_only_matching_windows(self):
+        first = QWidget()
+        second = QWidget()
+        self.manager.show("first", first, owner="demo")
+        self.manager.show("second", second, owner="other")
+        self.assertEqual(self.manager.owner_of("first"), "demo")
+
+        self.manager.close_owner("demo")
+
+        self.assertFalse(first.isVisible())
+        self.assertTrue(second.isVisible())
+        self.assertEqual(self.manager.owner_of("first"), "")
+
 
 if __name__ == "__main__":
     unittest.main()

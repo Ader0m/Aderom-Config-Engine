@@ -54,7 +54,7 @@ class ResolvedDocumentTest(unittest.TestCase):
         self.assertEqual(self.persisted[-1], "[a]\nx = 2\n")
         self.assertEqual(len(self.events.published), 1)
         name, payload = self.events.published[0]
-        self.assertEqual(name, "resolved.document.changed")
+        self.assertEqual(name, "ui.resolved_document_changed")
         self.assertEqual(payload.tab_id, "res.test")
         self.assertEqual(payload.revision, 1)
 

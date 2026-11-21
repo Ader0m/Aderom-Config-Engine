@@ -52,6 +52,10 @@ class ModuleApiTest(unittest.TestCase):
         self.assertEqual(manifest.description, "")
         self.assertEqual(manifest.author, "")
         self.assertEqual(manifest.requires, ())
+        self.assertEqual(manifest.optional_requires, ())
+        self.assertEqual(manifest.provides, ())
+        self.assertEqual(manifest.needs, ())
+        self.assertEqual(manifest.optional_needs, ())
 
     def test_module_base_lifecycle_methods_are_callable(self):
         module = ModuleBase()
@@ -124,9 +128,10 @@ class ModuleApiTest(unittest.TestCase):
             graph=SectionGraph(section_name="wpn", root=root),
         )
 
-        adapter.register_section_graph_contributor(
+        first = adapter.register_section_graph_contributor(
             lambda _request: (node,)
         )
+        self.assertIsNotNone(first)
         self.assertEqual(
             adapter.collect_section_graph_nodes(request),
             (node,),
@@ -147,10 +152,10 @@ class ModuleApiTest(unittest.TestCase):
         )
         self.assertEqual(len(logs), 1)
 
-        self.assertTrue(
-            adapter.unregister_section_graph_contributor(
-                adapter._section_graph_contributors[0]
-            )
+        self.assertTrue(first.unsubscribe())
+        self.assertEqual(
+            adapter.collect_section_graph_nodes(request),
+            (),
         )
 
     def test_section_graph_contribution_carries_lost_nodes_and_styles(self):

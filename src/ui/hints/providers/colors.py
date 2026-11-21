@@ -26,6 +26,9 @@ class ColorTagProvider:
     surfaces = frozenset({SURFACE_ENGINE_TEXT})
     languages = frozenset({LANGUAGE_LOCALIZATION_TEXT})
     allow_in_comment = False
+    # Цветовые подсказки в описании карточки предмета остаются
+    # включёнными: временный флаг LTX_HINTS_ENABLED их не затрагивает.
+    enabled = True
 
     def __init__(self, catalogs):
         self._catalogs = catalogs

@@ -25,6 +25,17 @@ from ui.theme import PALETTE
 
 _ITEM_ROLE = Qt.UserRole + 1
 
+# Размеры одного слота подсказки. Держим в одном месте: делегат,
+# расчёт высоты popup и постраничная навигация должны совпадать.
+_ROW_HEIGHT = 30
+_ROW_HEIGHT_DESCRIPTION = 46
+_LABEL_HEIGHT = 22
+_SWATCH_SIZE = 16
+_MIN_WIDTH = 320
+_MAX_WIDTH = 700
+_WIDTH_PADDING = 220
+_FOOTER_HEIGHT = 20
+
 log = logging.getLogger(__name__)
 
 
@@ -91,7 +102,7 @@ class HintItemDelegate(QStyledItemDelegate):
         key = tuple(int(value) & 0xFF for value in rgba)
         if key in self._swatches:
             return self._swatches[key]
-        pixmap = QPixmap(12, 12)
+        pixmap = QPixmap(_SWATCH_SIZE, _SWATCH_SIZE)
         pixmap.fill(QColor(*key))
         self._swatches[key] = pixmap
         return pixmap
@@ -101,11 +112,11 @@ class HintItemDelegate(QStyledItemDelegate):
             item = index.data(_ITEM_ROLE)
         except Exception:
             log.exception("Не удалось прочитать элемент подсказки")
-            return QSize(280, 22)
+            return QSize(_MIN_WIDTH, _ROW_HEIGHT)
         if item is None:
-            return QSize(280, 22)
-        height = 34 if item.description else 23
-        return QSize(320, height)
+            return QSize(_MIN_WIDTH, _ROW_HEIGHT)
+        height = _ROW_HEIGHT_DESCRIPTION if item.description else _ROW_HEIGHT
+        return QSize(_MIN_WIDTH, height)
 
     def paint(self, painter, option, index):
         # Отрисовка вызывается из C++: исключение здесь = qFatal().
@@ -126,16 +137,16 @@ class HintItemDelegate(QStyledItemDelegate):
                 background.setAlpha(70)
             painter.fillRect(option.rect, background)
 
-            rect = option.rect.adjusted(8, 3, -8, -3)
+            rect = option.rect.adjusted(10, 4, -10, -4)
             x = rect.left()
             if item.swatch is not None:
                 pixmap = self._swatch(item.swatch)
                 painter.drawPixmap(
                     x,
-                    rect.top() + 2,
+                    rect.top() + max(0, (rect.height() - _SWATCH_SIZE) // 2),
                     pixmap,
                 )
-                x += 18
+                x += _SWATCH_SIZE + 8
 
             detail_width = 0
             detail = str(item.detail or "")
@@ -178,7 +189,7 @@ class HintItemDelegate(QStyledItemDelegate):
                 x,
                 rect.top(),
                 text_width,
-                18 if item.description else rect.height(),
+                _LABEL_HEIGHT if item.description else rect.height(),
             )
             painter.drawText(
                 label_rect,
@@ -199,7 +210,12 @@ class HintItemDelegate(QStyledItemDelegate):
                 painter.setFont(desc_font)
                 painter.setPen(QColor(PALETTE.text_muted))
                 painter.drawText(
-                    QRect(x, rect.top() + 17, text_width, 14),
+                    QRect(
+                        x,
+                        rect.top() + _LABEL_HEIGHT,
+                        text_width,
+                        rect.height() - _LABEL_HEIGHT,
+                    ),
                     Qt.AlignLeft | Qt.AlignVCenter,
                     desc_metrics.elidedText(
                         str(item.description),
@@ -329,11 +345,19 @@ class HintPopup(QFrame):
         height = 0
         for item in items[:rows]:
             widest = max(widest, metrics.width(str(item.label)))
-            height += 34 if item.description else 23
-        width = max(260, min(560, widest + 160))
+            height += (
+                _ROW_HEIGHT_DESCRIPTION
+                if item.description
+                else _ROW_HEIGHT
+            )
+        width = max(
+            _MIN_WIDTH,
+            min(_MAX_WIDTH, widest + _WIDTH_PADDING),
+        )
         self.setFixedWidth(width)
         self.setFixedHeight(
-            height + (18 if not self.footer.isHidden() else 2)
+            height
+            + (_FOOTER_HEIGHT if not self.footer.isHidden() else 2)
         )
         self.view.setMinimumHeight(height)
 
@@ -367,7 +391,12 @@ class HintPopup(QFrame):
         self.view.scrollTo(index)
 
     def page_selection(self, direction):
-        rows = max(1, self.view.viewport().height() // 24)
+        row_height = (
+            _ROW_HEIGHT_DESCRIPTION
+            if any(item.description for item in self.model.items)
+            else _ROW_HEIGHT
+        )
+        rows = max(1, self.view.viewport().height() // row_height)
         self.move_selection(direction * rows)
 
     def is_visible(self):

@@ -242,10 +242,43 @@ class SurfaceRulesTest(unittest.TestCase):
         )
         include = IncludePathProvider(catalogs())
         directive = DirectiveProvider()
+        # Проверяем правила поверхностей независимо от временного
+        # выключателя LTX-подсказок.
+        include.enabled = True
+        directive.enabled = True
         self.assertTrue(provider_applies(include, raw))
         self.assertTrue(provider_applies(directive, raw))
         self.assertFalse(provider_applies(include, resolved))
         self.assertFalse(provider_applies(directive, resolved))
+
+    def test_ltx_hint_switch_does_not_touch_colors(self):
+        from ui.hints.providers.flags import LTX_HINTS_ENABLED
+        from ui.hints.ranking import provider_applies
+
+        raw = context(target=HintTargetInfo(surface="raw", language="ltx"))
+        ltx_providers = (
+            IncludePathProvider(catalogs()),
+            DirectiveProvider(),
+            SectionProvider(catalogs()),
+            ParentProvider(catalogs()),
+            KeyProvider(catalogs()),
+            LocalizationKeyProvider(catalogs()),
+        )
+        for provider in ltx_providers:
+            self.assertEqual(
+                provider_applies(provider, raw),
+                LTX_HINTS_ENABLED,
+            )
+
+        engine = context(
+            target=HintTargetInfo(
+                surface="engine_text",
+                language="localization_text",
+            )
+        )
+        self.assertTrue(
+            provider_applies(ColorTagProvider(catalogs()), engine)
+        )
 
 
 if __name__ == "__main__":

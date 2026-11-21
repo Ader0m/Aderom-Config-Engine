@@ -459,6 +459,17 @@ class EditorTabs(QTabWidget):
         self._publish(Events.UI_TAB_CLOSED, tab_id)
         return True
 
+    def close_owner_tabs(self, owner):
+        """Закрыть вкладки модуля по префиксу ``tab_id``."""
+        wanted = str(owner or "")
+        closed = 0
+        for tab_id in list(self._tab_ids):
+            if _tab_owner(tab_id) != wanted:
+                continue
+            if self.close_tab(tab_id):
+                closed += 1
+        return closed
+
     def has_tab(self, tab_id):
         return tab_id in self._tab_ids
 

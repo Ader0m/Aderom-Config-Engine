@@ -102,8 +102,8 @@ class CleanRunFeature:
             return
 
         self.session.forest = forest
-        self.ctx.events.publish(Events.TREE_READY, forest)
-        self.ctx.events.publish(Events.CLEAN_RUN_FINISHED, forest)
+        ready = self.ctx.ui.publish_tree_ready(forest)
+        self.ctx.events.publish(Events.CLEAN_RUN_FINISHED, ready)
 
         try:
             # Предсборка должна видеть тот же слой правок, что и обычный

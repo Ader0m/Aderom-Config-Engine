@@ -58,6 +58,22 @@ class EditorTabsTest(unittest.TestCase):
 
         return [tabs.tabText(i) for i in range(tabs.count())]
 
+    def test_close_owner_tabs_closes_only_module_tabs(self):
+        tabs = self._make()
+        tabs.open_tab("a.tab", "A2", QWidget())
+        tabs.open_tab("b.tab", "B2", QWidget())
+        tabs.open_tab("c.tab", "C2", QWidget())
+
+        self.assertEqual(tabs.close_owner_tabs("a"), 1)
+        self.assertFalse(tabs.has_tab("a.tab"))
+        self.assertTrue(tabs.has_tab("b.tab"))
+        self.assertTrue(tabs.has_tab("c.tab"))
+        self.assertTrue(tabs.has_tab("a"))
+
+        self.assertEqual(tabs.close_owner_tabs("b"), 1)
+        self.assertFalse(tabs.has_tab("b.tab"))
+        self.assertEqual(tabs.close_owner_tabs("absent"), 0)
+
     def test_close_tabs_right(self):
         tabs = self._make()
         self.assertEqual(

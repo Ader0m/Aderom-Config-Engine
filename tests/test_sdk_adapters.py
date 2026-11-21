@@ -127,6 +127,32 @@ class SdkAdapterTest(unittest.TestCase):
 
         self.assertEqual(seen, [])
 
+    def test_event_adapters_unsubscribe_only_their_owner(self):
+        bus = EventBus()
+        first = EventApiAdapter(bus)
+        second = EventApiAdapter(bus)
+        first.bind_owner("first")
+        second.bind_owner("second")
+        seen = []
+
+        first.subscribe("test.event", lambda payload: seen.append("first"))
+        second.subscribe("test.event", lambda payload: seen.append("second"))
+
+        self.assertEqual(first.unsubscribe("test.event"), 1)
+        bus.publish("test.event", None)
+
+        self.assertEqual(seen, ["second"])
+        self.assertTrue(bus.has("test.event", owner="second"))
+        self.assertFalse(bus.has("test.event", owner="first"))
+
+    def test_publish_warns_on_foreign_namespace(self):
+        bus = EventBus()
+        events = EventApiAdapter(bus)
+        events.bind_owner("demo")
+
+        with self.assertLogs("sdk.adapters", level="WARNING"):
+            events.publish("other_module.event", None)
+
     def test_command_adapter_reports_missing_and_failing_handlers(self):
         bus = CommandBus()
         commands = CommandApiAdapter(bus)

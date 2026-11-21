@@ -7,7 +7,13 @@ from pathlib import Path
 from tests.support import SRC  # noqa: F401
 
 from tests.qt_support import qapp
-from sdk.api import ItemCatalog, ItemEntry, ItemField, ItemSection
+from sdk.api import (
+    ItemCatalog,
+    ItemEntry,
+    ItemField,
+    ItemSection,
+    ProjectChanged,
+)
 from modules.base_module.item_viewer import ItemViewerFeature
 
 from sdk.events import Events
@@ -174,7 +180,10 @@ class ProjectSwitchRebindTest(unittest.TestCase):
             ctx.ui.ensured.clear()
             ctx.ui.retained.clear()
 
-            ctx.events.publish(Events.PROJECT_CHANGED, object())
+            ctx.events.publish(
+                Events.PROJECT_CHANGED,
+                ProjectChanged(active=True),
+            )
 
             self.assertEqual(
                 ctx.ui.ensured,
@@ -198,7 +207,10 @@ class ProjectSwitchRebindTest(unittest.TestCase):
             ctx.ui.ensured.clear()
             ctx.ui.active = False
 
-            ctx.events.publish(Events.PROJECT_CHANGED, None)
+            ctx.events.publish(
+                Events.PROJECT_CHANGED,
+                ProjectChanged(active=False),
+            )
 
             self.assertEqual(ctx.ui.ensured, [])
         finally:
@@ -222,7 +234,10 @@ class ProjectSwitchRebindTest(unittest.TestCase):
             ctx.ui.retained.clear()
             ctx.ui.document = object()
 
-            bus.publish(Events.PROJECT_CHANGED, object())
+            bus.publish(
+                Events.PROJECT_CHANGED,
+                ProjectChanged(active=True),
+            )
 
             self.assertEqual(len(ctx.ui.ensured), 1)
             self.assertEqual(
