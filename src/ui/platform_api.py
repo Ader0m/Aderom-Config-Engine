@@ -11,17 +11,24 @@ import traceback
 from PyQt5.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from sdk.features.projects import AssetDraftInfo, ProjectChanged
-from sdk.contracts import FileOpened, FileOpenFailed, TreeReady
+from sdk.contracts import (
+    AppPaths,
+    FileOpened,
+    FileOpenFailed,
+    SnapshotChanged,
+    TreeReady,
+)
 from sdk.contracts.events import Events, PLATFORM_OWNER
 from sdk.contracts.forest import unwrap_forest
 
+from app.paths import PathsAdapter
 from app.projects import (
     ProjectAssetRegistry,
     ProjectFileReaderRegistry,
     ProjectService,
     ProjectSettingsRegistry,
 )
-from app.workspace import WorkspaceService
+from app.workspace import SnapshotService, WorkspaceSession
 
 from .file_open_router import FileOpenRouter
 from .input_bindings import MouseBindingManager, ShortcutManager
@@ -31,20 +38,52 @@ from .platform.registration import RegistrationHub
 from .platform.resolved import ResolvedDocumentMixin
 
 
-def _path_key(path):
-    """Нормализовать путь для сопоставления запроса открытия и события."""
-    from sdk.contracts.paths import path_key
+def _coerce_paths(paths):
+    """Привести пути композиционного корня к контракту ``ctx.paths``."""
+    if isinstance(paths, PathsAdapter):
+        return paths
+    if paths is None:
+        base = Path.cwd()
+        return PathsAdapter(
+            AppPaths(
+                app_dir=base,
+                generated_dir=base / "generated",
+                projects_dir=base / "projects",
+            )
+        )
 
-    return path_key(path)
+    app_dir = Path(getattr(paths, "app_dir", Path.cwd()))
+    generated_dir = Path(
+        getattr(paths, "generated_dir", app_dir / "generated")
+    )
+    projects_dir = getattr(paths, "projects_dir", None)
+    if projects_dir is None:
+        projects_dir = app_dir.parent / "projects"
+    return PathsAdapter(
+        AppPaths(
+            app_dir=app_dir,
+            generated_dir=generated_dir,
+            projects_dir=Path(projects_dir),
+        )
+    )
 
 
 class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
-    def __init__(self, events, commands, tasks, services, paths, hints=None):
+    def __init__(
+        self,
+        events,
+        commands,
+        tasks,
+        services,
+        paths,
+        hints=None,
+        snapshot_service=None,
+    ):
         self.events = events
         self.commands = commands
         self.tasks = tasks
         self.services = services
-        self.paths = paths
+        self.paths = _coerce_paths(paths)
         self.hints = hints
 
         self.router = FileOpenRouter()
@@ -56,13 +95,7 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         self.registrations = RegistrationHub()
         self._log_buffer = []
 
-        projects_dir = getattr(paths, "projects_dir", None)
-        if projects_dir is None:
-            # Проекты лежат рядом с каталогом src, а не внутри него.
-            projects_dir = (
-                Path(getattr(paths, "app_dir", ".")).resolve().parent
-                / "projects"
-            )
+        projects_dir = self.paths.projects_dir
         self.asset_types = ProjectAssetRegistry()
         self.project_setting_registry = ProjectSettingsRegistry()
         self.file_readers = ProjectFileReaderRegistry()
@@ -71,7 +104,10 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
             asset_registry=self.asset_types,
             file_readers=self.file_readers,
         )
-        self.workspace = WorkspaceService(services)
+        self.workspace = WorkspaceSession(
+            services,
+            snapshot_service=snapshot_service or SnapshotService(),
+        )
         # Корни, которые нужно пересобрать после последней точечной
         # инвалидации. ``None`` — сборка всего леса.
         self._project_prebuild_roots = None
@@ -134,6 +170,10 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
 
 
     # -------------------------------------------------- запросы открытия
+    def _path_key(self, path):
+        """Нормализовать путь для сопоставления запроса и события."""
+        return self.paths.key(path)
+
     def _next_file_request_id(self):
         self._file_request_seq += 1
         return self._file_request_seq
@@ -141,7 +181,7 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
     def _queue_file_action(self, path, kind, value):
         """Запомнить навигацию и вернуть id запроса открытия."""
         request_id = self._next_file_request_id()
-        key = _path_key(path)
+        key = self._path_key(path)
         self._pending_file_actions[request_id] = (key, kind, value)
         self._pending_file_request_ids.setdefault(key, []).append(request_id)
         return request_id
@@ -162,14 +202,14 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         return True
 
     def _discard_file_requests_for_path(self, path):
-        key = _path_key(path)
+        key = self._path_key(path)
         ids = self._pending_file_request_ids.pop(key, ())
         for request_id in ids:
             self._pending_file_actions.pop(request_id, None)
         return len(ids)
 
     def _oldest_file_request_id(self, path):
-        key = _path_key(path)
+        key = self._path_key(path)
         ids = self._pending_file_request_ids.get(key) or ()
         return int(ids[0]) if ids else 0
 
@@ -208,7 +248,7 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
                 self._active_file_request_ids.pop()
 
     def _pop_oldest_file_request(self, path):
-        key = _path_key(path)
+        key = self._path_key(path)
         ids = self._pending_file_request_ids.get(key)
         if not ids:
             return None
@@ -228,7 +268,7 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         self._pending_file_request_ids.clear()
 
     # Совместимые алиасы: раньше лес и виртуальные пути жили прямо в
-    # PlatformApi. Теперь их владелец — WorkspaceService.
+    # PlatformApi. Теперь их владелец — WorkspaceSession.
     @property
     def _forest(self):
         return self.workspace.forest
@@ -427,6 +467,13 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
             self.log("Проект: инвалидированы корни: %d" % len(roots))
             return True
 
+        if not paths:
+            reason = "нет путей"
+        elif not roots:
+            reason = "путь не связан с корнем дерева"
+        else:
+            reason = "сервис не поддерживает точечную инвалидацию"
+        self.log("Проект: полная инвалидация кэша (%s)" % reason)
         self._invalidate_resolver_cache()
         return False
 
@@ -493,17 +540,41 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
     def publish_tree_ready(self, forest):
         """Сохранить лес у платформы и разослать лёгкий TreeReady."""
         raw = unwrap_forest(forest)
+        previous_snapshot = self.workspace.snapshot_id
         self.workspace.set_forest(forest)
+        current_snapshot = self.workspace.snapshot_id
+        forest_snapshot = (
+            self.workspace.forest_snapshot_id
+            or str(getattr(raw, "cache_id", "") or "")
+        )
+        if self.workspace.is_stale:
+            self.log(
+                "Дерево собрано для overlay %s, актуален %s: "
+                "требуется пересборка VFS"
+                % (
+                    getattr(raw, "overlay_revision", "") or "—",
+                    getattr(self.workspace.snapshot, "overlay_revision", "")
+                    or "—",
+                )
+            )
         summary = None
         try:
             summary = self.services.tree_summary(raw)
         except Exception:
             pass
         payload = TreeReady(
-            cache_id=str(getattr(raw, "cache_id", "") or ""),
+            cache_id=forest_snapshot,
             generation=int(self.workspace.generation),
             summary=summary,
         )
+        if current_snapshot and current_snapshot != previous_snapshot:
+            self.events.publish(
+                Events.SNAPSHOT_CHANGED,
+                SnapshotChanged(
+                    snapshot_id=current_snapshot,
+                    generation=int(self.workspace.generation),
+                ),
+            )
         self.events.publish(Events.TREE_READY, payload)
         return payload
 
@@ -794,7 +865,7 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         if path is None or not tab_id or self.window is None:
             return
 
-        key = _path_key(path)
+        key = self._path_key(path)
         request_id = int(opened.request_id or 0)
         pending = None
 
@@ -854,7 +925,7 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         request_id = int(failed.request_id or 0)
         if request_id:
             record = self._pending_file_actions.get(request_id)
-            if record is not None and record[0] != _path_key(failed.path):
+            if record is not None and record[0] != self._path_key(failed.path):
                 self.log(
                     "[open] request_id=%s относится к другому пути: %s"
                     % (request_id, failed.path)

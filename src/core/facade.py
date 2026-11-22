@@ -61,6 +61,11 @@ from core.patching.writer import PatchWriter
 class CoreServices:
     """Тонкий фасад и DI-контейнер для сервисов ядра."""
 
+    # Явные значения по умолчанию: тесты и transitional-конструкторы
+    # через ``__new__`` не обязаны вызывать ``__init__``.
+    cache_service = None
+    snapshot_service = None
+
     def __init__(
         self,
         cache,
@@ -71,6 +76,8 @@ class CoreServices:
         assembly_service,
         generated_dir,
         xml_resolve_service=None,
+        cache_service=None,
+        snapshot_service=None,
     ):
         """
         Args:
@@ -85,6 +92,8 @@ class CoreServices:
         """
         # Сохраняем ссылки на реальные сервисы
         self.cache = cache
+        self.cache_service = cache_service
+        self.snapshot_service = snapshot_service
         self.tree_builder = tree_builder
         self.tree_query = tree_query
         self.graph_builder = graph_builder
@@ -112,7 +121,7 @@ class CoreServices:
 
         # Кэш каталога и иконок переживает перезапуск приложения:
         # ключи включают снимок LTX-поддерева и подписи DDS-атласов.
-        item_cache_dir = self.generated_dir / "item_cache"
+        item_cache_dir = self.generated_dir / "cache-v2" / "items"
         self.localization = LocalizationService(
             cache_dir=item_cache_dir,
             max_disk_bytes=256_000_000,
@@ -179,6 +188,8 @@ class CoreServices:
             self._prebuild_stale = True
             self._prebuild_roots = None
         self.cache.clear()
+        if self.cache_service is not None:
+            self.cache_service.clear()
         if hasattr(self.resolver, "invalidate_cache"):
             self.resolver.invalidate_cache()
         if hasattr(self.xml, "clear"):
@@ -284,7 +295,15 @@ class CoreServices:
             return False
 
     def prebuild_status(self):
-        return self.prebuild.status()
+        status = self.prebuild.status()
+        status["cache"] = self.cache_stats()
+        return status
+
+    def cache_stats(self):
+        """Статистика единого кэша и его бэкендов."""
+        if self.cache_service is None:
+            return {}
+        return self.cache_service.stats()
 
     def wait_prebuild(self, log=None, timeout=None):
         self.prebuild.wait(log=log, timeout=timeout)
@@ -317,13 +336,57 @@ class CoreServices:
         """Построить дерево файлов с наложением черновиков проекта."""
         if clean:
             self.invalidate_cache()
-        return self.tree_builder.build(
+
+        overlay_revision = (
+            getattr(overlay, "revision", "") if overlay else ""
+        )
+        snapshot_service = self.snapshot_service
+        snapshot_id = ""
+        use_cache = True
+        if snapshot_service is not None and not clean:
+            snapshot = snapshot_service.ensure(
+                scan_dir,
+                system_root,
+                overlay_revision=overlay_revision,
+                refresh=False,
+            )
+            snapshot_id = snapshot.id
+        elif clean and snapshot_service is not None:
+            # Пересборка VFS уже сканирует файлы: снимок строится по
+            # готовому лесу, без второго обхода каталога.
+            use_cache = False
+
+        forest = self.tree_builder.build(
             scan_dir=scan_dir,
             system_root=system_root,
             log=log,
-            use_cache=True,
+            use_cache=use_cache,
             overlay=overlay,
+            snapshot_id=snapshot_id,
+            overlay_revision=overlay_revision,
         )
+
+        if clean and snapshot_service is not None:
+            snapshot = snapshot_service.observe_forest(
+                forest,
+                overlay_revision=overlay_revision,
+            )
+            forest.cache_id = snapshot.id
+            forest.overlay_revision = snapshot.overlay_revision
+            if self.cache_service is not None:
+                self.cache_service.set(
+                    "tree",
+                    self.tree_builder.cache_key(
+                        scan_dir,
+                        system_root,
+                        overlay,
+                        snapshot.id,
+                    ),
+                    forest,
+                    deps=(scan_dir, system_root),
+                    snapshot_id=snapshot.id,
+                )
+        return forest
 
     def sort_nodes(self, forest, nodes, col="path", reverse=False):
         """Отсортировать узлы дерева."""

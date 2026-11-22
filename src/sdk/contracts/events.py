@@ -28,6 +28,10 @@ class Events:
     # -------------------------------------------------- жизненный цикл
     APP_STARTED = "app.started"
     TREE_READY = "ui.tree_ready"
+    # Опубликован лес для нового снимка VFS (payload — SnapshotChanged).
+    # Смена overlay без публикации леса публикует PROJECT_CHANGED, а не
+    # это событие; детали — ADR-15.
+    SNAPSHOT_CHANGED = "ui.snapshot_changed"
     # Файл действительно открыт: виджет размещён и стал текущим (payload — путь).
     FILE_OPENED = "ui.file_opened"
     # Открытие не состоялось (payload — путь): отложенная навигация сбрасывается.

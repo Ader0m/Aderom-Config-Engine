@@ -20,10 +20,9 @@ from .contracts import (
     SectionGraph,
     SectionGraphContribution,
     SectionGraphRequest,
+    SnapshotChanged,
     TreeReady,
     TreeSummary,
-    path_key,
-    same_path,
 )
 from .kernel import (
     ApiLevel,
@@ -128,8 +127,6 @@ __all__ = [
     "SURFACE_PLAIN",
     "SURFACE_RAW",
     "SURFACE_RESOLVED",
-    "path_key",
-    "same_path",
     "AppPaths",
     "ForestRef",
     "FileOpenHandler",
@@ -148,6 +145,7 @@ __all__ = [
     "SectionGraph",
     "SectionGraphContribution",
     "SectionGraphRequest",
+    "SnapshotChanged",
     "TreeSummary",
     "TreeReady",
 ]

@@ -21,7 +21,7 @@ from PyQt5.QtWidgets import (
 )
 
 from sdk.contracts import SectionGraphRequest
-from sdk import path_key as _path_key
+
 
 # Маркеры и цвета типов связей. Цвета запрашиваются через ctx.ui,
 # чтобы модуль не импортировал внутренности UI.
@@ -281,7 +281,7 @@ class SectionGraphFeature:
             self._live_graph = graph
             self._live_section = section_name
             self._live_match_keys, self._live_xml_files = (
-                _live_graph_state(graph)
+                _live_graph_state(graph, self.ctx.paths.key)
             )
             self._live_node_keys = {
                 _node_key(node) for node in graph.children
@@ -314,6 +314,7 @@ class SectionGraphFeature:
                 graph,
                 self._live_match_keys,
                 self._live_xml_files,
+                self.ctx.paths.key,
             )
             extra = (
                 tuple(contribution.lost_children)
@@ -794,7 +795,7 @@ def _match_key(file_path, match):
     )
 
 
-def _link_key(node, match):
+def _link_key(node, match, key_fn):
     """Ключ связи. Для ресурсов сравниваем сам файл, а не строку."""
     edge_type = str(getattr(match, "edge_type", "") or "")
     target = getattr(node, "target_path", None)
@@ -803,7 +804,7 @@ def _link_key(node, match):
         and edge_type not in ("inheritance", "declaration")
     ):
         if target is not None:
-            return (edge_type, _path_key(target))
+            return (edge_type, key_fn(target))
         raw_ref = str(getattr(node, "raw_ref", "") or "")
         return (
             edge_type,
@@ -812,7 +813,7 @@ def _link_key(node, match):
     return _match_key(None, match)
 
 
-def _live_graph_state(graph):
+def _live_graph_state(graph, key_fn):
     """Ключи связей и XML-файлов, уже попавших в resolved-граф."""
     match_keys = set()
     xml_files = set()
@@ -821,13 +822,13 @@ def _live_graph_state(graph):
         file_path = getattr(node, "file_path", None)
         if file_path is not None:
             if str(file_path).lower().endswith(".xml"):
-                xml_files.add(_path_key(file_path))
+                xml_files.add(key_fn(file_path))
         for match in getattr(node, "matches", ()):
-            match_keys.add(_link_key(node, match))
+            match_keys.add(_link_key(node, match, key_fn))
     return match_keys, xml_files
 
 
-def _lost_from_raw(raw_graph, live_match_keys, live_xml_files):
+def _lost_from_raw(raw_graph, live_match_keys, live_xml_files, key_fn):
     """Оставить в сыром VFS-списке только связи, которых нет в живом графе."""
     lost = []
     for node in raw_graph.children:
@@ -835,14 +836,14 @@ def _lost_from_raw(raw_graph, live_match_keys, live_xml_files):
         if (
             file_path is not None
             and str(file_path).lower().endswith(".xml")
-            and _path_key(file_path) in live_xml_files
+            and key_fn(file_path) in live_xml_files
         ):
             continue
 
         remaining = tuple(
             match
             for match in getattr(node, "matches", ())
-            if _link_key(node, match) not in live_match_keys
+            if _link_key(node, match, key_fn) not in live_match_keys
         )
         if not remaining:
             continue

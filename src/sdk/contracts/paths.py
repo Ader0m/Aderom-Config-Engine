@@ -1,13 +1,16 @@
 # -*- coding: utf-8 -*-
-"""Единая идентичность путей для SDK и модулей.
+"""Пути приложения в контракте модулей.
 
-Модули не должны повторять ``normcase(abspath(...))`` в каждом файле:
-разные варианты normalize дают разные ключи для одного и того же файла.
+Реализация идентичности путей намеренно не живёт в SDK: модули получают
+``ctx.paths`` с методами ``key`` и ``same`` от платформы. Поэтому здесь
+остаются только неизменяемый DTO путей и протокол этого API.
 """
 
-import os
+from __future__ import annotations
+
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 
 @dataclass(frozen=True)
@@ -19,19 +22,18 @@ class AppPaths:
     projects_dir: Path
 
 
-def path_key(path) -> str:
-    """Абсолютный нормализованный ключ без учёта регистра (Windows)."""
-    return os.path.normcase(
-        os.path.normpath(os.path.abspath(os.fspath(path)))
-    )
+class PathsApi(Protocol):
+    """Контракт ``ctx.paths``: пути приложения и идентичность путей."""
 
+    app_dir: Path
+    generated_dir: Path
+    projects_dir: Path
 
-def same_path(left, right) -> bool:
-    """Один и тот же путь с точностью до регистра/нормализации."""
-    try:
-        return path_key(left) == path_key(right)
-    except (TypeError, ValueError, OSError):
-        return False
+    def key(self, path) -> str:
+        """Канонический ключ пути."""
+
+    def same(self, left, right) -> bool:
+        """Один и тот же путь с точностью до регистра/нормализации."""
 
 
 def as_path(path):

@@ -34,10 +34,10 @@ from core.tools.text import safe_filename_component
 from core.tools.cache import (
     ResolvedCache,
     file_subtree_signature,
-    path_key,
     project_overlay_signature,
     resolver_signature,
 )
+from core.tools.paths import path_key
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +158,7 @@ def _filter_overlay(forest, root_path, overlay):
 class ResolverService:
     """Сервис ядра для оркестрации работы с внешним резолвером."""
 
-    def __init__(self, cache, resolved_cache=None):
+    def __init__(self, cache, resolved_cache=None, cache_service=None):
         """
         Args:
             cache: FileCacheSystem — общий кэш ядра.
@@ -166,6 +166,7 @@ class ResolverService:
         """
         self._cache = cache
         self._resolved_cache = resolved_cache or ResolvedCache()
+        self._cache_service = cache_service
         self._adapter = None
         self._adapter_context = None
         self._adapter_signature = None
@@ -194,16 +195,19 @@ class ResolverService:
             return
         with self._key_lock:
             for identity in list(self._key_cache):
-                # identity = (id(forest), kind, root_key, overlay_key)
+                # identity = (snapshot, kind, root_key, overlay_key)
                 if len(identity) > 2 and identity[2] in wanted:
                     self._key_cache.pop(identity, None)
+        if self._cache_service is not None:
+            self._cache_service.invalidate_deps(roots)
+            return
         discard = getattr(self._resolved_cache, "discard", None)
         if callable(discard):
             discard(
                 lambda key: (
                     isinstance(key, tuple)
-                    and len(key) > 2
-                    and key[2] in wanted
+                    and len(key) > 3
+                    and key[3] in wanted
                 )
             )
 
@@ -286,8 +290,9 @@ class ResolverService:
         """
         root_key = path_key(root_path)
         overlay_key = project_overlay_signature(overlay)
+        snapshot_id = str(getattr(forest, "cache_id", "") or "")
         identity = (
-            str(getattr(forest, "cache_id", id(forest))),
+            snapshot_id,
             kind,
             root_key,
             overlay_key,
@@ -300,11 +305,11 @@ class ResolverService:
 
         started = time.perf_counter()
         key = (
-            # v4: line_sources хранятся как ссылки на общие LineSource.
-            # Старые записи (v3) содержат по объекту на строку и читаются
-            # с диска секундами, поэтому их нужно пересобрать.
-            "resolve-v4",
+            # v5: ключ включает снимок VFS. Старые записи (v4 и ниже)
+            # не читаются: кэш пересобирается после смены версии.
+            "resolve-v5",
             kind,
+            snapshot_id,
             root_key,
             file_subtree_signature(forest, root_path),
             resolver_signature(
@@ -346,11 +351,54 @@ class ResolverService:
         """То же, но ключ уже посчитан (предсборка не делает stat дважды)."""
         identity = None
         previous = None
-        if isinstance(key, tuple) and len(key) >= 3:
-            identity = (key[1], key[2])
+        if isinstance(key, tuple) and len(key) >= 4:
+            identity = (key[1], key[3])
             with self._inflight_lock:
                 previous = self._last_keys.get(identity)
                 self._last_keys[identity] = key
+
+        if self._cache_service is not None:
+            snapshot_id = str(key[2] or "") if len(key) > 2 else ""
+
+            def compute_with_log():
+                if log:
+                    log(
+                        "resolver cache: miss %s (%s)"
+                        % (
+                            Path(root_path).name,
+                            miss_reason(
+                                previous,
+                                key,
+                                (
+                                    "version",
+                                    "kind",
+                                    "snapshot",
+                                    "path",
+                                    "signature",
+                                    "resolver",
+                                    "overlay",
+                                ),
+                            ),
+                        )
+                    )
+                started = time.perf_counter()
+                value = compute()
+                elapsed = time.perf_counter() - started
+                if elapsed >= _SLOW_CACHE_SECONDS:
+                    logger.warning(
+                        "resolver compute: %.2f s для %s",
+                        elapsed,
+                        Path(root_path).name,
+                    )
+                return value
+
+            return self._cache_service.get_or_compute(
+                "resolve.text",
+                key,
+                compute_with_log,
+                deps=(root_path,),
+                snapshot_id=snapshot_id,
+            )
 
         started = time.perf_counter()
         cached = self._resolved_cache.get(key)
@@ -443,6 +491,13 @@ class ResolverService:
 
     def has_resolved_key(self, key):
         """Проверка готовности по уже посчитанному ключу."""
+        if self._cache_service is not None:
+            snapshot_id = str(key[2] or "") if len(key) > 2 else ""
+            return self._cache_service.has(
+                "resolve.text",
+                key,
+                snapshot_id=snapshot_id,
+            )
         return self._resolved_cache.has(key)
 
     def resolved_key(self, root_path, forest, config_dir, overlay=None):
@@ -465,6 +520,16 @@ class ResolverService:
                 config_dir,
                 overlay=overlay,
             )
+        if self._cache_service is not None:
+            snapshot_id = str(key[2] or "") if len(key) > 2 else ""
+            self._cache_service.set(
+                "resolve.text",
+                key,
+                value,
+                deps=(root_path,),
+                snapshot_id=snapshot_id,
+            )
+            return
         self._resolved_cache.set(key, value)
 
     # -------------------------------------------------- проход резолвера

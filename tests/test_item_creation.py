@@ -124,6 +124,12 @@ class _Ctx:
         self.documents = self.ui
         self.items = self.ui
         self.projects = self.ui
+        self.paths = SimpleNamespace(
+            key=lambda path: str(Path(path)).lower(),
+            same=lambda left, right: (
+                str(Path(left)).lower() == str(Path(right)).lower()
+            ),
+        )
 
 
 class _Forest:

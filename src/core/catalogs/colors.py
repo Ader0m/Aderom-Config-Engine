@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Mapping, Optional, Tuple
 
-from core.tools.cache import path_key
+from core.tools.paths import path_key
 from core.tools.fs import read_text_safe
 
 Color = Tuple[int, int, int, int]

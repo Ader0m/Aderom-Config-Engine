@@ -648,6 +648,12 @@ class _Ctx:
         self.documents = ui
         self.items = ItemApiAdapter(self.services, ui)
         self.projects = ui
+        self.paths = SimpleNamespace(
+            key=lambda path: str(Path(path)).lower(),
+            same=lambda left, right: (
+                str(Path(left)).lower() == str(Path(right)).lower()
+            ),
+        )
 
 
 class ItemTextFeatureTest(unittest.TestCase):

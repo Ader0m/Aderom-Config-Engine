@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
-from sdk.contracts.paths import path_key
 
 _SECTION_RE = re.compile(r"^\[([^\]]+)\](?::.*)?$")
 _KEY_RE = re.compile(r"^([^=]+?)\s*=\s*(.*)$")
@@ -199,12 +198,17 @@ def _tokens(value: str):
             yield token
 
 
-def _add_file(result: dict, path: Path, include_missing: bool = False):
+def _add_file(
+    result: dict,
+    path: Path,
+    key_fn,
+    include_missing: bool = False,
+):
     try:
         if path.suffix.lower() != ".ogg":
             return
         if include_missing or path.is_file():
-            key = path_key(path)
+            key = key_fn(path)
             result[key] = path
     except OSError:
         pass
@@ -389,6 +393,7 @@ def extract_sound_paths(
     sounds_root,
     resolve_section=None,
     include_missing: bool = False,
+    key_fn=None,
 ) -> List[Path]:
     """Найти .ogg-файлы в значениях полей секции.
 
@@ -402,6 +407,8 @@ def extract_sound_paths(
     """
     if sounds_root is None:
         return []
+    if key_fn is None:
+        raise ValueError("extract_sound_paths: не передан key_fn")
 
     sounds_root = Path(sounds_root)
     if not sounds_root.is_dir():
@@ -418,7 +425,7 @@ def extract_sound_paths(
             include_missing=include_missing,
             resolve_section=resolve_section,
         ):
-            _add_file(result, path, include_missing)
+            _add_file(result, path, key_fn, include_missing)
 
     return sorted(
         result.values(),
@@ -432,10 +439,13 @@ def extract_sound_references(
     sounds_root,
     source_path=None,
     resolve_section=None,
+    key_fn=None,
 ):
     """Ссылки на .ogg с полями и номерами строк (для графа связей)."""
     if sounds_root is None:
         return []
+    if key_fn is None:
+        raise ValueError("extract_sound_references: не передан key_fn")
 
     sounds_root = Path(sounds_root)
     if not sounds_root.is_dir():
@@ -468,7 +478,7 @@ def extract_sound_references(
             except OSError:
                 continue
 
-            key_norm = path_key(path)
+            key_norm = key_fn(path)
             entry = result.setdefault(
                 key_norm,
                 {"path": path, "items": []},

@@ -17,6 +17,10 @@ from sdk.contracts import GraphEdgeStyle, GraphMatch, GraphNode, SectionGraph
 _app = qapp()
 
 
+def _key(path):
+    return str(Path(path)).lower()
+
+
 class SectionGraphWindowTest(unittest.TestCase):
     def _window(self, calls):
         return SectionGraphWindow(
@@ -383,8 +387,8 @@ class SectionGraphWindowTest(unittest.TestCase):
             children=(sound, lost_parent),
         )
 
-        match_keys, xml_files = _live_graph_state(live)
-        raw_lost = _lost_from_raw(raw, match_keys, xml_files)
+        match_keys, xml_files = _live_graph_state(live, _key)
+        raw_lost = _lost_from_raw(raw, match_keys, xml_files, _key)
         lost = _unique_lost(
             raw_lost,
             {_node_key(node) for node in live.children},
@@ -450,9 +454,9 @@ class SectionGraphWindowTest(unittest.TestCase):
             children=(raw_parent,),
         )
 
-        match_keys, xml_files = _live_graph_state(live)
+        match_keys, xml_files = _live_graph_state(live, _key)
         self.assertEqual(
-            _lost_from_raw(raw, match_keys, xml_files),
+            _lost_from_raw(raw, match_keys, xml_files, _key),
             [],
         )
 
@@ -505,9 +509,9 @@ class SectionGraphWindowTest(unittest.TestCase):
             children=(raw_texture,),
         )
 
-        match_keys, xml_files = _live_graph_state(live)
+        match_keys, xml_files = _live_graph_state(live, _key)
         self.assertEqual(
-            _lost_from_raw(raw, match_keys, xml_files),
+            _lost_from_raw(raw, match_keys, xml_files, _key),
             [],
         )
 

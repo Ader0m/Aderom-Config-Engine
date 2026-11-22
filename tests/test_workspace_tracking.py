@@ -8,7 +8,7 @@ from pathlib import Path
 from tests.support import SRC  # noqa: F401
 from tests.helpers import write_text
 
-from app.workspace import WorkspaceService
+from app.workspace import WorkspaceSession
 from core.tools.cache import FileCacheSystem
 from core.tree.builder import (
     TreeBuilder,
@@ -39,7 +39,7 @@ class WorkspaceTrackingTest(unittest.TestCase):
             )
             self.assertIn(new_path, forest.files)
 
-            workspace = WorkspaceService()
+            workspace = WorkspaceSession()
             workspace.set_forest(forest)
             overlay = ProjectOverlay(
                 source_files={new_path: new_text},

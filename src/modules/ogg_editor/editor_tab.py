@@ -24,7 +24,6 @@ from PyQt5.QtWidgets import (
 )
 
 from sdk.contracts.events import Events
-from sdk.contracts.paths import path_key
 
 from .ogg import (
     CommentFormatError,
@@ -710,7 +709,7 @@ class OggEditorTab(QWidget):
             path = getattr(event, "path", None)
             if path is None:
                 return
-            if path_key(path) != path_key(self.path):
+            if self.ctx.paths.key(path) != self.ctx.paths.key(self.path):
                 return
             self.ctx.ui.set_editor_tab_dirty(self.tab_id, False)
             self._update_status("Сохранено в проекте")

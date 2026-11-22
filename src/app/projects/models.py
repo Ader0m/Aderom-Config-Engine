@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from core.api.patches import GeneratedPatch, PatchPlan
-from sdk.contracts.paths import path_key
+from core.api.paths import path_key
 
 
 def resolved_key(tab_id, root_path) -> str:

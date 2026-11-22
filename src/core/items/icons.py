@@ -22,13 +22,14 @@ import multiprocessing as mp
 from core.items.dds import TextureRegion, read_dds_region
 from core.tools.cache import ObjectCache
 from core.tools.parallel import can_spawn_processes, default_workers
-from core.tools.cache import file_stamp, path_key
+from core.tools.cache import file_stamp
+from core.tools.paths import path_key
 
 
 logger = logging.getLogger(__name__)
 
 # Меняется при изменении правил/формата кэша иконок.
-ICON_CACHE_VERSION = 1
+ICON_CACHE_VERSION = 2
 
 _MEMORY_ENTRIES = 4096
 _MEMORY_BYTES = 128 * 1024 * 1024

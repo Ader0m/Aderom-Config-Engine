@@ -21,6 +21,10 @@ from modules.ogg_editor.sections import (
 )
 
 
+def _key(path):
+    return str(Path(path)).lower()
+
+
 class OggSectionTest(unittest.TestCase):
     def test_parse_section_fields_stops_at_next_section(self):
         text = """
@@ -85,6 +89,7 @@ cost = 100
             paths = extract_sound_paths(
                 (("snd_shoot", "wpn_ak74_snd_shoot"),),
                 sounds,
+                key_fn=_key,
             )
             self.assertEqual(
                 [path.name for path in paths],
@@ -125,7 +130,12 @@ snd_shoot = weapon\\shot
 [wpn]:base
 snd_reload = weapon\\shot
 """
-            references = extract_sound_references(text, "wpn", sounds)
+            references = extract_sound_references(
+                text,
+                "wpn",
+                sounds,
+                key_fn=_key,
+            )
             self.assertEqual(len(references), 2)
             self.assertEqual(
                 [ref.field for ref in references],
@@ -177,6 +187,16 @@ snd_reload = weapon\\shot
 
             class Ctx:
                 services = Services()
+                paths = type(
+                    "Paths",
+                    (),
+                    {
+                        "key": staticmethod(_key),
+                        "same": staticmethod(
+                            lambda left, right: _key(left) == _key(right)
+                        ),
+                    },
+                )
 
             contributor = OggSectionGraphContributor(Ctx())
             graph = SectionGraph(
@@ -272,6 +292,16 @@ snd_1_layer = weapon\\shot
 
             class Ctx:
                 services = Services()
+                paths = type(
+                    "Paths",
+                    (),
+                    {
+                        "key": staticmethod(_key),
+                        "same": staticmethod(
+                            lambda left, right: _key(left) == _key(right)
+                        ),
+                    },
+                )
 
             contributor = OggSectionGraphContributor(Ctx())
             graph = SectionGraph(
@@ -312,7 +342,7 @@ snd_1_layer = weapon\\shot
                 ("snd_bad", "unknown\\shot"),
                 ("snd_notes", "ordinary text"),
             ]
-            paths = extract_sound_paths(fields, sounds)
+            paths = extract_sound_paths(fields, sounds, key_fn=_key)
 
             names = sorted(path.name for path in paths)
             self.assertEqual(
@@ -342,6 +372,7 @@ snd_2_layer = weapons\\far
                 sounds,
                 resolve_section=resolver,
                 include_missing=True,
+                key_fn=_key,
             )
 
             names = sorted(path.name for path in paths)
@@ -365,6 +396,7 @@ snd_shoot = weapons\\shot
                 sounds,
                 resolve_section=make_section_resolver(text),
                 include_missing=True,
+                key_fn=_key,
             )
             self.assertEqual(paths, [])
 
@@ -377,13 +409,14 @@ snd_shoot = weapons\\shot
                 ("snd_on_take", "pump"),
             ]
 
-            existing = extract_sound_paths(fields, sounds)
+            existing = extract_sound_paths(fields, sounds, key_fn=_key)
             self.assertEqual(existing, [])
 
             referenced = extract_sound_paths(
                 fields,
                 sounds,
                 include_missing=True,
+                key_fn=_key,
             )
             self.assertEqual(
                 [path.name for path in referenced],
@@ -396,6 +429,7 @@ snd_shoot = weapons\\shot
                 (("visual", "weapons\\model"),),
                 sounds,
                 include_missing=True,
+                key_fn=_key,
             )
             self.assertEqual(visual, [])
 

@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 
 from core.tools.parallel import default_workers
+from core.tools.paths import path_key
 
 logger = logging.getLogger(__name__)
 
@@ -300,8 +301,21 @@ class PrebuildService:
             except OSError:
                 return 0
 
-        # Мелкие файлы быстрее дают видимый прогресс и заполняют кэш.
-        ltx_targets.sort(key=_size)
+        # Сначала system.ltx и корни: именно их чаще всего открывают.
+        # Внутри группы — мелкие файлы: они быстрее дают прогресс.
+        system_root = getattr(forest, "system_root", None)
+        system_key = path_key(system_root) if system_root else ""
+        root_keys = {
+            path_key(path)
+            for path in (getattr(forest, "roots", ()) or ())
+        }
+
+        def _priority(path):
+            key = path_key(path)
+            rank = 0 if key == system_key else 1 if key in root_keys else 2
+            return (rank, _size(path))
+
+        ltx_targets.sort(key=_priority)
         xml_targets.sort(key=_size)
         return ltx_targets, xml_targets
 

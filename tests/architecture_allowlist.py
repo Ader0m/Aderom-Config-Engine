@@ -62,6 +62,7 @@ SDK_PUBLIC_NAMES = frozenset({
     'SectionGraph',
     'SectionGraphContribution',
     'SectionGraphRequest',
+    'SnapshotChanged',
     'TaskApi',
     'TreeReady',
     'TreeSummary',
@@ -72,8 +73,6 @@ SDK_PUBLIC_NAMES = frozenset({
     'normalize_requirement',
     'normalize_requirements',
     'parse_version',
-    'path_key',
-    'same_path',
     'version_at_least',
 })
 

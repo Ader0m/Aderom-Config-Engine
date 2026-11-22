@@ -24,6 +24,9 @@ class ProjectOverlay:
     source_files: dict = field(default_factory=dict)
     resolved_edits: dict = field(default_factory=dict)
     new_files: frozenset = field(default_factory=frozenset)
+    # Дешёвый токен состояния черновиков из ProjectService. Если он
+    # передан, ревизия не пересчитывает тексты и line_sources.
+    revision_token: str = ""
 
     def __post_init__(self):
         # Слой правок — снимок. После создания его нельзя менять:
@@ -59,7 +62,16 @@ class ProjectOverlay:
             "new_files",
             frozenset(self.new_files or ()),
         )
-        object.__setattr__(self, "_revision", None)
+        object.__setattr__(
+            self,
+            "revision_token",
+            str(self.revision_token or ""),
+        )
+        object.__setattr__(
+            self,
+            "_revision",
+            str(self.revision_token or "") or None,
+        )
 
     def __reduce__(self):
         # MappingProxyType не picklable, а overlay передаётся в
@@ -70,6 +82,7 @@ class ProjectOverlay:
                 dict(self.source_files),
                 dict(self.resolved_edits),
                 frozenset(self.new_files),
+                self.revision_token,
             ),
         )
 
@@ -106,14 +119,30 @@ class ProjectOverlay:
                     str(value[1]).encode("utf-8", "replace")
                 ).digest()
             )
-            # Длина карты источников — дешёвый признак того, что она
-            # изменилась. Полный хеш миллиона строк стоил бы дороже,
-            # чем сам резолв, и обесценил бы кэш ключа.
+            # Карта источников входит в ревизию по содержимому, а не по
+            # длине: иначе смена владельца строки оставляла бы старый
+            # resolved-кэш. Ревизия считается один раз на overlay.
             digest.update(b"\3")
             sources = value[2] if len(value) > 2 else ()
-            digest.update(
-                str(len(sources or ())).encode("ascii")
-            )
+            for source in sources or ():
+                if source is None:
+                    digest.update(b"none")
+                else:
+                    for attr in (
+                        "kind",
+                        "display",
+                        "path",
+                        "line",
+                        "open_raw",
+                    ):
+                        digest.update(
+                            repr(getattr(source, attr, None)).encode(
+                                "utf-8",
+                                "replace",
+                            )
+                        )
+                        digest.update(b"\0")
+                digest.update(b"\1")
             digest.update(b"\1")
 
         for path in sorted(
@@ -143,6 +172,14 @@ class ProjectOverlay:
         return dict(self.resolved_edits)
 
 @dataclass(frozen=True)
+class SnapshotChanged:
+    """Сменилось поколение снимка VFS."""
+
+    snapshot_id: str
+    generation: int = 0
+
+
+@dataclass(frozen=True)
 class TreeSummary:
     """Краткая сводка по построенному дереву."""
 
@@ -156,7 +193,7 @@ class TreeSummary:
 class TreeReady:
     """Лёгкий payload события ``ui.tree_ready``.
 
-    Сам ``LtxForest`` живёт в ``WorkspaceService`` платформы; подписчики
+    Сам ``LtxForest`` живёт в ``WorkspaceSession`` платформы; подписчики
     получают стабильный ключ поколения и сводку, а лес — через
     ``ctx.ui.workspace_forest()``/``workspace``.
     """

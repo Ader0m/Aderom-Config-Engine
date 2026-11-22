@@ -25,8 +25,6 @@ from sdk import (
     HintTargetInfo,
     LANGUAGE_LOCALIZATION_TEXT,
     SURFACE_ENGINE_TEXT,
-    path_key as sdk_path_key,
-    same_path as sdk_same_path,
 )
 from sdk.features.items import ITEM_SECTION_MIME, encode_item_section
 from sdk.features.documents import engine_source_text, parse_engine_text
@@ -1603,9 +1601,8 @@ class ItemViewerFeature:
         )
 
     # -------------------------------------------------- правка
-    @staticmethod
-    def _same_path(left, right):
-        return sdk_same_path(left, right)
+    def _same_path(self, left, right):
+        return self.ctx.paths.same(left, right)
 
     def _snapshot(self, tab_id):
         try:
@@ -2092,7 +2089,7 @@ class ItemViewerFeature:
     ):
         """Поставить запись XML в очередь и заблокировать представления."""
         path = Path(path)
-        path_key = sdk_path_key(path)
+        path_key = self.ctx.paths.key(path)
 
         if path_key in self._text_save_jobs:
             self.ctx.ui.set_status(
@@ -2192,7 +2189,7 @@ class ItemViewerFeature:
         self._request_entry_refresh(job["tab_id"], job["section"])
 
     def _finish_item_text_save(self, job):
-        path_key = sdk_path_key(job["path"])
+        path_key = self.ctx.paths.key(job["path"])
         current = self._text_save_jobs.get(path_key)
         if current is not None and current.get("token") == job.get("token"):
             self._text_save_jobs.pop(path_key, None)
@@ -2445,7 +2442,7 @@ class ItemViewerFeature:
     def _register_virtual_files(self, *files):
         """Обновить VFS после создания файлов проекта.
 
-        Само добавление файлов в лес — ответственность WorkspaceService
+        Само добавление файлов в лес — ответственность WorkspaceSession
         платформы: модуль не мутирует LtxForest напрямую.
         """
         if self.session is None or not getattr(

@@ -29,8 +29,9 @@ class TreeBuilder:
     - не генерирует патчи.
     """
 
-    def __init__(self, cache=None):
+    def __init__(self, cache=None, cache_service=None):
         self.cache = cache or FileCacheSystem()
+        self.cache_service = cache_service
 
     def build(
         self,
@@ -39,6 +40,8 @@ class TreeBuilder:
         log=None,
         use_cache=True,
         overlay=None,
+        snapshot_id="",
+        overlay_revision="",
     ):
         """
         Построить дерево.
@@ -72,24 +75,53 @@ class TreeBuilder:
             else:
                 scan = system.parent
 
-        key = (
-            "tree_builder",
-            str(scan),
-            str(system),
-            overlay_content_signature(overlay),
+        snapshot_id = str(snapshot_id or "")
+        key = self.cache_key(
+            scan,
+            system,
+            overlay,
+            snapshot_id,
         )
 
+        def build_forest():
+            return self._build(
+                scan,
+                system,
+                log,
+                overlay,
+                cache_id=snapshot_id,
+                overlay_revision=overlay_revision,
+            )
+
         if use_cache:
+            if self.cache_service is not None:
+                return self.cache_service.get_or_compute(
+                    "tree",
+                    key,
+                    build_forest,
+                    deps=(scan, system),
+                    snapshot_id=snapshot_id,
+                )
             cached = self.cache.get(key)
             if cached is not None:
                 return cached
 
-        forest = self._build(scan, system, log, overlay)
+        forest = build_forest()
 
-        if use_cache:
+        if use_cache and self.cache_service is None:
             self.cache.set(key, forest)
 
         return forest
+
+    @staticmethod
+    def cache_key(scan_dir, system_root, overlay, snapshot_id):
+        return (
+            "tree_builder",
+            str(snapshot_id or ""),
+            str(scan_dir),
+            str(system_root),
+            overlay_content_signature(overlay),
+        )
 
     @staticmethod
     def _normalize_overlay(overlay):
@@ -105,7 +137,15 @@ class TreeBuilder:
                 continue
         return result
 
-    def _build(self, scan_dir, system_root, log, overlay=None):
+    def _build(
+        self,
+        scan_dir,
+        system_root,
+        log,
+        overlay=None,
+        cache_id="",
+        overlay_revision="",
+    ):
         scan_dir = normalize_path(scan_dir)
         system_root = normalize_path(system_root) if system_root else None
         overlay = overlay or {}
@@ -314,6 +354,9 @@ class TreeBuilder:
                         if c not in subtree:
                             stack.append((c, False))
 
+        identity = {"cache_id": cache_id} if cache_id else {}
+        if overlay_revision:
+            identity["overlay_revision"] = str(overlay_revision)
         return LtxForest(
             scan_dir=str(scan_dir),
             system_root=str(system_root) if system_root else "",
@@ -334,6 +377,7 @@ class TreeBuilder:
             dltx_attachments={k: set(v) for k, v in dltx_children.items()},
             xml_files=xml_files,
             total_xml_files=len(xml_files),
+            **identity,
         )
 
 

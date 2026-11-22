@@ -34,13 +34,11 @@ from typing import Optional, Tuple
 from core.patching.ltx.document import parse_ltx_document
 from core.tools.fs import read_text_safe, read_xml_text
 from core.tools.cache import ObjectCache
-from core.tools.cache import (
-    file_stamp,
-    path_key,
-)
+from core.tools.cache import file_stamp
+from core.tools.paths import path_key
 
 
-LOCALIZATION_VERSION = 3
+LOCALIZATION_VERSION = 4
 
 # Предпочтительный язык карточки предметов: интерфейс приложения русский,
 # а пользователь просит показывать текст из text/rus.

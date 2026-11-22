@@ -70,6 +70,10 @@ class LtxForest:
     # после сборки нового леса.
     cache_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
+    # Ревизия overlay, с которой собран этот лес. Нужна, чтобы не
+    # приписывать старому лесу новый snapshot_id.
+    overlay_revision: str = ""
+
     @property
     def all_files(self) -> list:
         """Все файлы дерева: LTX + XML (для поиска и обхода UI)."""

@@ -189,7 +189,7 @@ class ProjectService(ProjectPreviewMixin):
         if project is None:
             return None
         return (
-            id(project),
+            str(project.id),
             tuple(
                 (
                     self.path_key(draft.path),
@@ -241,10 +241,18 @@ class ProjectService(ProjectPreviewMixin):
                     tuple(draft.line_sources or ()),
                 )
 
+            revision_token = (
+                hashlib.sha1(
+                    repr(key).encode("utf-8", "replace")
+                ).hexdigest()
+                if key is not None
+                else ""
+            )
             overlay = ProjectOverlay(
                 source_files=source_files,
                 resolved_edits=resolved_edits,
                 new_files=frozenset(new_files),
+                revision_token=revision_token,
             )
             self._overlay_cache = overlay
             self._overlay_cache_key = key
@@ -263,7 +271,7 @@ class ProjectService(ProjectPreviewMixin):
 
     @staticmethod
     def path_key(path) -> str:
-        from sdk.contracts.paths import path_key
+        from core.api.paths import path_key
 
         return path_key(path)
 

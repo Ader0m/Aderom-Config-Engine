@@ -27,8 +27,8 @@ from core.models import LineSource
 from core.tools.cache import (
     file_stamp,
     overlay_content_signature,
-    path_key,
 )
+from core.tools.paths import path_key
 from core.xml.dxml import DxmlProcessor
 from core.xml.slaxml import (
     SlaxmlParser,
@@ -56,7 +56,7 @@ class XmlResolveOutput:
 _INCLUDE_QUOTED_RE = re.compile(r'"([^"]*)"')
 
 # Версия логики XML-резолва: меняется при изменении формата результата.
-XML_CACHE_VERSION = "xml-resolve-v3"
+XML_CACHE_VERSION = "xml-resolve-v4"
 
 
 class _OverlayView:

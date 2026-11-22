@@ -124,6 +124,10 @@ class _Tasks:
 
 class _Ctx:
     def __init__(self):
+        from app.paths import PathsAdapter
+        from sdk.contracts.paths import AppPaths
+
+        root = Path(__file__).resolve().parent
         self.ui = _Ui()
         self.events = _Events()
         self.tasks = _Tasks()
@@ -131,6 +135,13 @@ class _Ctx:
         self.documents = self.ui
         self.items = self.services
         self.projects = self.ui
+        self.paths = PathsAdapter(
+            AppPaths(
+                app_dir=root,
+                generated_dir=root / "generated",
+                projects_dir=root / "projects",
+            )
+        )
 
     def log(self, message):
         self.ui.log(message)

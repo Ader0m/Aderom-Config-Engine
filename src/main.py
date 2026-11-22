@@ -51,6 +51,21 @@ def _migrate_generated_dir(old_dir, new_dir):
         pass
 
 
+def _remove_legacy_caches(generated_dir):
+    """Удалить кэши старого формата: миграции нет, только пересборка."""
+    removed = []
+    for name in ("resolved_cache", "item_cache"):
+        path = Path(generated_dir) / name
+        if not path.exists():
+            continue
+        try:
+            shutil.rmtree(str(path))
+            removed.append(name)
+        except OSError:
+            pass
+    return removed
+
+
 def _install_crash_log(generated_dir):
     """Писать необработанные исключения и аварийные стеки в файл.
 
@@ -104,14 +119,20 @@ def _dpi():
 def main():
     from PyQt5.QtWidgets import QApplication
 
+    from app.paths import PathsAdapter
+    from app.workspace import SnapshotService
     from core.api.services import CoreServices
-    from core.tools.cache import FileCacheSystem
+    from core.cache.service import CacheService
+    from core.tools.cache import (
+        CACHE_FORMAT_VERSION,
+        FileCacheSystem,
+        ResolvedCache,
+    )
     from core.tree.builder import TreeBuilder
     from core.tree.query import TreeQueryService
     from core.tree.graph import ReferenceGraphBuilder, DisabledCache
     from core.resolver.service import ResolverService
     from core.resolver.assembly import AssemblyService
-    from core.tools.cache import ResolvedCache
     from core.xml.service import XmlResolveService
 
     from sdk import SDK_VERSION, AppPaths
@@ -142,6 +163,7 @@ def main():
     projects_dir = app_root / "projects"
     _migrate_generated_dir(app_dir / "generated", generated_dir)
     generated_dir.mkdir(parents=True, exist_ok=True)
+    removed_caches = _remove_legacy_caches(generated_dir)
 
     from core.tools.vfs import configure_materialize_root
 
@@ -150,7 +172,7 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("LTX Explorer")
-    app.setApplicationVersion("0.3.0")
+    app.setApplicationVersion("0.4.0")
     apply_theme(app)
 
     _install_crash_log(generated_dir)
@@ -162,29 +184,42 @@ def main():
 
     # Общий кэш
     cache = FileCacheSystem()
+    snapshot_service = SnapshotService()
 
     # Дерево
-    tree_builder = TreeBuilder(cache=cache)
-    tree_query = TreeQueryService()
-
-    # Граф связей
-    graph_builder = ReferenceGraphBuilder(cache=DisabledCache())
-
-    # Резолвер и сборка
     resolved_cache = ResolvedCache(
-        cache_dir=generated_dir / "resolved_cache",
+        cache_dir=generated_dir / "cache-v2" / "resolved",
         max_entries=128,
         max_chars=256_000_000,
         # Один файл кэша — это один корень/XML. Рабочий набор большой
         # VFS может быть больше тысяч файлов, поэтому ограничиваем не
         # количество, а общий объём (с запасом; типичный кэш — десятки МБ).
         max_disk_bytes=1_000_000_000,
+        format_version=CACHE_FORMAT_VERSION,
     )
+    cache_service = CacheService(
+        resolved_cache=resolved_cache,
+        format_version=CACHE_FORMAT_VERSION,
+    )
+    tree_builder = TreeBuilder(
+        cache=cache,
+        cache_service=cache_service,
+    )
+    tree_query = TreeQueryService()
+
+    # Граф связей
+    graph_builder = ReferenceGraphBuilder(cache=DisabledCache())
+
+    # Резолвер и сборка
     resolver_service = ResolverService(
         cache=cache,
         resolved_cache=resolved_cache,
+        cache_service=cache_service,
     )
-    xml_resolve_service = XmlResolveService(resolved_cache=resolved_cache)
+    xml_resolve_service = XmlResolveService(
+        resolved_cache=resolved_cache,
+        cache_service=cache_service,
+    )
     assembly_service = AssemblyService(
         resolver_service=resolver_service,
         generated_dir=generated_dir,
@@ -200,19 +235,34 @@ def main():
         assembly_service=assembly_service,
         generated_dir=generated_dir,
         xml_resolve_service=xml_resolve_service,
+        cache_service=cache_service,
+        snapshot_service=snapshot_service,
     )
 
     # 2) Сервисы платформы.
     events = EventBus()
     commands = CommandBus()
     tasks = TaskService()
-    paths = AppPaths(
+    app_paths = AppPaths(
         app_dir=app_dir,
         generated_dir=generated_dir,
         projects_dir=projects_dir,
     )
+    paths = PathsAdapter(app_paths)
 
-    api = PlatformApi(events, commands, tasks, services, paths)
+    api = PlatformApi(
+        events,
+        commands,
+        tasks,
+        services,
+        paths,
+        snapshot_service=snapshot_service,
+    )
+    if removed_caches:
+        api.log(
+            "Кэш старого формата удалён: %s (пересборка при первом обращении)"
+            % ", ".join(removed_caches)
+        )
 
     # Движок подсказок: провайдеры регистрируются в composition root,
     # модули только подключают его к своим текстовым полям через SDK.

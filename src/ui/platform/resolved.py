@@ -80,9 +80,9 @@ class ResolvedDocumentMixin:
         if not roots:
             return False
 
-        from sdk.contracts.paths import path_key
-
-        if path_key(path) not in {path_key(root) for root in roots}:
+        if self.paths.key(path) not in {
+            self.paths.key(root) for root in roots
+        }:
             return False
 
         services = self.services

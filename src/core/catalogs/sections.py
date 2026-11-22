@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple
 
 from core.patching.ltx.document import parse_key_line, parse_section_header
-from core.tools.cache import path_key, project_overlay_signature
+from core.tools.cache import project_overlay_signature
+from core.tools.paths import path_key
 from core.tools.fs import read_text_safe
 
 CATALOG_VERSION = "1"

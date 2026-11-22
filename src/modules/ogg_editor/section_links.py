@@ -11,7 +11,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from sdk.contracts import GraphEdgeStyle, GraphMatch, GraphNode, SectionGraphContribution
-from sdk import path_key as sdk_path_key
 
 from .sections import extract_sound_references, make_section_resolver
 
@@ -118,6 +117,7 @@ class OggSectionGraphContributor:
             sounds_root,
             source_path=root_path,
             resolve_section=make_section_resolver(text),
+            key_fn=self.ctx.paths.key,
         )
 
     def _vfs_references(self, services, graph, section_name, sounds_root):
@@ -161,6 +161,7 @@ class OggSectionGraphContributor:
                     sounds_root,
                     source_path=path,
                     resolve_section=make_section_resolver(text),
+                    key_fn=self.ctx.paths.key,
                 )
             )
         return references
@@ -210,8 +211,7 @@ class OggSectionGraphContributor:
         )
         return tuple(nodes)
 
-    @staticmethod
-    def _path_key(path) -> str:
+    def _path_key(self, path) -> str:
         if path is None:
             return ""
-        return sdk_path_key(path)
+        return self.ctx.paths.key(path)

@@ -61,3 +61,8 @@
 
 - [ADR-14](ADR-14-sdk-clean-contract.md) — чистый контракт SDK,
   capabilities и порты ядра.
+
+Решения Этапа 2:
+
+- [ADR-15](ADR-15-snapshot-cache.md) — снимок VFS, единый кэш и
+  идентичность путей.

@@ -15,7 +15,7 @@ from typing import Dict, Optional
 
 from PyQt5.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 
-from sdk import ModuleBase, ModuleManifest, path_key
+from sdk import ModuleBase, ModuleManifest
 from sdk.features.projects import ProjectAssetType, ProjectSetting, ProjectSettingChoice
 from sdk.contracts.events import Events
 
@@ -279,7 +279,7 @@ class OggEditorModule(ModuleBase):
             return
 
         tab_id = "ogg_editor." + hashlib.sha1(
-            path_key(path).encode("utf-8", "replace")
+            self.ctx.paths.key(path).encode("utf-8", "replace")
         ).hexdigest()[:16]
 
         existing = self._tabs.get(tab_id)
@@ -458,6 +458,7 @@ class OggEditorModule(ModuleBase):
                 sounds_root,
                 resolve_section=resolver,
                 include_missing=True,
+                key_fn=self.ctx.paths.key,
             )
             return label, fields, paths
 
@@ -563,9 +564,9 @@ class OggEditorModule(ModuleBase):
         )
 
     def _refresh_open_tab(self, path, data):
-        wanted = path_key(path)
+        wanted = self.ctx.paths.key(path)
         for widget in self._tabs.values():
-            current = path_key(widget.path)
+            current = self.ctx.paths.key(widget.path)
             if current != wanted:
                 continue
             try:

@@ -55,7 +55,9 @@ class ProjectControllerMixin:
 
     def project_overlay(self):
         """Единый слой правок активного проекта для VFS."""
-        return self.project.project_overlay()
+        overlay = self.project.project_overlay()
+        self.workspace.update_overlay(getattr(overlay, "revision", ""))
+        return overlay
 
     def refresh_workspace(self):
         """Обновить виртуальные файлы проекта и вернуть (added, removed)."""

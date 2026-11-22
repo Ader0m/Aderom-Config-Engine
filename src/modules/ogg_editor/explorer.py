@@ -38,7 +38,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from sdk import DEFAULT_SEARCH_DELAY_MS, path_key as sdk_path_key
+from sdk import DEFAULT_SEARCH_DELAY_MS
 from sdk.features.items import ITEM_SECTION_MIME, decode_item_section
 
 from .ogg import (
@@ -106,8 +106,11 @@ class SoundTreeResult:
 def scan_sounds(
     sounds_root: Path,
     extra: Iterable[SoundEntry] = (),
+    key_fn=None,
 ) -> List[SoundEntry]:
     """Собрать все .ogg из VFS и добавить новые черновики проекта."""
+    if key_fn is None:
+        raise ValueError("scan_sounds: не передан key_fn")
     found = {}
 
     root = Path(sounds_root)
@@ -118,11 +121,11 @@ def scan_sounds(
                 if not filename.lower().endswith(".ogg"):
                     continue
                 path = Path(dirpath) / filename
-                key = sdk_path_key(path)
+                key = key_fn(path)
                 found[key] = SoundEntry(path=path)
 
     for entry in extra:
-        key = sdk_path_key(entry.path)
+        key = key_fn(entry.path)
         found[key] = entry
 
     return sorted(found.values(), key=lambda item: str(item.path).lower())
@@ -746,9 +749,8 @@ class OggExplorerWindow(QWidget):
         self.multi_button.setEnabled(active)
 
     # ------------------------------------------------------------ закреплённые
-    @staticmethod
-    def _path_key(path) -> str:
-        return sdk_path_key(path)
+    def _path_key(self, path) -> str:
+        return self.ctx.paths.key(path)
 
     def _pinned_label_for(self, path) -> str:
         path = Path(path)
@@ -1027,6 +1029,7 @@ class OggExplorerWindow(QWidget):
                 sounds_root,
                 resolve_section=resolver,
                 include_missing=True,
+                key_fn=self.ctx.paths.key,
             )
 
         def done(paths, error):
@@ -1302,7 +1305,11 @@ class OggExplorerWindow(QWidget):
         self.status.setText("Сканирование звуков…")
 
         def work(log):
-            entries = scan_sounds(sounds_root, drafts)
+            entries = scan_sounds(
+                sounds_root,
+                drafts,
+                key_fn=self.ctx.paths.key,
+            )
             nodes = build_sound_tree(entries, sounds_root)
             return SoundTreeResult(tuple(entries), nodes)
 

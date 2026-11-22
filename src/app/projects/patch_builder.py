@@ -71,7 +71,7 @@ class ProjectPreviewMixin:
             )
         return (
             project.id,
-            str(getattr(forest, "cache_id", id(forest))),
+            str(getattr(forest, "cache_id", "") or ""),
             str(getattr(forest, "scan_dir", "")),
             len(getattr(forest, "files", ()) or ()),
             len(getattr(forest, "xml_files", ()) or ()),

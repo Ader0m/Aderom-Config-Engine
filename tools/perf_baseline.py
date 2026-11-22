@@ -190,7 +190,14 @@ def _timed(fn):
     return value, (time.perf_counter() - started) * 1000.0
 
 
-def _make_services(cache, resolver, generated_dir):
+def _make_services(
+    cache,
+    resolver,
+    generated_dir,
+    cache_service=None,
+    snapshot_service=None,
+    resolved_cache=None,
+):
     from core.facade import CoreServices
     from core.resolver.assembly import AssemblyService
     from core.tree.builder import TreeBuilder
@@ -200,13 +207,21 @@ def _make_services(cache, resolver, generated_dir):
 
     return CoreServices(
         cache=cache,
-        tree_builder=TreeBuilder(cache=cache),
+        tree_builder=TreeBuilder(
+            cache=cache,
+            cache_service=cache_service,
+        ),
         tree_query=TreeQueryService(),
         graph_builder=ReferenceGraphBuilder(DisabledCache()),
         resolver_service=resolver,
         assembly_service=AssemblyService(resolver, generated_dir),
         generated_dir=generated_dir,
-        xml_resolve_service=XmlResolveService(),
+        xml_resolve_service=XmlResolveService(
+            resolved_cache=resolved_cache,
+            cache_service=cache_service,
+        ),
+        cache_service=cache_service,
+        snapshot_service=snapshot_service,
     )
 
 
@@ -223,7 +238,15 @@ def _change_source_text(text):
     return text + "\n[ace_baseline_probe]\nvalue = 1\n"
 
 
-def _measure_preview(scan, forest, cache, resolver):
+def _measure_preview(
+    scan,
+    forest,
+    cache,
+    resolver,
+    cache_service=None,
+    snapshot_service=None,
+    resolved_cache=None,
+):
     from app.projects import ProjectService
 
     with tempfile.TemporaryDirectory() as temp:
@@ -232,6 +255,9 @@ def _measure_preview(scan, forest, cache, resolver):
             cache,
             resolver,
             temp_dir / "generated",
+            cache_service=cache_service,
+            snapshot_service=snapshot_service,
+            resolved_cache=resolved_cache,
         )
         project = ProjectService(temp_dir / "projects")
         project.create("Baseline", save_mode="root")
@@ -261,13 +287,17 @@ def _measure_preview(scan, forest, cache, resolver):
 
 def _measure_disk_cache(scan, forest):
     """Холодное и тёплое открытие resolved-корня через дисковый кэш."""
+    from core.cache.service import CacheService
     from core.resolver.service import ResolverService
     from core.tools.cache import FileCacheSystem, ResolvedCache
 
     with tempfile.TemporaryDirectory() as temp:
+        resolved_cache = ResolvedCache(cache_dir=Path(temp))
+        cache_service = CacheService(resolved_cache=resolved_cache)
         resolver = ResolverService(
             FileCacheSystem(),
-            ResolvedCache(cache_dir=Path(temp)),
+            resolved_cache,
+            cache_service=cache_service,
         )
         resolver.ensure_adapter(forest, scan)
         root = Path(forest.system_root)
@@ -308,6 +338,8 @@ def _measure_ui(scan):
     from PyQt5.QtCore import QTimer
     from PyQt5.QtWidgets import QApplication
 
+    from app.workspace import SnapshotService
+    from core.cache.service import CacheService
     from core.resolver.prebuild import PrebuildService
     from core.resolver.service import ResolverService
     from core.tools.cache import FileCacheSystem, ResolvedCache
@@ -334,13 +366,23 @@ def _measure_ui(scan):
         timer.stop()
         app.quit()
 
+    ui_cache_service = CacheService()
+    ui_snapshot_service = SnapshotService()
+
+    def build_ui_forest():
+        forest = TreeBuilder(
+            cache=FileCacheSystem(),
+            cache_service=ui_cache_service,
+        ).build(scan, use_cache=False)
+        snapshot = ui_snapshot_service.observe_forest(forest)
+        forest.cache_id = snapshot.id
+        forest.overlay_revision = snapshot.overlay_revision
+        return forest
+
     timer.timeout.connect(tick)
     timer.start()
     tasks.run(
-        lambda _log: TreeBuilder(cache=FileCacheSystem()).build(
-            scan,
-            use_cache=False,
-        ),
+        lambda _log: build_ui_forest(),
         on_done=done,
     )
     app.exec_()
@@ -351,11 +393,12 @@ def _measure_ui(scan):
     }
 
     # 2) Фоновая предсборка одного корня через PrebuildService.
-    forest = TreeBuilder(cache=FileCacheSystem()).build(
-        scan,
-        use_cache=False,
+    forest = build_ui_forest()
+    resolver = ResolverService(
+        FileCacheSystem(),
+        ResolvedCache(),
+        cache_service=ui_cache_service,
     )
-    resolver = ResolverService(FileCacheSystem(), ResolvedCache())
     resolver.ensure_adapter(forest, scan)
     prebuild = PrebuildService(resolver, workers=1)
 
@@ -453,21 +496,37 @@ def main(argv=None):
         declared_sections,
         parse_ltx_document,
     )
+    from app.workspace import SnapshotService
+    from core.cache.service import CacheService
     from core.resolver.service import ResolverService
     from core.tools.cache import FileCacheSystem, ResolvedCache
     from core.tree.builder import TreeBuilder
 
     memory = {"start": _process_memory_mb()}
     cache = FileCacheSystem()
-    forest, tree_ms = _timed(
-        lambda: TreeBuilder(cache=cache).build(
-            scan,
-            use_cache=False,
-        )
+    resolved_cache = ResolvedCache()
+    cache_service = CacheService(resolved_cache=resolved_cache)
+    snapshot_service = SnapshotService()
+    tree_builder = TreeBuilder(
+        cache=cache,
+        cache_service=cache_service,
     )
+
+    def build_tree_production():
+        forest = tree_builder.build(scan, use_cache=False)
+        snapshot = snapshot_service.observe_forest(forest)
+        forest.cache_id = snapshot.id
+        forest.overlay_revision = snapshot.overlay_revision
+        return forest
+
+    forest, tree_ms = _timed(build_tree_production)
     memory["after_tree"] = _process_memory_mb()
 
-    resolver = ResolverService(cache, ResolvedCache())
+    resolver = ResolverService(
+        cache,
+        resolved_cache,
+        cache_service=cache_service,
+    )
     resolver.ensure_adapter(forest, scan)
     _sections, resolver_ms = _timed(
         lambda: resolver.run_pass(forest, scan)
@@ -504,11 +563,20 @@ def main(argv=None):
             encoding="utf-8",
         )
 
-    preview = _measure_preview(scan, forest, cache, resolver)
+    preview = _measure_preview(
+        scan,
+        forest,
+        cache,
+        resolver,
+        cache_service=cache_service,
+        snapshot_service=snapshot_service,
+        resolved_cache=resolved_cache,
+    )
     memory["after_preview"] = _process_memory_mb()
 
     payload = {
         "date": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "composition": "stage2: CacheService + SnapshotService",
         "python": sys.version.split()[0],
         "configs": str(scan),
         "counts": {

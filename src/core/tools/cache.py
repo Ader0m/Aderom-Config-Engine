@@ -24,6 +24,12 @@ import threading
 from collections import OrderedDict
 from pathlib import Path
 
+from core.tools.paths import path_key
+
+# Версия дискового формата. Старые записи не читаются: кэш расходуемый,
+# поэтому смена версии означает пересборку, а не миграцию.
+CACHE_FORMAT_VERSION = 2
+
 
 # ---------------------------------------------------------------- подписи
 
@@ -31,7 +37,7 @@ from pathlib import Path
 def file_stamp(path) -> str:
     """Метка файла: mtime_ns + size + ctime_ns. Без чтения содержимого."""
     try:
-        st = os.stat(str(path))
+        st = os.stat(path)
         return "%d:%d:%d" % (
             st.st_mtime_ns,
             st.st_size,
@@ -57,11 +63,6 @@ def invalidate_forest_signatures(forest):
         forest._resolved_signature_memo = {}
     except Exception:
         pass
-
-
-def path_key(path) -> str:
-    """Стабильная идентичность пути: абсолютный, нормализованный, без регистра."""
-    return os.path.normcase(os.path.normpath(os.path.abspath(str(path))))
 
 
 def project_overlay_signature(overlay) -> str:
@@ -142,6 +143,33 @@ def overlay_content_signature(overlay) -> str:
     return digest.hexdigest()
 
 
+def file_index_signature(
+    scan_dir,
+    suffixes=(".ltx", ".xml"),
+    paths=None,
+) -> str:
+    """Подпись файлового индекса VFS: пути + mtime/size/ctime.
+
+    Снимок должен замечать не только добавление/удаление файлов, но и
+    изменение содержимого, от которого зависит структура дерева.
+    ``paths`` позволяет переиспользовать уже собранный список файлов.
+    """
+    if paths is None:
+        from core.tools.fs import scan_files
+
+        paths = scan_files(scan_dir, suffixes)
+
+    digest = hashlib.sha1()
+    items = [(path_key(path), path) for path in paths]
+    items.sort(key=lambda item: item[0])
+    for key, path in items:
+        digest.update(key.encode("utf-8", "replace"))
+        digest.update(b"\0")
+        digest.update(file_stamp(path).encode("ascii"))
+        digest.update(b"\1")
+    return digest.hexdigest()
+
+
 def file_subtree_signature(forest, root_path) -> str:
     """SHA1 подписи файла и всех его include/DLTX-зависимостей.
 
@@ -152,7 +180,7 @@ def file_subtree_signature(forest, root_path) -> str:
     children_map = getattr(forest, "display_children", {}) or {}
 
     def calc(node, stack):
-        key = os.path.normcase(os.path.abspath(str(node)))
+        key = path_key(node)
         if key in stack:
             return "cycle"
 
@@ -192,6 +220,7 @@ class DiskBackedLRUCache:
         size_fn=None,
         max_disk_files=None,
         max_disk_bytes=None,
+        format_version=CACHE_FORMAT_VERSION,
     ):
         self._data = OrderedDict()
         self._lock = threading.RLock()
@@ -200,6 +229,7 @@ class DiskBackedLRUCache:
         self._size_fn = size_fn
         self._max_disk_files = max_disk_files
         self._max_disk_bytes = max_disk_bytes
+        self._format_version = int(format_version)
         self._units = 0
 
         self._cache_dir = Path(cache_dir) if cache_dir else None
@@ -213,7 +243,10 @@ class DiskBackedLRUCache:
 
     # -------------------------------------------------- диск
     def _disk_path(self, key):
-        blob = pickle.dumps(key, protocol=4)
+        blob = pickle.dumps(
+            (self._format_version, key),
+            protocol=4,
+        )
         digest = hashlib.sha1(blob).hexdigest()
         return self._cache_dir / (digest + ".pkl.gz")
 
@@ -228,6 +261,12 @@ class DiskBackedLRUCache:
         try:
             with gzip.open(path, "rb", compresslevel=3) as f:
                 payload = pickle.load(f)
+            if payload.get("format") != self._format_version:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+                return None
             if payload.get("key") != key:
                 return None
             # Отмечаем фактическое использование: иначе очистка
@@ -257,7 +296,11 @@ class DiskBackedLRUCache:
         try:
             with gzip.open(tmp, "wb", compresslevel=3) as f:
                 pickle.dump(
-                    {"key": key, "value": value},
+                    {
+                        "format": self._format_version,
+                        "key": key,
+                        "value": value,
+                    },
                     f,
                     protocol=4,
                 )
@@ -410,15 +453,39 @@ class DiskBackedLRUCache:
         # задерживать пользовательский cache hit.
         self._save_disk(key, value)
 
+    def delete(self, key):
+        """Удалить запись из памяти и с диска."""
+        removed = False
+        with self._lock:
+            value = self._data.pop(key, None)
+            if value is not None:
+                self._units -= self._value_size(value)
+                if self._units < 0:
+                    self._units = 0
+                removed = True
+        if self._cache_dir is not None:
+            try:
+                path = self._disk_path(key)
+                if path.is_file():
+                    path.unlink()
+                    removed = True
+            except OSError:
+                pass
+        return removed
+
     def discard(self, predicate):
-        """Удалить из памяти записи, для которых ``predicate(key)`` истинно."""
+        """Удалить из памяти и с диска записи с ``predicate(key)``."""
+        removed_keys = []
         with self._lock:
             for key in list(self._data):
                 if predicate(key):
                     value = self._data.pop(key)
                     self._units -= self._value_size(value)
+                    removed_keys.append(key)
             if self._units < 0:
                 self._units = 0
+        for key in removed_keys:
+            self.delete(key)
 
     def clear(self):
         """Очистить память. Дисковый кэш сохраняется."""
@@ -466,6 +533,7 @@ class ResolvedCache(DiskBackedLRUCache):
         cache_dir=None,
         max_disk_files=None,
         max_disk_bytes=None,
+        format_version=CACHE_FORMAT_VERSION,
     ):
         super().__init__(
             cache_dir=cache_dir,
@@ -474,6 +542,7 @@ class ResolvedCache(DiskBackedLRUCache):
             size_fn=self._text_size,
             max_disk_files=max_disk_files,
             max_disk_bytes=max_disk_bytes,
+            format_version=format_version,
         )
 
     @staticmethod
@@ -498,6 +567,7 @@ class ObjectCache(DiskBackedLRUCache):
         size_fn=None,
         max_disk_files=None,
         max_disk_bytes=None,
+        format_version=CACHE_FORMAT_VERSION,
     ):
         super().__init__(
             cache_dir=cache_dir,
@@ -506,6 +576,7 @@ class ObjectCache(DiskBackedLRUCache):
             size_fn=size_fn,
             max_disk_files=max_disk_files,
             max_disk_bytes=max_disk_bytes,
+            format_version=format_version,
         )
 
     def clear(self):

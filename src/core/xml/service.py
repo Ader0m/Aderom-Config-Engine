@@ -17,7 +17,8 @@ import time
 from pathlib import Path
 
 from core.resolver.base import miss_reason
-from core.tools.cache import ResolvedCache, path_key
+from core.tools.cache import ResolvedCache
+from core.tools.paths import path_key
 from core.tools.fs import canonical_config_dir
 from core.xml.resolver import XmlResolver
 
@@ -30,8 +31,14 @@ _SLOW_XML_SECONDS = 0.25
 class XmlResolveService:
     """Кэширующий сервис XML-резолва."""
 
-    def __init__(self, resolved_cache=None, scripts_dir=None):
+    def __init__(
+        self,
+        resolved_cache=None,
+        scripts_dir=None,
+        cache_service=None,
+    ):
         self._resolved_cache = resolved_cache or ResolvedCache()
+        self._cache_service = cache_service
         self._scripts_dir = scripts_dir
         self._lock = threading.RLock()
         self._resolvers = {}
@@ -83,6 +90,8 @@ class XmlResolveService:
         return self._resolved_cache.has(key)
 
     def has_resolved_by_key(self, key):
+        if self._cache_service is not None:
+            return self._cache_service.has("xml", key)
         return self._resolved_cache.has(key)
 
     def store_output(self, path, config_dir, value, dxml=True, key=None,
@@ -94,11 +103,23 @@ class XmlResolveService:
                 dxml,
                 overlay=overlay,
             )
-        self._resolved_cache.set(key, value)
+        if self._cache_service is not None:
+            self._cache_service.set(
+                "xml",
+                key,
+                value,
+                deps=(path, config_dir),
+            )
+        else:
+            self._resolved_cache.set(key, value)
         return key
 
     def store_output_by_key(self, key, value):
-        self._resolved_cache.set(key, value)
+        if self._cache_service is not None:
+            deps = (key[2], key[1]) if len(key) > 2 else ()
+            self._cache_service.set("xml", key, value, deps=deps)
+        else:
+            self._resolved_cache.set(key, value)
 
     # -------------------------------------------------- резолв
     def resolve_output(self, path, config_dir, log=None, dxml=True,
@@ -114,6 +135,18 @@ class XmlResolveService:
                     key_elapsed,
                     Path(path).name,
                 )
+        if self._cache_service is not None:
+            return self._cache_service.get_or_compute(
+                "xml",
+                key,
+                lambda: resolver.resolve_output(
+                    path,
+                    dxml=dxml,
+                    overlay=overlay,
+                ),
+                deps=(path, config_dir),
+            )
+
         name = Path(path).name
         previous = None
         if isinstance(key, tuple) and len(key) > 3:

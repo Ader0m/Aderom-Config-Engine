@@ -38,9 +38,9 @@ from core.tools.fs import read_text_safe, strip_comments
 from core.tools.cache import ObjectCache
 from core.tools.cache import (
     file_subtree_signature,
-    path_key,
     project_overlay_signature,
 )
+from core.tools.paths import path_key
 from core.tools.vfs import resolve_asset_path
 
 
@@ -50,7 +50,7 @@ from core.tools.vfs import resolve_asset_path
 # 4 — список всех секций (поля и родители) для создания предметов.
 # 5 — имена родителей из исходных LTX (resolved-текст уже без наследования).
 # 6 — источник строки локализации для правки XML из карточки.
-ITEM_CATALOG_VERSION = 6
+ITEM_CATALOG_VERSION = 7
 
 DEFAULT_ICON_TEXTURE = r"ui\ui_icon_equipment"
 GRID_SIZE = 50

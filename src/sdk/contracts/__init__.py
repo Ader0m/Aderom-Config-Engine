@@ -14,10 +14,11 @@ from .models import (
     SectionGraph,
     SectionGraphContribution,
     SectionGraphRequest,
+    SnapshotChanged,
     TreeReady,
     TreeSummary,
 )
-from .paths import AppPaths, path_key, same_path
+from .paths import AppPaths
 
 __all__ = [
     "DEFAULT_SEARCH_DELAY_MS",
@@ -37,9 +38,8 @@ __all__ = [
     "SectionGraph",
     "SectionGraphContribution",
     "SectionGraphRequest",
+    "SnapshotChanged",
     "TreeReady",
     "TreeSummary",
     "AppPaths",
-    "path_key",
-    "same_path",
 ]
