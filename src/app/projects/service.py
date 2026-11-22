@@ -12,25 +12,20 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import logging
 import os
 import re
 import shutil
-import sys
 import threading
 import time
 import traceback
-import zlib
-from array import array
 from collections import OrderedDict
-from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional
 
-from core.api.documents import LineSource, analyze_multiline_edit
+from core.api.documents import analyze_multiline_edit
 from core.api.patches import (
     GeneratedPatch,
     PatchFile,
@@ -54,6 +49,8 @@ from .assets import (
     ProjectAssetTypeError,
 )
 from .readers import FileReaderError, ProjectFileReaderRegistry
+from .drafts import DraftStore
+from .session import ProjectSession
 from .repository import (
     ASSETS_DIR as PROJECT_ASSETS_DIR,
     DRAFTS_DIR as PROJECT_DRAFTS_DIR,
@@ -84,39 +81,8 @@ from .models import (
 
 log = logging.getLogger(__name__)
 
-# Крупные тексты храним в JSON сжатыми: system.ltx — это десятки
-# мегабайт, а plain JSON раздувает его и диск, и время автосохранения.
-_TEXT_COMPRESSION_THRESHOLD = 16 * 1024
-
-
-def _pack_text(value) -> object:
-    """Упаковать текст для JSON: маленькие строки остаются как есть."""
-    text = str(value or "")
-    raw = text.encode("utf-8", "replace")
-    if len(raw) < _TEXT_COMPRESSION_THRESHOLD:
-        return text
-    return {
-        "encoding": "zlib+base64",
-        "data": base64.b64encode(zlib.compress(raw, 1)).decode("ascii"),
-    }
-
-
-def _unpack_text(value, default="") -> str:
-    """Прочитать текстовое поле нового или старого формата."""
-    if isinstance(value, dict):
-        if value.get("encoding") != "zlib+base64":
-            return str(default or "")
-        try:
-            raw = zlib.decompress(
-                base64.b64decode(value.get("data") or "")
-            )
-            return raw.decode("utf-8", "replace")
-        except Exception:
-            log.warning("Проект: повреждено сжатое текстовое поле")
-            return str(default or "")
-    if value is None:
-        return str(default or "")
-    return str(value)
+# Отличает отсутствующий ключ настройки от сохранённого значения None.
+_MISSING_SETTING = object()
 
 
 class ProjectService(ProjectPreviewMixin):
@@ -136,13 +102,6 @@ class ProjectService(ProjectPreviewMixin):
     # полные тексты файлов, а не только план.
     PREVIEW_CACHE_MAX_CHARS = 32_000_000
 
-    # Версия формата resolved-черновика. Старые файлы читаются как есть,
-    # но при следующем сохранении переписываются в компактный формат:
-    # уникальные LineSource + сжатый массив индексов на строку и
-    # zlib-сжатие крупных текстовых полей.
-    RESOLVED_DRAFT_VERSION = 3
-    LINE_SOURCE_IDS_VERSION = 2
-
     def __init__(
         self,
         base_dir,
@@ -152,8 +111,8 @@ class ProjectService(ProjectPreviewMixin):
         self.base_dir = Path(base_dir).resolve()
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.repository = ProjectRepository()
+        self.session = ProjectSession()
         self._project_roots = self._load_project_roots()
-        self.active: Optional[Project] = None
         # Нельзя использовать ``or``: пустой реестр — валидный объект,
         # а ``ProjectAssetRegistry`` определяет ``__len__`` и поэтому
         # ложен, пока в нём нет типов.
@@ -174,6 +133,7 @@ class ProjectService(ProjectPreviewMixin):
         # Сериализует запись файлов черновиков: фоновая запись текста и
         # автосохранение не должны одновременно писать один файл.
         self._write_lock = threading.RLock()
+        self.draft_store = DraftStore(self._write_lock)
         # Защищает словари проекта и кэш overlay от чтения во время
         # фонового предпросмотра/автосохранения.
         self._state_lock = threading.RLock()
@@ -186,8 +146,13 @@ class ProjectService(ProjectPreviewMixin):
 
     # -------------------------------------------------- свойства
     @property
+    def active(self) -> Optional[Project]:
+        """Активный проект. Меняется только через ``ProjectSession``."""
+        return self.session.active
+
+    @property
     def is_active(self) -> bool:
-        return self.active is not None
+        return self.session.is_active
 
     def _clear_overlay_cache(self):
         with self._state_lock:
@@ -269,9 +234,10 @@ class ProjectService(ProjectPreviewMixin):
             return overlay
 
     def patch_mode(self) -> str:
-        if self.active is None:
+        state = self.session.state()
+        if state is None:
             return "root"
-        return normalize_save_mode(self.active.save_mode or "root")
+        return normalize_save_mode(state.save_mode or "root")
 
     def is_root_mode(self) -> bool:
         return self.patch_mode() == "root"
@@ -284,12 +250,6 @@ class ProjectService(ProjectPreviewMixin):
         from core.api.paths import path_key
 
         return path_key(path)
-
-    def _draft_filename(self, path) -> str:
-        digest = hashlib.sha1(
-            self.path_key(path).encode("utf-8", "replace")
-        ).hexdigest()
-        return digest + ".json"
 
     def _load_project_roots(self):
         roots = [self.base_dir]
@@ -420,8 +380,10 @@ class ProjectService(ProjectPreviewMixin):
             created_at=self._timestamp(),
             drafts={},
         )
-        self.active = project
+        # Сначала фиксируем проект на диске: при ошибке записи активным
+        # он не становится.
         self.repository.write_meta(project)
+        self.session.activate(project)
         return project
 
     def load(self, project_id: str) -> Project:
@@ -471,37 +433,26 @@ class ProjectService(ProjectPreviewMixin):
             module_settings=module_settings,
         )
 
-        drafts_dir = root_dir / self.DRAFTS_DIR
-        if drafts_dir.is_dir():
-            for draft_path in sorted(drafts_dir.glob("*.json")):
-                draft = self._read_draft(draft_path)
-                if draft is not None:
-                    project.drafts[self.path_key(draft.path)] = draft
+        for draft in self.draft_store.read_text_drafts(root_dir):
+            project.drafts[self.path_key(draft.path)] = draft
 
-        resolved_dir = root_dir / self.RESOLVED_DIR
-        if resolved_dir.is_dir():
-            for draft_path in sorted(resolved_dir.glob("*.json")):
-                draft = self._read_resolved_draft(draft_path)
-                if draft is None:
-                    continue
-                key = self.resolved_key(draft.tab_id, draft.root_path)
-                previous = project.resolved_drafts.get(key)
-                # В старых проектах имя файла не совпадало с ключом,
-                # поэтому после миграции могли остаться два файла на один
-                # черновик. Выбираем более свежий по saved_at.
-                if previous is not None and previous.saved_at > draft.saved_at:
-                    continue
-                project.resolved_drafts[key] = draft
-                self._resolved_draft_files[key] = draft_path
+        for draft_path, draft in self.draft_store.read_resolved_drafts(
+            root_dir
+        ):
+            key = self.resolved_key(draft.tab_id, draft.root_path)
+            previous = project.resolved_drafts.get(key)
+            # В старых проектах имя файла не совпадало с ключом,
+            # поэтому после миграции могли остаться два файла на один
+            # черновик. Выбираем более свежий по saved_at.
+            if previous is not None and previous.saved_at > draft.saved_at:
+                continue
+            project.resolved_drafts[key] = draft
+            self._resolved_draft_files[key] = draft_path
 
-        assets_dir = root_dir / self.ASSETS_DIR
-        if assets_dir.is_dir():
-            for draft_path in sorted(assets_dir.glob("*.json")):
-                draft = self._read_asset_draft(draft_path)
-                if draft is not None:
-                    project.assets[self.path_key(draft.path)] = draft
+        for draft in self.draft_store.read_asset_drafts(root_dir):
+            project.assets[self.path_key(draft.path)] = draft
 
-        self.active = project
+        self.session.activate(project)
         return project
 
     def list_projects(self) -> List[ProjectInfo]:
@@ -585,55 +536,84 @@ class ProjectService(ProjectPreviewMixin):
                 "Не удалось сохранить проект перед закрытием: %s" % exc
             ) from exc
         self.invalidate_preview_cache()
-        self.active = None
+        self.session.deactivate()
         self._resolved_draft_files.clear()
         self._clear_overlay_cache()
 
     def set_patch_mode(self, mode: str) -> Project:
         """Переключить режим формирования патча у активного проекта."""
-        project = self._require_active()
         mode = normalize_save_mode(mode)
 
-        project.save_mode = mode
+        def command(project):
+            previous = project.save_mode
+            project.save_mode = mode
+            try:
+                self.repository.write_meta(project)
+            except Exception:
+                project.save_mode = previous
+                raise
+            return project
+
+        project = self.session.write(command)
         self.invalidate_preview_cache()
-        self.repository.write_meta(project)
         return project
 
     def set_xml_patch_mode(self, mode: str) -> Project:
         """Переключить способ формирования XML-патча."""
-        project = self._require_active()
         mode = str(mode or "xml").lower()
         if mode not in ("dxml_lua", "xml", "xml_override"):
             raise ProjectError("Неизвестный режим XML-патча: %s" % mode)
 
-        project.xml_patch_mode = mode
+        def command(project):
+            previous = project.xml_patch_mode
+            project.xml_patch_mode = mode
+            try:
+                self.repository.write_meta(project)
+            except Exception:
+                project.xml_patch_mode = previous
+                raise
+            return project
+
+        project = self.session.write(command)
         self.invalidate_preview_cache()
-        self.repository.write_meta(project)
         return project
 
     def module_setting(self, key, default=None):
         """Текущее значение настройки модуля у активного проекта."""
-        if self.active is None:
+        state = self.session.state()
+        if state is None:
             return default
-        return self.active.module_setting(key, default)
+        return state.module_settings.get(str(key or "").strip(), default)
 
     def module_settings(self) -> Dict[str, object]:
         """Копия всех сохранённых настроек модулей активного проекта."""
-        if self.active is None:
+        state = self.session.state()
+        if state is None:
             return {}
-        return dict(self.active.module_settings)
+        return dict(state.module_settings)
 
     def set_module_setting(self, key, value):
         """Сохранить значение настройки модуля в активном проекте."""
-        project = self._require_active()
         key = str(key or "").strip()
         if not key:
             raise ProjectError("Ключ настройки проекта не может быть пустым")
 
-        project.module_settings[key] = value
+        def command(project):
+            previous = project.module_settings.get(key, _MISSING_SETTING)
+            project.module_settings[key] = value
+            try:
+                self.repository.write_meta(project)
+            except Exception:
+                if previous is _MISSING_SETTING:
+                    project.module_settings.pop(key, None)
+                else:
+                    project.module_settings[key] = previous
+                raise
+            return value
+
+        result = self.session.write(command)
         self.invalidate_preview_cache()
-        self.repository.write_meta(project)
-        return value
+        return result
 
     # -------------------------------------------------- сессия вкладок
     def _tabs_path(self, project=None) -> Path:
@@ -766,7 +746,7 @@ class ProjectService(ProjectPreviewMixin):
         self._clear_overlay_cache()
 
         if not target.exists():
-            self.active = None
+            self.session.deactivate()
             self._resolved_draft_files.clear()
             return True
 
@@ -775,7 +755,7 @@ class ProjectService(ProjectPreviewMixin):
         except OSError as exc:
             raise ProjectError("Не удалось удалить проект: %s" % exc)
 
-        self.active = None
+        self.session.deactivate()
         self._resolved_draft_files.clear()
         return True
 
@@ -846,42 +826,17 @@ class ProjectService(ProjectPreviewMixin):
             text if text is not None else self.get_text(path) or "",
         )
         saved_at = time.time()
-        target = (
-            project.root_dir
-            / self.DRAFTS_DIR
-            / self._draft_filename(draft.path)
-        )
-        payload = self._draft_payload(
+        target = self.draft_store.text_target(project.root_dir, draft.path)
+        payload = self.draft_store.build_text_payload(
             draft,
             saved_text=draft.current_text,
             saved_at=saved_at,
         )
-        with self._write_lock:
-            self._write_payload_locked(target, payload)
+        self.draft_store.write_payload(target, payload)
         with self._state_lock:
             draft.saved_text = draft.current_text
             draft.saved_at = saved_at
         return draft
-
-    def _draft_payload(self, draft, saved_text=None, saved_at=None):
-        current = str(draft.current_text or "")
-        original = str(draft.original_text or "")
-        saved = current if saved_text is None else str(saved_text)
-        payload = {
-            "path": str(draft.path),
-            "current_text": _pack_text(current),
-            "is_new": bool(draft.is_new),
-            "revision": int(draft.revision),
-            "updated_at": draft.updated_at,
-            "saved_at": (
-                draft.saved_at if saved_at is None else float(saved_at)
-            ),
-        }
-        if original != current:
-            payload["original_text"] = _pack_text(original)
-        if saved != current:
-            payload["saved_text"] = _pack_text(saved)
-        return payload
 
     def stage_text_draft(
         self,
@@ -903,22 +858,20 @@ class ProjectService(ProjectPreviewMixin):
                 original_text=original_text,
             )
             saved_at = time.time()
-            payload = self._draft_payload(
+            payload = self.draft_store.build_text_payload(
                 draft,
                 saved_text=draft.current_text,
                 saved_at=saved_at,
             )
-            target = (
-                project.root_dir
-                / self.DRAFTS_DIR
-                / self._draft_filename(draft.path)
+            target = self.draft_store.text_target(
+                project.root_dir,
+                draft.path,
             )
             return target, payload, draft.revision, saved_at
 
     def write_draft_payload(self, target, payload) -> None:
         """Записать заранее подготовленный JSON черновика (потокобезопасно)."""
-        with self._write_lock:
-            self._write_payload_locked(target, payload)
+        self.draft_store.write_payload(target, payload)
 
     def write_staged_draft(self, path, target, payload, revision) -> bool:
         """Записать снимок, если черновик не изменился с момента подготовки.
@@ -935,28 +888,8 @@ class ProjectService(ProjectPreviewMixin):
                     and int(draft.revision) != int(revision)
                 ):
                     return False
-                self._write_payload_locked(target, payload)
+                self.draft_store.write_payload(target, payload)
                 return True
-
-    def _write_payload_locked(self, target, payload) -> None:
-        target = Path(target)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(
-            target.name
-            + ".tmp.%d.%d" % (os.getpid(), threading.get_ident())
-        )
-        try:
-            tmp.write_text(
-                json.dumps(payload, ensure_ascii=False),
-                encoding="utf-8",
-            )
-            os.replace(str(tmp), str(target))
-        except Exception:
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-            raise
 
     def mark_draft_saved(self, path, revision, saved_at=None) -> bool:
         """Зафиксировать успешную фоновую запись в памяти проекта."""
@@ -1005,18 +938,16 @@ class ProjectService(ProjectPreviewMixin):
         for draft in drafts:
             text = str(draft.current_text or "")
             saved_at = time.time()
-            target = (
-                project.root_dir
-                / self.DRAFTS_DIR
-                / self._draft_filename(draft.path)
+            target = self.draft_store.text_target(
+                project.root_dir,
+                draft.path,
             )
-            payload = self._draft_payload(
+            payload = self.draft_store.build_text_payload(
                 draft,
                 saved_text=text,
                 saved_at=saved_at,
             )
-            with self._write_lock:
-                self._write_payload_locked(target, payload)
+            self.draft_store.write_payload(target, payload)
             with self._state_lock:
                 if draft.current_text == text:
                     draft.saved_text = text
@@ -1105,12 +1036,7 @@ class ProjectService(ProjectPreviewMixin):
             return False
 
         self._invalidate_preview_cache(path)
-        draft_file = project.root_dir / self.DRAFTS_DIR / self._draft_filename(path)
-        try:
-            if draft_file.is_file():
-                draft_file.unlink()
-        except OSError:
-            pass
+        self.draft_store.delete_text(project.root_dir, path)
         return True
 
     def changed_paths(self) -> List[Path]:
@@ -1143,13 +1069,6 @@ class ProjectService(ProjectPreviewMixin):
             ]
 
     # -------------------------------------------------- двоичные черновики
-    @staticmethod
-    def _asset_draft_filename(path) -> str:
-        digest = hashlib.sha1(
-            ProjectService.path_key(path).encode("utf-8", "replace")
-        ).hexdigest()
-        return digest + ".json"
-
     def update_asset_draft(
         self,
         path,
@@ -1253,16 +1172,7 @@ class ProjectService(ProjectPreviewMixin):
             return False
 
         self._invalidate_preview_cache(path)
-        target = (
-            project.root_dir
-            / self.ASSETS_DIR
-            / self._asset_draft_filename(path)
-        )
-        try:
-            if target.is_file():
-                target.unlink()
-        except OSError:
-            pass
+        self.draft_store.delete_asset(project.root_dir, path)
         return True
 
     def changed_asset_drafts(self) -> List[ProjectAssetDraft]:
@@ -1303,7 +1213,7 @@ class ProjectService(ProjectPreviewMixin):
         key = self.resolved_key(tab_id, root_path)
         original_text = str(original_text or "")
         raw_current = str(current_text or "")
-        current_text = self._collapse_duplicated_text(
+        current_text = collapse_duplicated_text(
             raw_current,
             original_text,
         )
@@ -1355,7 +1265,7 @@ class ProjectService(ProjectPreviewMixin):
                     "Resolved-черновик не найден: %s" % tab_id
                 )
             if text is not None:
-                draft.current_text = self._collapse_duplicated_text(
+                draft.current_text = collapse_duplicated_text(
                     str(text),
                     draft.original_text,
                 )
@@ -1400,16 +1310,11 @@ class ProjectService(ProjectPreviewMixin):
 
         target = self._resolved_draft_files.pop(key, None)
         if target is None:
-            target = (
-                project.root_dir
-                / self.RESOLVED_DIR
-                / self._resolved_draft_filename(draft)
+            target = self.draft_store.resolved_target(
+                project.root_dir,
+                draft,
             )
-        try:
-            if target.is_file():
-                target.unlink()
-        except OSError:
-            pass
+        self.draft_store.delete_resolved(target)
         return True
 
     def changed_resolved_drafts(self) -> List[ProjectResolvedDraft]:
@@ -1450,7 +1355,8 @@ class ProjectService(ProjectPreviewMixin):
         )
 
     def status_text(self) -> str:
-        if self.active is None:
+        state = self.session.state()
+        if state is None:
             return "Проект: не создан"
         changed = (
             len(self.changed_drafts())
@@ -1462,14 +1368,14 @@ class ProjectService(ProjectPreviewMixin):
             + len(self.dirty_resolved_drafts())
             + len(self.dirty_asset_drafts())
         )
-        mode = self.patch_mode()
+        mode = normalize_save_mode(state.save_mode or "root")
         return (
             "Проект: %s | режим: %s | XML: %s | изменённых файлов: %d | "
             "несохранённых: %d"
             % (
-                self.active.name,
+                state.name,
                 mode,
-                self.active.xml_patch_mode,
+                state.xml_patch_mode,
                 changed,
                 dirty,
             )
@@ -1477,23 +1383,16 @@ class ProjectService(ProjectPreviewMixin):
 
     # -------------------------------------------------- кэш предпросмотра
     def _require_active(self) -> Project:
-        if self.active is None:
-            raise ProjectError("Проект не создан")
-        return self.active
+        return self.session.require_active()
 
     def _write_draft(self, project: Project, draft: ProjectDraft) -> None:
-        target = (
-            project.root_dir
-            / self.DRAFTS_DIR
-            / self._draft_filename(draft.path)
-        )
-        payload = self._draft_payload(
+        target = self.draft_store.text_target(project.root_dir, draft.path)
+        payload = self.draft_store.build_text_payload(
             draft,
             saved_text=draft.saved_text,
             saved_at=draft.saved_at,
         )
-        with self._write_lock:
-            self._write_payload_locked(target, payload)
+        self.draft_store.write_payload(target, payload)
 
     def _write_asset_draft(
         self,
@@ -1502,71 +1401,16 @@ class ProjectService(ProjectPreviewMixin):
         saved_bytes=None,
         saved_at=None,
     ) -> None:
-        assets_dir = project.root_dir / self.ASSETS_DIR
-        assets_dir.mkdir(parents=True, exist_ok=True)
-
-        saved = (
-            draft.saved_bytes if saved_bytes is None else bytes(saved_bytes)
+        target = self.draft_store.asset_target(
+            project.root_dir,
+            draft.path,
         )
-        data = {
-            "path": str(draft.path),
-            "original_sha1": draft.original_sha1,
-            "current_b64": base64.b64encode(draft.current_bytes).decode(
-                "ascii"
-            ),
-            "is_new": bool(draft.is_new),
-            "revision": int(draft.revision),
-            "updated_at": draft.updated_at,
-            "saved_at": (
-                draft.saved_at if saved_at is None else float(saved_at)
-            ),
-        }
-        # saved == current после обычного сохранения: не пишем вторую
-        # копию бинарника.
-        if saved != draft.current_bytes:
-            data["saved_b64"] = base64.b64encode(saved).decode("ascii")
-        target = assets_dir / self._asset_draft_filename(draft.path)
-        with self._write_lock:
-            write_json_atomic(target, data)
-
-    def _read_asset_draft(
-        self,
-        draft_path: Path,
-    ) -> Optional[ProjectAssetDraft]:
-        try:
-            data = json.loads(draft_path.read_text(encoding="utf-8"))
-            current = base64.b64decode(data.get("current_b64") or "")
-            saved = (
-                base64.b64decode(data["saved_b64"])
-                if "saved_b64" in data
-                else current
-            )
-            return ProjectAssetDraft(
-                path=Path(data["path"]),
-                original_sha1=str(data.get("original_sha1") or ""),
-                current_bytes=current,
-                saved_bytes=saved,
-                is_new=bool(data.get("is_new")),
-                revision=int(data.get("revision") or 0),
-                updated_at=float(data.get("updated_at") or 0.0),
-                saved_at=float(data.get("saved_at") or 0.0),
-            )
-        except Exception as exc:
-            log.warning(
-                "Проект: не удалось прочитать двоичный черновик %s: %s",
-                draft_path,
-                exc,
-            )
-            return None
-
-    def _resolved_draft_filename(self, draft: ProjectResolvedDraft) -> str:
-        digest = hashlib.sha1(
-            self.resolved_key(draft.tab_id, draft.root_path).encode(
-                "utf-8",
-                "replace",
-            )
-        ).hexdigest()
-        return digest + ".json"
+        payload = self.draft_store.build_asset_payload(
+            draft,
+            saved_bytes=saved_bytes,
+            saved_at=saved_at,
+        )
+        self.draft_store.write_payload(target, payload)
 
     def _write_resolved_draft(
         self,
@@ -1575,275 +1419,31 @@ class ProjectService(ProjectPreviewMixin):
         saved_text=None,
         saved_at=None,
     ) -> None:
-        resolved_dir = project.root_dir / self.RESOLVED_DIR
-        resolved_dir.mkdir(parents=True, exist_ok=True)
-
         with self._state_lock:
             # Не даём записать уже испорченный «двойной» текст.
-            compact = self._collapse_duplicated_text(
+            compact = collapse_duplicated_text(
                 draft.current_text,
                 draft.original_text,
             )
             if compact != draft.current_text:
                 draft.current_text = compact
-            current = compact
-            original = str(draft.original_text or "")
-            saved = current if saved_text is None else str(saved_text)
-            if saved == compact + compact:
-                saved = compact
-
-            data = {
-                "version": self.RESOLVED_DRAFT_VERSION,
-                "tab_id": draft.tab_id,
-                "root_path": str(draft.root_path),
-                "title": draft.title,
-                "current_text": _pack_text(current),
-                "line_sources": self._serialize_line_sources(
-                    draft.line_sources
-                ),
-                "revision": int(draft.revision),
-                "updated_at": draft.updated_at,
-                "saved_at": (
-                    draft.saved_at
-                    if saved_at is None
-                    else float(saved_at)
-                ),
-            }
-            # Обычный случай после автосохранения: original == current.
-            # Не храним вторую копию; при чтении восстановим её.
-            if original != current:
-                data["original_text"] = _pack_text(original)
-            if saved != current:
-                data["saved_text"] = _pack_text(saved)
+            saved = compact if saved_text is None else str(saved_text)
 
             key = self.resolved_key(draft.tab_id, draft.root_path)
-            target = self._resolved_draft_files.get(key)
-            if target is None:
-                target = resolved_dir / self._resolved_draft_filename(draft)
+            target = self.draft_store.resolved_target(
+                project.root_dir,
+                draft,
+                existing=self._resolved_draft_files.get(key),
+            )
+            payload = self.draft_store.build_resolved_payload(
+                draft,
+                saved_text=saved,
+                saved_at=saved_at,
+            )
 
-        with self._write_lock:
-            write_json_atomic(target, data)
+        self.draft_store.write_payload(target, payload)
         with self._state_lock:
             self._resolved_draft_files[key] = target
-
-    def _read_resolved_draft(
-        self,
-        draft_path: Path,
-    ) -> Optional[ProjectResolvedDraft]:
-        try:
-            data = json.loads(draft_path.read_text(encoding="utf-8"))
-            raw_current = self._read_text_field(data, "current_text")
-            original_text = self._read_text_field(
-                data,
-                "original_text",
-                default=raw_current,
-            )
-            current_text = self._collapse_duplicated_text(
-                raw_current,
-                original_text,
-            )
-            saved_text = self._read_text_field(
-                data,
-                "saved_text",
-                default=raw_current,
-            )
-            if saved_text == raw_current:
-                saved_text = current_text
-            else:
-                saved_text = self._collapse_duplicated_text(
-                    saved_text,
-                    original_text,
-                )
-            return ProjectResolvedDraft(
-                root_path=Path(data["root_path"]),
-                title=str(data.get("title") or ""),
-                original_text=original_text,
-                current_text=current_text,
-                saved_text=saved_text,
-                tab_id=str(data.get("tab_id") or ""),
-                line_sources=self._deserialize_line_sources(
-                    data.get("line_sources")
-                ),
-                revision=int(data.get("revision") or 0),
-                updated_at=float(data.get("updated_at") or 0.0),
-                saved_at=float(data.get("saved_at") or 0.0),
-            )
-        except Exception as exc:
-            log.warning(
-                "Проект: не удалось прочитать resolved-черновик %s: %s",
-                draft_path,
-                exc,
-            )
-            return None
-
-    @staticmethod
-    def _read_text_field(data, key, default=""):
-        """Прочитать текстовое поле старого (plain) или нового формата."""
-        if key not in data:
-            return default
-        return _unpack_text(data.get(key), default=default)
-
-    @staticmethod
-    def _collapse_duplicated_text(text, original=""):
-        """Починить старый дефект: current = current + current.
-
-        Это защита для уже испорченных проектов. Признак — ровно две
-        одинаковые половины и вторая половина близка по длине к
-        original_text.
-        """
-        return collapse_duplicated_text(text, original)
-
-    @staticmethod
-    def _line_source_record(source):
-        path = getattr(source, "path", None)
-        return {
-            "kind": str(getattr(source, "kind", "") or ""),
-            "display": str(getattr(source, "display", "") or ""),
-            "path": str(path) if path is not None else "",
-            "line": int(getattr(source, "line", 0) or 0),
-            "open_raw": bool(getattr(source, "open_raw", False)),
-        }
-
-    @staticmethod
-    def _line_source_key(record):
-        if record is None:
-            return None
-        return (
-            str(record.get("kind") or ""),
-            str(record.get("display") or ""),
-            str(record.get("path") or ""),
-            int(record.get("line") or 0),
-            bool(record.get("open_raw")),
-        )
-
-    @staticmethod
-    def _line_source_from_record(record):
-        if record is None:
-            return None
-        path = str(record.get("path") or "")
-        return LineSource(
-            kind=str(record.get("kind") or "none"),
-            display=str(record.get("display") or ""),
-            path=Path(path) if path else None,
-            line=int(record.get("line") or 0),
-            open_raw=bool(record.get("open_raw")),
-        )
-
-    @classmethod
-    def _serialize_line_sources(cls, line_sources) -> dict:
-        """Уникальные источники + сжатый массив индексов на каждую строку.
-
-        Старый формат писал по объекту на строку. Для system.ltx это
-        миллион объектов и сотни мегабайт, хотя уникальных источников —
-        порядка тысячи. Индекс 0 означает ``None``; источник с индексом
-        ``n`` лежит в ``sources[n - 1]``.
-        """
-        records = []
-        record_index = {}
-        ids = array("I")
-
-        for source in line_sources or ():
-            if source is None:
-                ids.append(0)
-                continue
-
-            record = cls._line_source_record(source)
-            key = cls._line_source_key(record)
-            index = record_index.get(key)
-            if index is None:
-                records.append(record)
-                index = len(records)
-                record_index[key] = index
-            ids.append(index)
-
-        if sys.byteorder != "little":
-            ids.byteswap()
-
-        packed = zlib.compress(ids.tobytes(), 6)
-        return {
-            "version": cls.LINE_SOURCE_IDS_VERSION,
-            "sources": records,
-            "ids": base64.b64encode(packed).decode("ascii"),
-        }
-
-    @classmethod
-    def _deserialize_line_sources(cls, values) -> tuple:
-        """Прочитать новый компактный формат или старый список объектов."""
-        if isinstance(values, dict):
-            return cls._deserialize_line_sources_v2(values)
-
-        cache = {}
-        result = []
-        for data in values or ():
-            if not isinstance(data, dict):
-                # None — валидная запись «источник неизвестен». Нельзя
-                # выбрасывать её: иначе индексы строк сдвинутся.
-                result.append(None)
-                continue
-            key = cls._line_source_key(data)
-            source = cache.get(key)
-            if source is None:
-                source = cls._line_source_from_record(data)
-                if key is not None:
-                    cache[key] = source
-            result.append(source)
-        return tuple(result)
-
-    @classmethod
-    def _deserialize_line_sources_v2(cls, values) -> tuple:
-        records = values.get("sources") or ()
-        parsed = tuple(
-            cls._line_source_from_record(record)
-            for record in records
-            if isinstance(record, dict)
-        )
-
-        try:
-            packed = base64.b64decode(values.get("ids") or "")
-            ids = array("I")
-            ids.frombytes(zlib.decompress(packed))
-            if sys.byteorder != "little":
-                ids.byteswap()
-        except Exception:
-            return ()
-
-        return tuple(
-            0 < index <= len(parsed) and parsed[index - 1] or None
-            for index in ids
-        )
-
-    def _read_draft(self, draft_path: Path) -> Optional[ProjectDraft]:
-        try:
-            data = json.loads(draft_path.read_text(encoding="utf-8"))
-            path = Path(data["path"])
-            current = self._read_text_field(data, "current_text")
-            original = self._read_text_field(
-                data,
-                "original_text",
-                default=current,
-            )
-            saved = self._read_text_field(
-                data,
-                "saved_text",
-                default=current,
-            )
-            return ProjectDraft(
-                path=path,
-                original_text=original,
-                current_text=current,
-                saved_text=saved,
-                is_new=bool(data["is_new"]),
-                revision=int(data.get("revision") or 0),
-                updated_at=float(data.get("updated_at") or 0.0),
-                saved_at=float(data.get("saved_at") or 0.0),
-            )
-        except Exception as exc:
-            log.warning(
-                "Проект: не удалось прочитать черновик %s: %s",
-                draft_path,
-                exc,
-            )
-            return None
 
     def _make_project_id(self, name: str) -> str:
         slug = re.sub(r"[^\w.-]+", "_", name.strip().lower(), flags=re.UNICODE)

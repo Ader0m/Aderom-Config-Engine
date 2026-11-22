@@ -56,6 +56,7 @@ class HintController(QObject):
         self._refreshing = False
         self._suppress = 0
         self._window_filter = False
+        self._showing_popup = False
         self._alive = True
 
         self._timer = QTimer(self)
@@ -208,7 +209,14 @@ class HintController(QObject):
                 self.close()
             return False
 
-        if event.type() in (QEvent.WindowDeactivate, QEvent.ApplicationDeactivate):
+        if (
+            event.type()
+            in (QEvent.WindowDeactivate, QEvent.ApplicationDeactivate)
+            and not self._showing_popup
+        ):
+            # Событие может прийти из очереди во время показа popup
+            # (raise_/show обрабатывают события). Это не деактивация
+            # редактора, и гасить только что показанный popup нельзя.
             self.close()
         if (
             self._popup is not None
@@ -409,7 +417,14 @@ class HintController(QObject):
         self._context = context
         self._install_window_filter()
         anchor = self._anchor_rect()
-        popup.show_for(anchor)
+        # Показ popup может синхронно доставить WindowDeactivate из
+        # очереди (raise_/show обрабатывают события). Это не деактивация
+        # окна редактора, и гасить только что показанный popup нельзя.
+        self._showing_popup = True
+        try:
+            popup.show_for(anchor)
+        finally:
+            self._showing_popup = False
 
     def _anchor_rect(self):
         try:

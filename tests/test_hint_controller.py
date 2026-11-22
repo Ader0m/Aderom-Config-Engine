@@ -332,6 +332,37 @@ class ScintillaControllerTest(unittest.TestCase):
         self.assertEqual(handle._context.selected_text, "")
         self.assertTrue(handle._popup.isVisible())
 
+    def test_stale_deactivate_during_show_keeps_popup(self):
+        """WindowDeactivate из очереди во время показа не гасит popup."""
+        from ui.hints.popup import HintPopup
+
+        editor = QsciScintilla()
+        editor.show()
+        editor.setText("xx")
+        editor.setCursorPosition(0, 2)
+        handle = self.service.attach(
+            editor,
+            target=HintTargetInfo(surface="raw", language="ltx"),
+        )
+
+        original = HintPopup.show_for
+
+        def show_for(popup, anchor):
+            original(popup, anchor)
+            app = QApplication.instance()
+            QApplication.sendEvent(
+                app,
+                QEvent(QEvent.ApplicationDeactivate),
+            )
+
+        HintPopup.show_for = show_for
+        try:
+            handle._refresh()
+        finally:
+            HintPopup.show_for = original
+
+        self.assertTrue(handle._popup.isVisible())
+
 
 if __name__ == "__main__":
     unittest.main()
