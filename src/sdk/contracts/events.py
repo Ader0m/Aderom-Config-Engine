@@ -29,8 +29,9 @@ class Events:
     APP_STARTED = "app.started"
     TREE_READY = "ui.tree_ready"
     # Опубликован лес для нового снимка VFS (payload — SnapshotChanged).
-    # Смена overlay без публикации леса публикует PROJECT_CHANGED, а не
-    # это событие; детали — ADR-15.
+    # Смена overlay без публикации леса не обещает отдельного события;
+    # модуль читает overlay через ctx.ui.project_overlay(). Детали —
+    # ADR-15.
     SNAPSHOT_CHANGED = "ui.snapshot_changed"
     # Файл действительно открыт: виджет размещён и стал текущим (payload — путь).
     FILE_OPENED = "ui.file_opened"
