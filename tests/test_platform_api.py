@@ -986,7 +986,18 @@ class _FakeServices:
     def invalidate_resolver_cache(self):
         return None
 
-    def build_item_entry(self, forest, resolved_text, section, log=None):
+    def build_item_entry_from_block(self, forest, block_text, section,
+                                    offset=0, log=None, overlay=None):
+        return self.build_item_entry(
+            forest,
+            block_text,
+            section,
+            log=log,
+            overlay=overlay,
+        )
+
+    def build_item_entry(self, forest, resolved_text, section, log=None,
+                         overlay=None):
         from sdk.api import ItemEntry, ItemField
 
         return ItemEntry(

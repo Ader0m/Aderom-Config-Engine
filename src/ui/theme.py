@@ -135,6 +135,12 @@ PALETTE = Palette()
 _BRANCH_DIR = os.path.join(tempfile.gettempdir(), "ace_theme_icons")
 
 
+def configure_cache_dir(path):
+    """Задать portable-каталог для сгенерированных иконок темы."""
+    global _BRANCH_DIR
+    _BRANCH_DIR = str(path)
+
+
 def _draw_triangle(path, points, color):
     img = QImage(12, 12, QImage.Format_ARGB32)
     img.fill(Qt.transparent)

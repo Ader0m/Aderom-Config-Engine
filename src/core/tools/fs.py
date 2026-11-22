@@ -51,6 +51,20 @@ def detect_config_dir(candidates):
     return None
 
 
+def game_root_from_scan_dir(scan_dir):
+    """Корень ``gamedata`` по каталогу сканирования VFS."""
+    if not scan_dir:
+        return None
+    scan_dir = Path(scan_dir)
+    if scan_dir.name.lower() == "configs":
+        return scan_dir.parent
+    if (scan_dir / "gamedata" / "configs").is_dir():
+        return scan_dir / "gamedata"
+    if (scan_dir / "configs").is_dir():
+        return scan_dir
+    return scan_dir.parent
+
+
 def canonical_config_dir(config_dir):
     """Привести выбранный каталог к реальному каталогу configs.
 

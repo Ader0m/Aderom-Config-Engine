@@ -15,6 +15,11 @@
 Модуль зависит **только от `sdk`**. Он не импортирует `core` и внутренности
 `ui`. PyQt допустим только для собственных окон и виджетов модуля.
 
+Данные приложения хранятся по portable-соглашению рядом с приложением:
+`<app>/generated` (кэши, собранные XML, crash.log, иконки темы,
+материализованные VFS-копии) и `<app>/projects`. В исходной раскладке
+`<app>` — корень проекта, а не каталог `src`.
+
 Публичная поверхность `core` — `core/__init__.py`, `core/facade.py` и
 `core/models.py`. Остальное сгруппировано по ответственности:
 
@@ -111,6 +116,11 @@ On-file использует обычное планирование Root на �
 видит внутренние словари подписчиков и обработчиков и не может обойти
 контракт. `ModuleLoader` находится на стороне платформы (`ui.module_loader`),
 а не в SDK: SDK не должен импортировать пакет модулей.
+
+`CoreApiAdapter`/`UiApiAdapter` — только редиректы: разворачивание
+`ForestRef`, проверка scope и вызов одного канонического метода
+`CoreServices`/`PlatformApi`. Поиск методов по нескольким именам и
+собственная бизнес-логика в адаптерах не допускаются.
 
 Правила:
 
@@ -234,6 +244,7 @@ deactivate  — закрыть окна, остановить свою акти�
 | Действие в дереве | `ctx.ui.register_tree_context_action(label, fn, predicate=None)` |
 | Перехват открытия файла | `FileOpenHandler` + `ctx.ui.register_open_handler(...)` |
 | Корень `gamedata` VFS | `ctx.services.game_root(forest)` |
+| Цель DLTX-патча | `ctx.services.patch_target(forest, path)` / `patch_target_info(...)` |
 | Двоичный черновик проекта | `ctx.ui.read_project_asset/update_project_asset/save_project_asset` |
 | Список двоичных черновиков | `ctx.ui.project_asset_drafts()` |
 | Тип двоичного ресурса | `ctx.ui.register_project_asset_type(ProjectAssetType(...))` |
@@ -504,7 +515,10 @@ Vorbis-комментариев. Важно: движок X-Ray (`SoundRender_So
 (`version`, `min_dist`, `max_dist`, `base_volume`, `game_type`,
 `max_ai_dist`), а не как текст. Поэтому вкладка модуля показывает
 человекочитаемые поля, а при сохранении пересобирает только служебные
-страницы Ogg; аудиопакеты не перекодируются.
+страницы Ogg; аудиопакеты не перекодируются. Способ записи ресурса в
+патч-мод задаётся настройкой проекта `ogg_editor.save_mode`; тип ресурса
+объявляет её через `ProjectAssetType.save_mode_setting`, а asset-патч
+читает значение при построении предпросмотра.
 
 Для прослушивания `.ogg` используется `soundfile` (libsndfile): он
 декодирует текущий контейнер в временный WAV, который воспроизводит

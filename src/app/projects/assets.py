@@ -129,11 +129,21 @@ class ProjectAssetRegistry:
                     )
                 )
 
+        raw_modes = getattr(asset_type, "save_modes", ()) or ()
+        save_modes = tuple(
+            str(value).strip().lower()
+            for value in raw_modes
+            if str(value or "").strip()
+        )
         normalized = ProjectAssetType(
             key=key,
             label=str(getattr(asset_type, "label", "") or key),
             extensions=tuple(extensions),
             vfs_root=root.lower(),
+            save_mode_setting=str(
+                getattr(asset_type, "save_mode_setting", "") or ""
+            ).strip(),
+            save_modes=save_modes or ("override",),
         )
         self._types[key] = normalized
         self._owners[key] = owner_value

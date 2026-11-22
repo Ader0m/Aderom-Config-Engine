@@ -13,6 +13,7 @@
 """
 
 import ctypes
+import shutil
 import sys
 import time
 import traceback
@@ -23,7 +24,34 @@ from pathlib import Path
 _CRASH_LOG = None
 
 
-def _install_crash_log(app_dir):
+def _application_root(app_dir):
+    """Каталог portable-приложения, рядом с которым лежат данные.
+
+    В исходной раскладке код лежит в ``<root>/src``, поэтому данные
+    должны быть в ``<root>``. В замороженной сборке — рядом с exe.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    app_dir = Path(app_dir).resolve()
+    if app_dir.name.lower() == "src":
+        return app_dir.parent
+    return app_dir
+
+
+def _migrate_generated_dir(old_dir, new_dir):
+    """Один раз перенести старый ``src/generated`` в portable-корень."""
+    old_dir = Path(old_dir)
+    new_dir = Path(new_dir)
+    if old_dir == new_dir or not old_dir.is_dir() or new_dir.exists():
+        return
+    try:
+        new_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(old_dir), str(new_dir))
+    except OSError:
+        pass
+
+
+def _install_crash_log(generated_dir):
     """Писать необработанные исключения и аварийные стеки в файл.
 
     PyQt5 при исключении в слоте вызывает qFatal() — процесс падает без
@@ -32,7 +60,7 @@ def _install_crash_log(app_dir):
     """
     global _CRASH_LOG
 
-    log_path = Path(app_dir) / "generated" / "crash.log"
+    log_path = Path(generated_dir) / "crash.log"
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -103,15 +131,28 @@ def main():
     from ui.main_window import MainWindow
     from ui.platform_api import PlatformApi
     from ui.tasks import TaskService
-    from ui.theme import apply_theme
+    from ui.theme import apply_theme, configure_cache_dir
+
+    # Portable-раскладка: код может лежать в src/, но все данные
+    # приложения — generated/projects — находятся рядом с приложением.
+    app_dir = Path(__file__).resolve().parent
+    app_root = _application_root(app_dir)
+    generated_dir = app_root / "generated"
+    projects_dir = app_root / "projects"
+    _migrate_generated_dir(app_dir / "generated", generated_dir)
+    generated_dir.mkdir(parents=True, exist_ok=True)
+
+    from core.tools.vfs import configure_materialize_root
+
+    configure_materialize_root(generated_dir / "assets")
+    configure_cache_dir(generated_dir / "theme_icons")
 
     app = QApplication(sys.argv)
     app.setApplicationName("LTX Explorer")
     app.setApplicationVersion("0.2.0")
     apply_theme(app)
 
-    app_dir = Path(__file__).resolve().parent
-    _install_crash_log(app_dir)
+    _install_crash_log(generated_dir)
 
     # 1) Сервисы ядра.
      # --------------------------------------------------
@@ -130,7 +171,7 @@ def main():
 
     # Резолвер и сборка
     resolved_cache = ResolvedCache(
-        cache_dir=app_dir / "generated" / "resolved_cache",
+        cache_dir=generated_dir / "resolved_cache",
         max_entries=128,
         max_chars=256_000_000,
         # Один файл кэша — это один корень/XML. Рабочий набор большой
@@ -145,7 +186,7 @@ def main():
     xml_resolve_service = XmlResolveService(resolved_cache=resolved_cache)
     assembly_service = AssemblyService(
         resolver_service=resolver_service,
-        generated_dir=app_dir / "generated",
+        generated_dir=generated_dir,
     )
 
     # Фасад (тонкий, только агрегирует сервисы)
@@ -156,7 +197,7 @@ def main():
         graph_builder=graph_builder,
         resolver_service=resolver_service,
         assembly_service=assembly_service,
-        generated_dir=app_dir / "generated",
+        generated_dir=generated_dir,
         xml_resolve_service=xml_resolve_service,
     )
 
@@ -166,8 +207,8 @@ def main():
     tasks = TaskService()
     paths = AppPaths(
         app_dir=app_dir,
-        generated_dir=services.generated_dir,
-        projects_dir=app_dir.parent / "projects",
+        generated_dir=generated_dir,
+        projects_dir=projects_dir,
     )
 
     api = PlatformApi(events, commands, tasks, services, paths)

@@ -63,7 +63,7 @@ class _Ui:
         return "[item]\nkind = i_food\n", (None, None)
 
     def build_item_catalog(self, forest, log=None, resolved_text=None,
-                           reuse_snapshot_cache=False):
+                           reuse_snapshot_cache=False, overlay=None):
         return ItemCatalog(
             source_path=Path("system.ltx"),
             items=(

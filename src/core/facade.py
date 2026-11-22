@@ -18,7 +18,13 @@ from dataclasses import replace
 from pathlib import Path
 
 from core.tools.external import open_in_notepad_pp, open_with_shell
-from core.tools.fs import find_system_ltx, detect_config_dir, read_text_safe
+from core.tools.fs import (
+    detect_config_dir,
+    find_system_ltx,
+    game_root_from_scan_dir,
+    read_text_safe,
+)
+from core.patching.targets import resolve_patch_target
 from core.tree.builder import add_virtual_file, remove_virtual_file
 from core.items.catalog import ItemCatalogService
 from core.items.icons import ItemIconService
@@ -99,6 +105,10 @@ class CoreServices:
         self._prebuild_stale = False
         # None — вся предсборка; иначе только затронутые корни.
         self._prebuild_roots = None
+
+        # Общий реестр contributor'ов графа. Владелец — композиционный
+        # корень, а не SDK-адаптер: адаптер только передаёт ссылку.
+        self.section_graph_contributors = []
 
         # Кэш каталога и иконок переживает перезапуск приложения:
         # ключи включают снимок LTX-поддерева и подписи DDS-атласов.
@@ -288,6 +298,14 @@ class CoreServices:
         """Найти system.ltx в указанной директории."""
         return find_system_ltx(sel)
 
+    def resolve_scan_dir(self, config_dir):
+        """Определить каталог сканирования VFS по выбранному пути."""
+        config_dir = Path(config_dir)
+        if (config_dir / "system.ltx").is_file():
+            return config_dir
+        system = self.find_system_ltx(config_dir)
+        return Path(system).parent if system is not None else None
+
     def build_tree(
         self,
         scan_dir,
@@ -319,21 +337,25 @@ class CoreServices:
         """Получить относительный путь файла."""
         return forest.rel_paths.get(path, str(path))
 
+    def relative_path(self, forest, path):
+        """Каноническое имя операции для SDK."""
+        return self.rel_path(forest, path)
+
     def forest_game_root(self, forest):
         """Корень gamedata VFS: родитель каталога ``configs``."""
-        value = getattr(forest, "scan_dir", None)
-        if not value:
-            return None
-        from pathlib import Path
+        return game_root_from_scan_dir(getattr(forest, "scan_dir", None))
 
-        scan_dir = Path(value)
-        if scan_dir.name.lower() == "configs":
-            return scan_dir.parent
-        if (scan_dir / "gamedata" / "configs").is_dir():
-            return scan_dir / "gamedata"
-        if (scan_dir / "configs").is_dir():
-            return scan_dir
-        return scan_dir.parent
+    def game_root(self, forest):
+        """Каноническое имя операции для SDK."""
+        return self.forest_game_root(forest)
+
+    def patch_target_info(self, forest, path):
+        """Полная информация о цели патча (корни/неоднозначность)."""
+        return resolve_patch_target(forest, path)
+
+    def patch_target(self, forest, path):
+        """Единственная цель патча или ``None`` при неоднозначности."""
+        return self.patch_target_info(forest, path).root_path
 
     def add_virtual_file(self, forest, path, text):
         """Добавить новый черновик в существующее дерево VFS."""
@@ -446,6 +468,10 @@ class CoreServices:
         )
 
     # -------------------------------------------------- резолвер (прокси для обратной совместимости)
+
+    def run_resolver(self, forest, config_dir, log=None):
+        """Выполнить проход Resolver4 (канонический вход SDK)."""
+        return self.resolver.run_pass(forest, config_dir, log=log)
 
     def resolver_pass(self, forest, config_dir, log=None):
         """
@@ -660,6 +686,10 @@ class CoreServices:
                     )
 
     # -------------------------------------------------- внешние инструменты
+
+    def open_external_editor(self, path):
+        """Открыть файл во внешнем редакторе (канонический вход SDK)."""
+        return self.open_notepad(path)
 
     def open_notepad(self, path):
         """Открыть файл в Notepad++."""

@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """Граф связей секции: построение через ядро и собственное окно модуля."""
 
-import tempfile
 from dataclasses import replace
 from pathlib import Path
 
@@ -71,15 +70,6 @@ def _node_file_name(node):
     if getattr(node, "file_path", None) is not None:
         return Path(node.file_path).name
     return getattr(node, "display_name", None) or "—"
-
-
-def _is_materialized(path) -> bool:
-    """Путь лежит во временном каталоге копий VFS-ассетов."""
-    try:
-        root = Path(tempfile.gettempdir()) / "ace_assets"
-        return str(path).lower().startswith(str(root).lower())
-    except Exception:
-        return False
 
 
 class SectionGraphFeature:
@@ -663,7 +653,7 @@ class SectionGraphWindow(QDialog):
                 ):
                     label = (
                         "Временная копия (usvfs)"
-                        if _is_materialized(physical)
+                        if getattr(node, "materialized", False)
                         else "Реальный путь"
                     )
                     lines.append("%s: %s" % (label, physical))

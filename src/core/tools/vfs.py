@@ -29,6 +29,27 @@ from core.tools.fs import normalize_path
 
 _CACHE = {}
 _CACHE_LOCK = threading.Lock()
+# Portable-корень задаёт композиционный корень (``generated/assets``).
+# Значение по умолчанию нужно только для тестов и старых вызовов.
+_MATERIALIZE_ROOT = Path(tempfile.gettempdir()) / "ace_assets"
+
+
+def configure_materialize_root(path):
+    """Задать каталог временных копий VFS-ресурсов."""
+    global _MATERIALIZE_ROOT
+    _MATERIALIZE_ROOT = normalize_path(path)
+
+
+def is_materialized_path(path) -> bool:
+    """Лежит ли путь в каталоге материализованных VFS-копий."""
+    try:
+        target = normalize_path(path)
+        root = normalize_path(_MATERIALIZE_ROOT)
+        return os.path.commonpath(
+            [str(target), str(root)]
+        ) == str(root)
+    except (OSError, TypeError, ValueError):
+        return False
 
 # Windows API
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
@@ -155,7 +176,7 @@ def _materialize(path: Path) -> Optional[Path]:
         key.encode("utf-8", errors="surrogatepass")
     ).hexdigest()[:16]
 
-    target_dir = Path(tempfile.gettempdir()) / "ace_assets" / digest
+    target_dir = _MATERIALIZE_ROOT / digest
     target = target_dir / path.name
 
     try:

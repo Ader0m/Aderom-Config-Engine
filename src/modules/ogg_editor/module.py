@@ -48,13 +48,6 @@ from .sections import (
 from .sound_types_ui import configure_theme as configure_sound_type_theme
 
 
-ASSET_TYPE = ProjectAssetType(
-    key="sound.ogg",
-    label="Звук Ogg Vorbis",
-    extensions=(".ogg",),
-    vfs_root="sounds",
-)
-
 OGG_SAVE_SETTING = ProjectSetting(
     key="ogg_editor.save_mode",
     label="ogg-патч",
@@ -70,6 +63,15 @@ OGG_SAVE_SETTING = ProjectSetting(
         "Способ попадания изменённого .ogg в патч-мод. "
         "Сейчас поддерживается только полная замена файла."
     ),
+)
+
+ASSET_TYPE = ProjectAssetType(
+    key="sound.ogg",
+    label="Звук Ogg Vorbis",
+    extensions=(".ogg",),
+    vfs_root="sounds",
+    save_mode_setting=OGG_SAVE_SETTING.key,
+    save_modes=("override",),
 )
 
 

@@ -20,6 +20,7 @@ from core.tools.external import open_in_notepad_pp, open_with_shell
 from core.tools.fs import (
     RESOLVER_CANDIDATES,
     TEXT_FILE_SUFFIXES,
+    game_root_from_scan_dir,
     normalize_path,
     canonical_config_dir,
     rel_path,
@@ -38,7 +39,12 @@ from core.tools.fs import (
 from core.tree.dltx_model import get_dltx_mods_for_root
 from core.tree.include_model import extract_includes, resolve_include_targets
 
-from core.tools.vfs import resolve_asset_path, resolve_physical_path
+from core.tools.vfs import (
+    configure_materialize_root,
+    is_materialized_path,
+    resolve_asset_path,
+    resolve_physical_path,
+)
 from core.items.dds import DdsError, DdsInfo, TextureRegion, read_dds_info, read_dds_region
 from core.items.catalog import (
     DEFAULT_ICON_TEXTURE,
@@ -217,6 +223,7 @@ __all__ = [
     "RESOLVER_CANDIDATES",
     "TEXT_FILE_SUFFIXES",
     "normalize_path",
+    "game_root_from_scan_dir",
     "canonical_config_dir",
     "rel_path",
     "pattern_match",
@@ -239,6 +246,8 @@ __all__ = [
     # external
     "open_in_notepad_pp",
     "open_with_shell",
+    "configure_materialize_root",
+    "is_materialized_path",
     "resolve_asset_path",
     "resolve_physical_path",
 

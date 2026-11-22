@@ -12,7 +12,11 @@ from core.tools.fs import (
     read_text_safe,
     scan_files,
 )
-from core.tools.vfs import resolve_asset_path, resolve_physical_path
+from core.tools.vfs import (
+    is_materialized_path,
+    resolve_asset_path,
+    resolve_physical_path,
+)
 
 
 # ------------------------------------------------------------ типы
@@ -59,6 +63,8 @@ class GraphNode:
     # VFS-путь (идентичность/отображение), physical_path — путь на
     # диске после раскрытия junction/usvfs или временная копия.
     physical_path: Optional[Path] = None
+    # True — physical_path является временной копией VFS-ресурса.
+    materialized: bool = False
     # Объявление связанной секции (родителя) — куда переходить по
     # двойному клику на строке [Наследование].
     related_file_path: Optional[Path] = None
@@ -792,6 +798,7 @@ class ReferenceGraphBuilder:
             resolved=resolved,
             target_path=target,
             physical_path=physical,
+            materialized=is_materialized_path(physical),
         )
 
     @staticmethod

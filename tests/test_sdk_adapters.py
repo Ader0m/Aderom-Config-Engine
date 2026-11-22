@@ -2,10 +2,16 @@
 import io
 import unittest
 from contextlib import redirect_stderr
+from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from sdk.adapters import CommandApiAdapter, EventApiAdapter
+from sdk import PatchTargetInfo
+from sdk.adapters import (
+    CommandApiAdapter,
+    CoreApiAdapter,
+    EventApiAdapter,
+)
 from sdk.contracts import ModuleContext
 from ui.bus import CommandBus, CommandError, EventBus
 
@@ -180,6 +186,121 @@ class SdkAdapterTest(unittest.TestCase):
 
         self.assertIsInstance(ctx.events, EventApiAdapter)
         self.assertIsInstance(ctx.commands, CommandApiAdapter)
+
+
+class CanonicalRedirectTest(unittest.TestCase):
+    class Provider:
+        def __init__(self):
+            self.calls = []
+
+        def resolve_scan_dir(self, config_dir):
+            self.calls.append(("scan", config_dir))
+            return Path(config_dir) / "scan"
+
+        def relative_path(self, forest, path):
+            self.calls.append(("relative", forest, path))
+            return "rel"
+
+        def game_root(self, forest):
+            self.calls.append(("root", forest))
+            return Path("gamedata")
+
+        def patch_target_info(self, forest, path):
+            self.calls.append(("target", forest, path))
+            return type("Target", (), {
+                "root_path": Path("root.ltx"),
+                "candidates": (Path("root.ltx"),),
+                "reason": "test",
+                "ambiguous": False,
+            })()
+
+        def run_resolver(self, forest, config_dir, log=None):
+            self.calls.append(("resolver", forest, config_dir, log))
+            return "done"
+
+        def read_text(self, path):
+            self.calls.append(("read", path))
+            return "text"
+
+        def open_external_editor(self, path):
+            self.calls.append(("editor", path))
+            return True, ""
+
+    def test_adapter_calls_only_canonical_methods(self):
+        provider = self.Provider()
+        adapter = CoreApiAdapter(provider)
+        forest = object()
+
+        self.assertEqual(adapter.resolve_scan_dir("cfg"), Path("cfg/scan"))
+        self.assertEqual(adapter.relative_path(forest, "a.ltx"), "rel")
+        self.assertEqual(adapter.game_root(forest), Path("gamedata"))
+        info = adapter.patch_target_info(forest, "a.ltx")
+        self.assertIsInstance(info, PatchTargetInfo)
+        self.assertEqual(info.root_path, Path("root.ltx"))
+        self.assertEqual(adapter.run_resolver(forest, "cfg"), "done")
+        self.assertEqual(adapter.read_text("a.ltx"), "text")
+        self.assertEqual(
+            adapter.open_external_editor("a.ltx"),
+            (True, ""),
+        )
+        self.assertEqual(
+            [call[0] for call in provider.calls],
+            [
+                "scan",
+                "relative",
+                "root",
+                "target",
+                "resolver",
+                "read",
+                "editor",
+            ],
+        )
+
+    def test_missing_canonical_method_is_not_replaced(self):
+        adapter = CoreApiAdapter(object())
+
+        with self.assertRaises(AttributeError):
+            adapter.resolve_scan_dir("cfg")
+        with self.assertRaises(AttributeError):
+            adapter.game_root(object())
+        with self.assertRaises(AttributeError):
+            adapter.read_text("a.ltx")
+
+    def test_contributors_are_shared_without_setattr(self):
+        class SlottedProvider:
+            __slots__ = ("__weakref__",)
+
+        provider = SlottedProvider()
+        first = CoreApiAdapter(provider)
+        second = CoreApiAdapter(provider)
+
+        first.register_section_graph_contributor(lambda request: ())
+
+        self.assertIs(
+            first._section_graph_contributors,
+            second._section_graph_contributors,
+        )
+        self.assertFalse(
+            hasattr(provider, "_sdk_section_graph_contributors")
+        )
+
+    def test_contributors_are_shared_for_provider_without_weakref(self):
+        class HardProvider:
+            __slots__ = ()
+
+        provider = HardProvider()
+        first = CoreApiAdapter(provider)
+        second = CoreApiAdapter(provider)
+
+        first.register_section_graph_contributor(lambda request: ())
+
+        self.assertIs(
+            first._section_graph_contributors,
+            second._section_graph_contributors,
+        )
+        self.assertFalse(
+            hasattr(provider, "_sdk_section_graph_contributors")
+        )
 
 
 if __name__ == "__main__":

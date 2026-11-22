@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import weakref
 from pathlib import Path
 
 from .api import (
@@ -24,6 +26,7 @@ from .api import (
     ItemIcon,
     ItemSection,
     LocalizationString,
+    PatchTargetInfo,
     ProjectSetting,
     ProjectSettingChoice,
     SectionGraph,
@@ -41,6 +44,33 @@ from .events import PLATFORM_OWNER, namespace_of
 _SDK_API_MARKER = "_sdk_api_kind"
 
 log = logging.getLogger(__name__)
+
+# Fallback только для провайдеров без собственного реестра (тесты,
+# сторонние реализации). Владелец реестра в приложении — CoreServices.
+_CONTRIBUTOR_REGISTRIES = weakref.WeakKeyDictionary()
+# Провайдеры без weakref (например, со __slots__): id -> (provider, list).
+# Держим provider, чтобы id не был переиспользован другим объектом.
+_CONTRIBUTOR_REGISTRIES_BY_ID = {}
+_CONTRIBUTOR_LOCK = threading.Lock()
+
+
+def _to_patch_target_info(value) -> PatchTargetInfo:
+    if value is None:
+        return PatchTargetInfo(root_path=None)
+    if isinstance(value, PatchTargetInfo):
+        return value
+    root = getattr(value, "root_path", None)
+    if root is not None:
+        root = Path(root)
+    return PatchTargetInfo(
+        root_path=root,
+        candidates=tuple(
+            Path(path)
+            for path in (getattr(value, "candidates", ()) or ())
+        ),
+        reason=str(getattr(value, "reason", "") or ""),
+        ambiguous=bool(getattr(value, "ambiguous", False)),
+    )
 
 
 def _to_localization_string(value):
@@ -121,11 +151,15 @@ class CoreApiAdapter:
 
     _sdk_api_kind = "core"
 
-    def __init__(self, provider):
+    def __init__(self, provider, contributors=None):
         self._provider = provider
         self._owner = ""
         self._scope = None
-        self._section_graph_contributors = self._shared_contributors()
+        self._section_graph_contributors = (
+            contributors
+            if contributors is not None
+            else self._shared_contributors()
+        )
 
     def bind_owner(self, owner, scope=None):
         """Привязать адаптер к модулю: его имя и набор регистраций."""
@@ -133,37 +167,36 @@ class CoreApiAdapter:
         self._scope = scope
 
     def _shared_contributors(self):
-        """Один реестр на провайдера, даже если адаптеров несколько.
-
-        ``ModuleContext`` создаёт отдельный адаптер для каждого модуля,
-        поэтому хранить поставщиков в самом адаптере нельзя.
-        """
+        """Один реестр на провайдера, без setattr на самом провайдере."""
         owner = self._provider
         if isinstance(owner, CoreApiAdapter):
             return owner._section_graph_contributors
 
-        registry = getattr(
-            owner,
-            "_sdk_section_graph_contributors",
-            None,
-        )
-        if registry is None:
-            registry = []
-            try:
-                setattr(
-                    owner,
-                    "_sdk_section_graph_contributors",
-                    registry,
-                )
-            except Exception:
-                pass
-        return registry
+        registry = getattr(owner, "section_graph_contributors", None)
+        if registry is not None:
+            return registry
+
+        try:
+            with _CONTRIBUTOR_LOCK:
+                registry = _CONTRIBUTOR_REGISTRIES.get(owner)
+                if registry is None:
+                    registry = []
+                    _CONTRIBUTOR_REGISTRIES[owner] = registry
+                return registry
+        except TypeError:
+            with _CONTRIBUTOR_LOCK:
+                key = id(owner)
+                item = _CONTRIBUTOR_REGISTRIES_BY_ID.get(key)
+                if item is None or item[0] is not owner:
+                    item = (owner, [])
+                    _CONTRIBUTOR_REGISTRIES_BY_ID[key] = item
+                return item[1]
 
     @classmethod
-    def wrap(cls, provider):
+    def wrap(cls, provider, contributors=None):
         if getattr(provider, _SDK_API_MARKER, None) == cls._sdk_api_kind:
             return provider
-        return cls(provider)
+        return cls(provider, contributors=contributors)
 
     # --- конфигурация и дерево -------------------------------------------
 
@@ -174,16 +207,7 @@ class CoreApiAdapter:
         return self._provider.find_system_ltx(selected_dir)
 
     def resolve_scan_dir(self, config_dir):
-        fn = getattr(self._provider, "resolve_scan_dir", None)
-        if callable(fn):
-            return fn(config_dir)
-
-        config_dir = Path(config_dir)
-        if (config_dir / "system.ltx").is_file():
-            return config_dir
-
-        system = self.find_system_ltx(config_dir)
-        return Path(system).parent if system is not None else None
+        return self._provider.resolve_scan_dir(config_dir)
 
     def build_tree(self, scan_dir, system_root, log=None, clean=False,
                    overlay=None):
@@ -214,11 +238,7 @@ class CoreApiAdapter:
         )
 
     def relative_path(self, forest, path):
-        forest = unwrap_forest(forest)
-        rel = getattr(self._provider, "relative_path", None)
-        if callable(rel):
-            return rel(forest, path)
-        return self._provider.rel_path(forest, path)
+        return self._provider.relative_path(unwrap_forest(forest), path)
 
     def forest_scan_dir(self, forest):
         forest = unwrap_forest(forest)
@@ -231,22 +251,7 @@ class CoreApiAdapter:
         return Path(value) if value else None
 
     def game_root(self, forest):
-        forest = unwrap_forest(forest)
-        fn = getattr(self._provider, "forest_game_root", None)
-        if callable(fn):
-            return fn(forest)
-
-        value = getattr(forest, "scan_dir", None)
-        if not value:
-            return None
-        scan_dir = Path(value)
-        if scan_dir.name.lower() == "configs":
-            return scan_dir.parent
-        if (scan_dir / "gamedata" / "configs").is_dir():
-            return scan_dir / "gamedata"
-        if (scan_dir / "configs").is_dir():
-            return scan_dir
-        return scan_dir.parent
+        return self._provider.game_root(unwrap_forest(forest))
 
     def add_virtual_file(self, forest, path, text):
         return self._provider.add_virtual_file(
@@ -255,38 +260,28 @@ class CoreApiAdapter:
             text,
         )
 
+    def patch_target_info(self, forest, path):
+        target = self._provider.patch_target_info(
+            unwrap_forest(forest),
+            path,
+        )
+        return _to_patch_target_info(target)
+
     def patch_target(self, forest, path):
-        forest = unwrap_forest(forest)
-        parents = getattr(forest, "include_parents", {}).get(path) or ()
-        if not parents:
-            return None
-        return sorted(parents, key=lambda p: str(p).lower())[0]
+        return self._provider.patch_target(unwrap_forest(forest), path)
 
     def read_text(self, path):
-        reader = getattr(self._provider, "read_text", None)
-        if callable(reader):
-            return reader(path)
-        return Path(path).read_text(encoding="utf-8", errors="replace")
+        return self._provider.read_text(path)
 
     def read_xml_text(self, path):
-        reader = getattr(self._provider, "read_xml_text", None)
-        if callable(reader):
-            return reader(path)
-        return Path(path).read_bytes().decode(
-            "windows-1251",
-            errors="replace",
-        )
+        return self._provider.read_xml_text(path)
 
     def color_definitions(self, forest, overlay=None, config_dir=None):
-        forest = unwrap_forest(forest)
-        provider = getattr(self._provider, "color_definitions", None)
-        if callable(provider):
-            return provider(
-                forest,
-                overlay=overlay,
-                config_dir=config_dir,
-            )
-        return {}
+        return self._provider.color_definitions(
+            unwrap_forest(forest),
+            overlay=overlay,
+            config_dir=config_dir,
+        )
 
     def ltx_section_at_line(self, text, line_number):
         return self._provider.ltx_section_at_line(text, line_number)
@@ -331,22 +326,11 @@ class CoreApiAdapter:
         )
 
     def ensure_prebuild(self, forest=None, config_dir=None, overlay=None):
-        forest = unwrap_forest(forest)
-        fn = getattr(self._provider, "ensure_prebuild", None)
-        if callable(fn):
-            return fn(
-                forest,
-                config_dir,
-                overlay=overlay,
-            )
-        if forest is not None and config_dir is not None:
-            self._provider.start_prebuild(
-                forest,
-                config_dir,
-                overlay=overlay,
-            )
-            return True
-        return False
+        return self._provider.ensure_prebuild(
+            unwrap_forest(forest),
+            config_dir,
+            overlay=overlay,
+        )
 
     def prebuild_status(self):
         return self._provider.prebuild_status()
@@ -360,61 +344,33 @@ class CoreApiAdapter:
     # --- резолвер и сборка ------------------------------------------------
 
     def run_resolver(self, forest, config_dir, log=None):
-        forest = unwrap_forest(forest)
-        fn = getattr(self._provider, "run_resolver", None)
-        if callable(fn):
-            return fn(forest, config_dir, log=log)
-
-        resolver = getattr(self._provider, "resolver", None)
-        if resolver is not None:
-            return resolver.run_pass(forest, config_dir, log=log)
-
-        return self._provider.resolver_pass(forest, config_dir, log=log)
+        return self._provider.run_resolver(
+            unwrap_forest(forest),
+            config_dir,
+            log=log,
+        )
 
     def assemble_text(self, root_path, forest, config_dir, log=None,
                       overlay=None):
-        forest = unwrap_forest(forest)
-        fn = getattr(self._provider, "assemble_text", None)
-        if callable(fn):
-            return fn(
-                root_path,
-                forest,
-                config_dir,
-                log=log,
-                overlay=overlay,
-            )
-
-        return self._provider.resolver.assemble_text(
+        return self._provider.assemble_text(
             root_path,
-            forest,
+            unwrap_forest(forest),
             config_dir,
             log=log,
             overlay=overlay,
         )
 
     def assemble_to_file(self, root_path, forest):
-        forest = unwrap_forest(forest)
-        fn = getattr(self._provider, "assemble_to_file", None)
-        if callable(fn):
-            return fn(root_path, forest)
-
-        return self._provider.assembly.assemble_to_file(root_path, forest)
+        return self._provider.assemble_to_file(
+            root_path,
+            unwrap_forest(forest),
+        )
 
     def assemble_resolved(self, root_path, forest, config_dir, log=None,
                           overlay=None):
-        forest = unwrap_forest(forest)
-        fn = getattr(self._provider, "assemble_resolved", None)
-        if callable(fn):
-            return fn(
-                root_path,
-                forest,
-                config_dir,
-                log=log,
-                overlay=overlay,
-            )
-        return self._provider.resolver.assemble_resolved(
+        return self._provider.assemble_resolved(
             root_path,
-            forest,
+            unwrap_forest(forest),
             config_dir,
             log=log,
             overlay=overlay,
@@ -681,18 +637,10 @@ class CoreApiAdapter:
         ).children
 
     def open_external_editor(self, path):
-        for name in ("open_external_editor", "open_notepad", "open_in_notepad"):
-            fn = getattr(self._provider, name, None)
-            if callable(fn):
-                return fn(path)
-        return False, "Внешний редактор не настроен."
+        return self._provider.open_external_editor(path)
 
     def open_with_shell(self, path):
-        for name in ("open_with_shell", "open_shell", "open_path"):
-            fn = getattr(self._provider, name, None)
-            if callable(fn):
-                return fn(path)
-        return False, "Открытие средствами оболочки не настроено."
+        return self._provider.open_with_shell(path)
 
 
 # ---------------------------------------------------------------- events
@@ -1594,6 +1542,7 @@ def _to_graph_node_view(node) -> GraphNode:
         resolved=bool(getattr(node, "resolved", False)),
         target_path=target_path,
         physical_path=physical_path,
+        materialized=bool(getattr(node, "materialized", False)),
         related_file_path=related_file_path,
         related_line=related_line,
         related_resolved=bool(

@@ -104,6 +104,8 @@ class PatchPlan:
     config_dir: Optional[Path] = None
     patch_target_dir: str = "configs"   # configs | scripts
     after_text: str = ""
+    # Двоичные ресурсы: выбранный модулем способ записи (сейчас override).
+    asset_mode: str = ""
 
     @property
     def is_xml(self) -> bool:

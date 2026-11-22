@@ -101,6 +101,7 @@ class ModuleContext:
         services,
         paths,
         module_name=None,
+        section_graph_contributors=None,
     ):
         from .adapters import (
             CommandApiAdapter,
@@ -120,7 +121,16 @@ class ModuleContext:
         self.commands = CommandApiAdapter.wrap(commands)
         self.ui = UiApiAdapter.wrap(ui)
         self.tasks = TaskApiAdapter.wrap(tasks)
-        self.services = CoreApiAdapter.wrap(services)
+        if section_graph_contributors is None:
+            section_graph_contributors = getattr(
+                services,
+                "section_graph_contributors",
+                None,
+            )
+        self.services = CoreApiAdapter.wrap(
+            services,
+            contributors=section_graph_contributors,
+        )
         self.paths = paths
 
         events_binder = getattr(self.events, "bind_scope", None)

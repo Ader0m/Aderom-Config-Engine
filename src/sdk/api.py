@@ -217,6 +217,10 @@ class ProjectAssetType:
     label: str
     extensions: tuple[str, ...]
     vfs_root: str
+    # Необязательная настройка проекта, выбирающая способ записи
+    # ресурса в патч-мод. Пустая строка — тип не имеет режимов.
+    save_mode_setting: str = ""
+    save_modes: tuple[str, ...] = ("override",)
 
 
 @dataclass(frozen=True)
@@ -257,6 +261,16 @@ class ProjectSetting:
     default: object = None
     choices: tuple[ProjectSettingChoice, ...] = ()
     description: str = ""
+
+
+@dataclass(frozen=True)
+class PatchTargetInfo:
+    """Цель патча и все кандидаты, если корень неоднозначен."""
+
+    root_path: Optional[Path]
+    candidates: tuple[Path, ...] = field(default_factory=tuple)
+    reason: str = ""
+    ambiguous: bool = False
 
 
 @dataclass(frozen=True)
@@ -325,6 +339,8 @@ class GraphNode:
     # отличаться от target_path, если тот получен через VFS (MO2/usvfs)
     # или собран junction-ами.
     physical_path: Optional[Path] = None
+    # True — physical_path является временной копией VFS-ресурса.
+    materialized: bool = False
     # Объявление связанной секции (родителя): файл, строка и признак
     # того, что строка относится к результату резолва.
     related_file_path: Optional[Path] = None
@@ -698,8 +714,19 @@ class CoreApi(Protocol):
     def add_virtual_file(self, forest: ForestRef, path: Path, text: str) -> bool:
         """Добавить новый черновик в уже построенное дерево VFS."""
 
+    def patch_target_info(
+        self,
+        forest: ForestRef,
+        path: Path,
+    ) -> PatchTargetInfo:
+        """Полная информация о цели патча: корень и кандидаты."""
+
     def patch_target(self, forest: ForestRef, path: Path) -> Optional[Path]:
-        """Базовый файл, к которому применяется DLTX-патч."""
+        """Базовый файл, к которому применяется DLTX-патч.
+
+        ``None`` означает, что корень не найден или неоднозначен;
+        подробности — в :meth:`patch_target_info`.
+        """
 
     def read_text(self, path: Path) -> str:
         """Прочитать текстовый файл средствами ядра."""

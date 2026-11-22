@@ -119,6 +119,52 @@ class ProjectAssetDraftTest(unittest.TestCase):
             self.assertEqual(len(written), 1)
             self.assertEqual(written[0].read_bytes(), b"NEW-OGG")
 
+    def test_asset_save_mode_is_read_from_project_setting(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "gamedata" / "configs"
+            cfg.mkdir(parents=True)
+            root = cfg / "system.ltx"
+            root.write_text("[system]\n", encoding="windows-1251")
+            sounds = Path(d) / "gamedata" / "sounds"
+            sounds.mkdir(parents=True)
+            ogg = sounds / "a.ogg"
+            ogg.write_bytes(b"OLD")
+
+            registry = ProjectAssetRegistry()
+            registry.register(
+                ProjectAssetType(
+                    key="sound.ogg",
+                    label="Звук Ogg Vorbis",
+                    extensions=(".ogg",),
+                    vfs_root="sounds",
+                    save_mode_setting="sound.save_mode",
+                    save_modes=("override",),
+                )
+            )
+            service = ProjectService(
+                Path(d) / "projects",
+                asset_registry=registry,
+            )
+            service.create("Sounds")
+            forest = FakeForest(cfg, [root])
+            service.update_asset_draft(ogg, b"NEW")
+
+            service.set_module_setting("sound.save_mode", "override")
+            preview = service.build_preview(None, forest)
+            item = next(
+                item for item in preview.items if item.kind == "asset"
+            )
+            self.assertTrue(item.ok, item.error)
+            self.assertEqual(item.plan.asset_mode, "override")
+
+            service.set_module_setting("sound.save_mode", "unknown")
+            preview = service.build_preview(None, forest)
+            item = next(
+                item for item in preview.items if item.kind == "asset"
+            )
+            self.assertFalse(item.ok)
+            self.assertIn("Неизвестный режим", item.error)
+
     def test_asset_outside_sounds_is_rejected_in_preview(self):
         with tempfile.TemporaryDirectory() as d:
             cfg = Path(d) / "gamedata" / "configs"

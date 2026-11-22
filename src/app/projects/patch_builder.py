@@ -26,6 +26,7 @@ from core import (
     VerificationCheck,
     VerificationResult,
     analyze_multiline_edit,
+    game_root_from_scan_dir,
     merge_patch_plans,
 )
 
@@ -257,11 +258,9 @@ class ProjectPreviewMixin:
         if not str(scan_dir):
             raise ProjectError("Не определён каталог gamedata/configs")
 
-        game_root = (
-            scan_dir.parent
-            if scan_dir.name.lower() == "configs"
-            else scan_dir
-        )
+        game_root = game_root_from_scan_dir(scan_dir)
+        if game_root is None:
+            raise ProjectError("Не определён каталог gamedata")
 
         try:
             return self.asset_registry.relative_for_path(game_root, path)
@@ -283,6 +282,32 @@ class ProjectPreviewMixin:
                 error=str(exc),
                 kind="asset",
                 draft=None,
+                rollback_paths=(Path(draft.path),),
+            )
+
+        save_mode = "override"
+        setting_key = getattr(asset_type, "save_mode_setting", "")
+        if setting_key:
+            save_mode = str(
+                project.module_setting(setting_key, "override")
+                or "override"
+            ).strip().lower()
+        allowed_modes = tuple(
+            getattr(asset_type, "save_modes", ()) or ("override",)
+        )
+        if save_mode not in allowed_modes:
+            return PreviewItem(
+                title=title,
+                source_path=Path(draft.path),
+                plan=None,
+                generated=None,
+                error=(
+                    "Неизвестный режим записи ресурса %s: %s"
+                    % (asset_type.label, save_mode)
+                ),
+                kind="asset",
+                draft=draft,
+                notes=("Допустимые режимы: %s" % ", ".join(allowed_modes),),
                 rollback_paths=(Path(draft.path),),
             )
 
@@ -308,6 +333,7 @@ class ProjectPreviewMixin:
             preview="",
             format="asset",
             patch_target_dir=asset_type.vfs_root,
+            asset_mode=save_mode,
         )
         view_text = ""
         reader_notes = []
@@ -356,6 +382,7 @@ class ProjectPreviewMixin:
             draft=None,
             notes=(
                 "Тип: %s" % asset_type.label,
+                "Режим: %s" % save_mode,
                 "Ресурс: %s" % patch_rel,
                 "Размер: %d байт" % len(draft.current_bytes),
                 "Новый файл" if draft.is_new else "Замена существующего файла",

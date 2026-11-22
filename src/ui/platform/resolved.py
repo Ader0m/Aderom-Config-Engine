@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import inspect
 import time
 from pathlib import Path
 
@@ -12,30 +11,6 @@ from app.projects import ProjectError
 from PyQt5.QtCore import QTimer
 from sdk.api import ItemCardRequest, ResolvedDraftInfo
 from sdk.events import Events
-
-
-def _call_with_overlay(func, *args, overlay=None, **kwargs):
-    """Передать ``overlay`` только тем поставщикам, которые его знают.
-
-    Тестовые и сторонние реализации сервиса могут сохранять старую
-    подпись; платформа не должна падать из-за нового необязательного
-    аргумента.
-    """
-    if overlay is None:
-        return func(*args, **kwargs)
-
-    try:
-        parameters = inspect.signature(func).parameters
-    except (TypeError, ValueError):
-        parameters = {}
-
-    accepts = "overlay" in parameters or any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters.values()
-    )
-    if accepts:
-        kwargs["overlay"] = overlay
-    return func(*args, **kwargs)
 
 
 class ResolvedDocumentMixin:
@@ -812,15 +787,9 @@ class ResolvedDocumentMixin:
         )
 
         block = document.section_block(section)
-        builder = getattr(
-            self.services,
-            "build_item_entry_from_block",
-            None,
-        )
-        if block is not None and callable(builder):
+        if block is not None:
             block_text, offset = block
-            return _call_with_overlay(
-                builder,
+            return self.services.build_item_entry_from_block(
                 self._forest,
                 block_text,
                 section,
@@ -828,8 +797,7 @@ class ResolvedDocumentMixin:
                 overlay=overlay,
             )
 
-        return _call_with_overlay(
-            self.services.build_item_entry,
+        return self.services.build_item_entry(
             self._forest,
             document.current_text,
             section,

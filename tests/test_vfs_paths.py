@@ -7,7 +7,12 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from core.tools.vfs import clear_cache, resolve_physical_path
+from core.tools.vfs import (
+    clear_cache,
+    configure_materialize_root,
+    is_materialized_path,
+    resolve_physical_path,
+)
 
 
 class VfsPathsTest(unittest.TestCase):
@@ -50,6 +55,27 @@ class VfsPathsTest(unittest.TestCase):
         self.assertEqual(resolved.read_bytes(), b"DDS content")
         self.assertTrue(resolved.is_file())
         self.assertEqual(path.read_bytes(), b"DDS content")
+
+    def test_materialize_uses_configured_portable_root(self):
+        configured = self.root / "generated" / "assets"
+        default = Path(tempfile.gettempdir()) / "ace_assets"
+        configure_materialize_root(configured)
+        self.addCleanup(configure_materialize_root, default)
+        self.addCleanup(clear_cache)
+
+        path = self.root / "ui" / "icon.dds"
+        path.parent.mkdir()
+        path.write_bytes(b"DDS content")
+
+        resolved = resolve_physical_path(path, materialize=True)
+
+        self.assertIsNotNone(resolved)
+        self.assertTrue(is_materialized_path(resolved))
+        self.assertIn(
+            str(configured.resolve()),
+            str(resolved.resolve()),
+        )
+        self.assertFalse(is_materialized_path(path))
 
     @unittest.skipUnless(hasattr(os, "symlink"), "symlink недоступен")
     def test_symlink_resolves_to_target(self):

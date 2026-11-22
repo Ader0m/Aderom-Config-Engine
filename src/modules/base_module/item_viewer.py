@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-import inspect
 import logging
 import re
 from pathlib import Path
@@ -280,23 +279,6 @@ def _placeholder_pixmap(color: str, size: int = PLACEHOLDER_SIZE) -> QPixmap:
     return pixmap
 
 
-def _call_with_overlay(func, *args, overlay=None, **kwargs):
-    """Передать ``overlay`` только тем сервисам, которые его понимают."""
-    if overlay is not None:
-        try:
-            parameters = inspect.signature(func).parameters
-        except (TypeError, ValueError):
-            parameters = {}
-
-        accepts = "overlay" in parameters or any(
-            parameter.kind == inspect.Parameter.VAR_KEYWORD
-            for parameter in parameters.values()
-        )
-        if accepts:
-            kwargs["overlay"] = overlay
-    return func(*args, **kwargs)
-
-
 def _call_async_text_save(
     writer,
     path,
@@ -307,18 +289,7 @@ def _call_async_text_save(
     """Вызвать асинхронную запись, передав необязательный original_text."""
     kwargs = {"on_done": on_done}
     if original_text is not None:
-        try:
-            parameters = inspect.signature(writer).parameters
-        except (TypeError, ValueError):
-            parameters = {}
-
-        accepts = "original_text" in parameters or any(
-            parameter.kind == inspect.Parameter.VAR_KEYWORD
-            for parameter in parameters.values()
-        )
-        if accepts:
-            kwargs["original_text"] = original_text
-
+        kwargs["original_text"] = original_text
     return bool(writer(path, text, **kwargs))
 
 
@@ -942,8 +913,7 @@ class ItemViewerFeature:
                 )
                 original = draft.original_text or original_text
                 saved = draft.saved_text
-                catalog = _call_with_overlay(
-                    self.ctx.services.build_item_catalog,
+                catalog = self.ctx.services.build_item_catalog(
                     forest,
                     log=log,
                     resolved_text=text,
@@ -955,8 +925,7 @@ class ItemViewerFeature:
                 original = original_text
                 saved = original_text
                 if original_text:
-                    catalog = _call_with_overlay(
-                        self.ctx.services.build_item_catalog,
+                    catalog = self.ctx.services.build_item_catalog(
                         forest,
                         log=log,
                         resolved_text=original_text,
@@ -964,8 +933,7 @@ class ItemViewerFeature:
                         overlay=overlay,
                     )
                 else:
-                    catalog = _call_with_overlay(
-                        self.ctx.services.build_item_catalog,
+                    catalog = self.ctx.services.build_item_catalog(
                         forest,
                         log=log,
                         overlay=overlay,
@@ -1321,8 +1289,7 @@ class ItemViewerFeature:
         overlay = self._project_overlay()
 
         def work(_log):
-            return _call_with_overlay(
-                builder,
+            return builder(
                 forest,
                 text,
                 section,
