@@ -66,3 +66,8 @@
 
 - [ADR-15](ADR-15-snapshot-cache.md) — снимок VFS, единый кэш и
   идентичность путей.
+
+Решения Этапа 3:
+
+- [ADR-16](ADR-16-project-schema-migration.md) — схема проекта,
+  `ProjectRepository` и one-time migration.

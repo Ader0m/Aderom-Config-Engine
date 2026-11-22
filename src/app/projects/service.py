@@ -54,6 +54,15 @@ from .assets import (
     ProjectAssetTypeError,
 )
 from .readers import FileReaderError, ProjectFileReaderRegistry
+from .repository import (
+    ASSETS_DIR as PROJECT_ASSETS_DIR,
+    DRAFTS_DIR as PROJECT_DRAFTS_DIR,
+    META_NAME as PROJECT_META_NAME,
+    RESOLVED_DIR as PROJECT_RESOLVED_DIR,
+    TABS_NAME as PROJECT_TABS_NAME,
+    ProjectRepository,
+    write_json_atomic,
+)
 
 
 from .patch_builder import ProjectPreviewMixin
@@ -113,13 +122,13 @@ def _unpack_text(value, default="") -> str:
 class ProjectService(ProjectPreviewMixin):
     """Хранилище проектов и черновиков."""
 
-    META_NAME = "project.json"
-    DRAFTS_DIR = "drafts"
-    RESOLVED_DIR = "resolved"
-    ASSETS_DIR = "assets"
+    META_NAME = PROJECT_META_NAME
+    DRAFTS_DIR = PROJECT_DRAFTS_DIR
+    RESOLVED_DIR = PROJECT_RESOLVED_DIR
+    ASSETS_DIR = PROJECT_ASSETS_DIR
     ROOTS_NAME = "project_roots.json"
     # Сессия редактора: какие вкладки были открыты при прошлом закрытии.
-    TABS_NAME = "tabs.json"
+    TABS_NAME = PROJECT_TABS_NAME
     TABS_VERSION = 1
 
     PREVIEW_CACHE_SIZE = 128
@@ -142,6 +151,7 @@ class ProjectService(ProjectPreviewMixin):
     ):
         self.base_dir = Path(base_dir).resolve()
         self.base_dir.mkdir(parents=True, exist_ok=True)
+        self.repository = ProjectRepository()
         self._project_roots = self._load_project_roots()
         self.active: Optional[Project] = None
         # Нельзя использовать ``or``: пустой реестр — валидный объект,
@@ -411,15 +421,22 @@ class ProjectService(ProjectPreviewMixin):
             drafts={},
         )
         self.active = project
-        self._write_meta(project)
+        self.repository.write_meta(project)
         return project
 
     def load(self, project_id: str) -> Project:
         root_dir = self._project_dir(project_id)
-        meta_path = root_dir / self.META_NAME
+        meta = self.repository.read_meta(root_dir)
+        self.repository.validate_meta(meta)
 
-        if not meta_path.is_file():
-            raise ProjectError("Проект не найден: %s" % project_id)
+        save_mode = normalize_save_mode(meta["save_mode"])
+        xml_patch_mode = str(meta["xml_patch_mode"]).lower()
+        if xml_patch_mode not in ("dxml_lua", "xml", "xml_override"):
+            raise ProjectError("Неизвестный режим XML-патча: %s" % xml_patch_mode)
+        # Схема переводится только после проверки: повреждённый или
+        # чужой проект не перезаписывается. Ошибка чтения, проверки или
+        # миграции не закрывает уже активный проект.
+        meta = self.repository.ensure_current(root_dir, meta)
 
         if self.active is not None:
             self.close()
@@ -427,15 +444,6 @@ class ProjectService(ProjectPreviewMixin):
         self.invalidate_preview_cache()
         self._resolved_draft_files.clear()
         self._clear_overlay_cache()
-        try:
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise ProjectError("Не удалось прочитать проект: %s" % exc)
-
-        save_mode = normalize_save_mode(meta["save_mode"])
-        xml_patch_mode = str(meta["xml_patch_mode"]).lower()
-        if xml_patch_mode not in ("dxml_lua", "xml", "xml_override"):
-            raise ProjectError("Неизвестный режим XML-патча: %s" % xml_patch_mode)
 
         module_settings = {}
         raw_settings = meta.get("module_settings") or {}
@@ -517,12 +525,9 @@ class ProjectService(ProjectPreviewMixin):
                 entries.append(entry)
 
         for entry in sorted(entries, key=lambda item: str(item).lower()):
-            meta_path = entry / self.META_NAME
-            if not meta_path.is_file():
-                continue
             try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            except Exception:
+                meta = self.repository.read_meta(entry)
+            except ProjectError:
                 continue
 
             drafts_dir = entry / self.DRAFTS_DIR
@@ -537,6 +542,7 @@ class ProjectService(ProjectPreviewMixin):
                 draft_count += len(list(assets_dir.glob("*.json")))
 
             try:
+                self.repository.validate_meta(meta)
                 project_id = str(meta["id"])
                 project_name = str(meta["name"])
                 save_mode = normalize_save_mode(meta["save_mode"])
@@ -546,7 +552,7 @@ class ProjectService(ProjectPreviewMixin):
             except (KeyError, TypeError, ProjectError) as exc:
                 log.warning(
                     "Проект: пропущен %s: %s",
-                    meta_path,
+                    entry / self.META_NAME,
                     exc,
                 )
                 continue
@@ -590,7 +596,7 @@ class ProjectService(ProjectPreviewMixin):
 
         project.save_mode = mode
         self.invalidate_preview_cache()
-        self._write_meta(project)
+        self.repository.write_meta(project)
         return project
 
     def set_xml_patch_mode(self, mode: str) -> Project:
@@ -602,7 +608,7 @@ class ProjectService(ProjectPreviewMixin):
 
         project.xml_patch_mode = mode
         self.invalidate_preview_cache()
-        self._write_meta(project)
+        self.repository.write_meta(project)
         return project
 
     def module_setting(self, key, default=None):
@@ -626,7 +632,7 @@ class ProjectService(ProjectPreviewMixin):
 
         project.module_settings[key] = value
         self.invalidate_preview_cache()
-        self._write_meta(project)
+        self.repository.write_meta(project)
         return value
 
     # -------------------------------------------------- сессия вкладок
@@ -685,7 +691,7 @@ class ProjectService(ProjectPreviewMixin):
             "tabs": records,
         }
         with self._write_lock:
-            self._write_json_atomic(self._tabs_path(project), payload)
+            write_json_atomic(self._tabs_path(project), payload)
         return True
 
     def load_tabs(self) -> List[dict]:
@@ -1475,23 +1481,6 @@ class ProjectService(ProjectPreviewMixin):
             raise ProjectError("Проект не создан")
         return self.active
 
-    def _write_meta(self, project: Project) -> None:
-        project.root_dir.mkdir(parents=True, exist_ok=True)
-        data = {
-            "id": project.id,
-            "name": project.name,
-            "created_at": project.created_at,
-            "modules": list(project.modules),
-            "save_mode": project.save_mode,
-            "xml_patch_mode": project.xml_patch_mode,
-            "module_settings": dict(project.module_settings),
-        }
-        with self._write_lock:
-            self._write_json_atomic(
-                project.root_dir / self.META_NAME,
-                data,
-            )
-
     def _write_draft(self, project: Project, draft: ProjectDraft) -> None:
         target = (
             project.root_dir
@@ -1538,7 +1527,7 @@ class ProjectService(ProjectPreviewMixin):
             data["saved_b64"] = base64.b64encode(saved).decode("ascii")
         target = assets_dir / self._asset_draft_filename(draft.path)
         with self._write_lock:
-            self._write_json_atomic(target, data)
+            write_json_atomic(target, data)
 
     def _read_asset_draft(
         self,
@@ -1633,7 +1622,7 @@ class ProjectService(ProjectPreviewMixin):
                 target = resolved_dir / self._resolved_draft_filename(draft)
 
         with self._write_lock:
-            self._write_json_atomic(target, data)
+            write_json_atomic(target, data)
         with self._state_lock:
             self._resolved_draft_files[key] = target
 
@@ -1822,28 +1811,6 @@ class ProjectService(ProjectPreviewMixin):
             0 < index <= len(parsed) and parsed[index - 1] or None
             for index in ids
         )
-
-    @staticmethod
-    def _write_json_atomic(target: Path, data) -> None:
-        """Записать JSON через временный файл и os.replace."""
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(
-            target.name
-            + ".tmp.%d.%d" % (os.getpid(), threading.get_ident())
-        )
-        try:
-            tmp.write_text(
-                json.dumps(data, ensure_ascii=False),
-                encoding="utf-8",
-            )
-            os.replace(str(tmp), str(target))
-        except Exception:
-            try:
-                if tmp.is_file():
-                    tmp.unlink()
-            except OSError:
-                pass
-            raise
 
     def _read_draft(self, draft_path: Path) -> Optional[ProjectDraft]:
         try:

@@ -24,6 +24,10 @@ from .service import (
     SavedDraft,
     normalize_save_mode,
 )
+from .repository import (
+    PROJECT_SCHEMA_VERSION,
+    ProjectRepository,
+)
 from .settings import (
     ProjectSettingError,
     ProjectSettingsRegistry,
@@ -34,6 +38,7 @@ __all__ = [
     "FileReaderError",
     "FileReaderSubscription",
     "PreviewItem",
+    "PROJECT_SCHEMA_VERSION",
     "Project",
     "ProjectAssetDraft",
     "ProjectAssetRegistry",
@@ -43,6 +48,7 @@ __all__ = [
     "ProjectFileReaderRegistry",
     "ProjectInfo",
     "ProjectPatchPreview",
+    "ProjectRepository",
     "ProjectResolvedDraft",
     "ProjectService",
     "ProjectSettingError",
