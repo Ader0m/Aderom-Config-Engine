@@ -1,0 +1,93 @@
+{
+  "date": "2026-11-22T15:08:18",
+  "python": "3.10.9",
+  "configs": "H:\\GRA2.5_work\\Anomaly 1.5.3 up\\gamedata\\configs",
+  "counts": {
+    "ltx": 3129,
+    "xml": 668,
+    "roots": 3183,
+    "system_tree_files": 490,
+    "resolver_sections": 11870,
+    "resolved_chars": 35747765,
+    "declared_sections": 11870
+  },
+  "timings_ms": {
+    "tree_build": 1552.9,
+    "resolver_pass": 1091.5,
+    "assemble_system": 1599.2,
+    "assemble_disk_cold": 1716.3,
+    "assemble_disk_warm": 1.7,
+    "section_parse": 3027.4,
+    "section_lookup": 0.0,
+    "patch_preview": 1286.0
+  },
+  "disk_cache": {
+    "cold_ms": 1716.3,
+    "warm_ms": 1.7,
+    "chars": 35747765
+  },
+  "section": {
+    "name": "stalker",
+    "found": true
+  },
+  "manifest": {
+    "path": "docs\\baseline\\stage0-manifest.json",
+    "signature": "a51949c88bb57f77e20459487a60aa4dec88c06f5f4dcbf917c19d7c488be557",
+    "sections": 11870,
+    "keys": 527371
+  },
+  "preview": {
+    "available": true,
+    "source": "H:\\GRA2.5_work\\Anomaly 1.5.3 up\\gamedata\\configs\\creatures\\m_stalker.ltx",
+    "items": 1,
+    "ok_items": 1
+  },
+  "memory_mb": {
+    "start": {
+      "rss_mb": 22.0,
+      "peak_rss_mb": 22.0
+    },
+    "after_tree": {
+      "rss_mb": 34.3,
+      "peak_rss_mb": 35.0
+    },
+    "after_resolver": {
+      "rss_mb": 52.8,
+      "peak_rss_mb": 91.9
+    },
+    "after_assemble": {
+      "rss_mb": 130.8,
+      "peak_rss_mb": 227.4
+    },
+    "after_disk_cache": {
+      "rss_mb": 136.6,
+      "peak_rss_mb": 292.6
+    },
+    "after_section": {
+      "rss_mb": 400.2,
+      "peak_rss_mb": 404.4
+    },
+    "after_preview": {
+      "rss_mb": 405.9,
+      "peak_rss_mb": 436.2
+    }
+  },
+  "ui": {
+    "tree_task": {
+      "elapsed_ms": 1575.5,
+      "available": true,
+      "ticks": 98,
+      "max_gap_ms": 21.9,
+      "p95_gap_ms": 16.9
+    },
+    "prebuild": {
+      "elapsed_ms": 1690.0,
+      "timed_out": false,
+      "error": null,
+      "available": true,
+      "ticks": 98,
+      "max_gap_ms": 137.9,
+      "p95_gap_ms": 21.0
+    }
+  }
+}

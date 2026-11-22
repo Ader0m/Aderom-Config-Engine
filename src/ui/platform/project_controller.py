@@ -30,6 +30,7 @@ from ..project_dialogs import (
     ProjectPreviewDialog,
     ProjectSettingsDialog,
 )
+from .feature_flags import patch_write_enabled
 
 
 logger = logging.getLogger(__name__)
@@ -1531,10 +1532,17 @@ class ProjectControllerMixin:
             self.window,
             on_write=self.write_preview,
             on_rollback=self.rollback_preview_item,
+            write_enabled=patch_write_enabled(),
         )
         dialog.exec_()
 
     def write_preview(self, preview):
+        if not patch_write_enabled():
+            self.show_error(
+                "Запись патчей отключена до Этапа 5: "
+                "доступен только предпросмотр."
+            )
+            return False
         if self._forest is None:
             self.show_error("Нет построенного дерева.")
             return False

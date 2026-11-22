@@ -28,6 +28,7 @@ from .diagnostics import DiagnosticsLog
 from .editor_tabs import EditorTabs
 from .file_open_router import TextEditorHandler
 from .file_tree import FileTreeWidget
+from .platform.feature_flags import PATCH_WRITE_EXPERIMENTAL
 from .prebuild_panel import PrebuildPanel
 from .search_bar import SearchBar
 
@@ -249,6 +250,19 @@ class MainWindow(QMainWindow):
 
         self.prebuild_panel = PrebuildPanel(self)
         self.statusBar().addPermanentWidget(self.prebuild_panel)
+
+        self.patch_write_label = QLabel()
+        if PATCH_WRITE_EXPERIMENTAL:
+            self.patch_write_label.setText("Запись патчей: экспериментальная")
+            self.patch_write_label.setToolTip(
+                "Запись включена в экспериментальном режиме."
+            )
+        else:
+            self.patch_write_label.setText("Запись патчей: выключена")
+            self.patch_write_label.setToolTip(
+                "До Этапа 5 доступен только предпросмотр патча."
+            )
+        self.statusBar().addPermanentWidget(self.patch_write_label)
 
         self._prebuild_timer = QTimer(self)
         self._prebuild_timer.setInterval(250)

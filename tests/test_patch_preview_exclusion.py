@@ -69,7 +69,11 @@ class PatchPreviewExclusionTest(unittest.TestCase):
             captured["preview"] = updated
             return False
 
-        dialog = ProjectPreviewDialog(preview, on_write=on_write)
+        dialog = ProjectPreviewDialog(
+            preview,
+            on_write=on_write,
+            write_enabled=True,
+        )
         dialog._toggle_excluded(dialog.list.item(0))
         dialog._write()
 

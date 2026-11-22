@@ -1,11 +1,27 @@
 # -*- coding: utf-8 -*-
-"""Проверка границ слоёв по импортам."""
+"""Проверка границ слоёв по импортам.
+
+Правила матрицы импортов — docs/Целевая архитектура приложения.md, §3.3.
+Текущие legacy-исключения зафиксированы в tests/architecture_allowlist.py
+и docs/Миграционные исключения.md. Новые исключения добавляет только
+оператор.
+"""
 
 import ast
+import tempfile
+import threading
 import unittest
 import warnings
 from pathlib import Path
 
+from tests.architecture_allowlist import (
+    APP_SDK_IMPORT_ALLOWLIST,
+    CORE_PUBLIC_NAMES,
+    MODULES_PACKAGE_IMPORTERS,
+    QT_WIDGETS_COMPOSITION_ROOTS,
+    SDK_PUBLIC_NAMES,
+    UI_CORE_IMPORT_ALLOWLIST,
+)
 from tests.support import SRC
 
 ROOT = Path(SRC)
@@ -26,8 +42,8 @@ def _parse(path):
         return ast.parse(path.read_text(encoding="utf-8-sig"))
 
 
-def _package_parts(path):
-    rel = path.relative_to(ROOT).with_suffix("")
+def _package_parts(path, root=ROOT):
+    rel = path.relative_to(root).with_suffix("")
     parts = list(rel.parts)
     if parts and parts[-1] == "__init__":
         parts = parts[:-1]
@@ -50,16 +66,16 @@ def _resolve_relative(package_parts, level, module):
     return parts
 
 
-def _imports(path):
-    """Возвращает корневые имена всех импортов, включая относительные."""
+def _import_names(path, root=ROOT):
+    """Возвращает полные имена всех импортов, включая относительные."""
     tree = _parse(path)
-    package_parts = _package_parts(path)
-    roots = set()
+    package_parts = _package_parts(path, root)
+    names = set()
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                roots.add(alias.name.split(".")[0])
+                names.add(alias.name)
 
         elif isinstance(node, ast.ImportFrom):
             if node.level:
@@ -69,17 +85,19 @@ def _imports(path):
                     node.module,
                 )
                 if base:
-                    roots.add(base[0])
+                    names.add(".".join(base))
                 # ``from . import core`` импортирует подмодули пакета,
-                # а не обязательно внешний core, но проверить корень
-                # всё равно полезно на случай выхода за пределы пакета.
+                # а не обязательно внешний core. Проверяем оба варианта.
                 if node.module is None:
                     for alias in node.names:
-                        candidate = base + alias.name.split(".")
-                        if candidate:
-                            roots.add(candidate[0])
+                        names.add(".".join(base + [alias.name]))
+                else:
+                    for alias in node.names:
+                        names.add(".".join(base + [alias.name]))
             elif node.module:
-                roots.add(node.module.split(".")[0])
+                names.add(node.module)
+                for alias in node.names:
+                    names.add(node.module + "." + alias.name)
 
         elif isinstance(node, ast.Call):
             func = node.func
@@ -96,9 +114,60 @@ def _imports(path):
                 continue
             arg = node.args[0]
             if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                roots.add(arg.value.split(".")[0])
+                names.add(arg.value)
 
-    return roots
+    return {name for name in names if name}
+
+
+def _imports(path, root=ROOT):
+    """Возвращает корневые имена всех импортов, включая относительные."""
+    return {
+        name.split(".")[0]
+        for name in _import_names(path, root)
+    }
+
+
+def _module_targets(path, root=ROOT):
+    """Возвращает только целевые модули импорта, без импортируемых имён."""
+    tree = _parse(path)
+    package_parts = _package_parts(path, root)
+    targets = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                targets.add(alias.name)
+
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = _resolve_relative(
+                    package_parts,
+                    node.level,
+                    node.module,
+                )
+                if base:
+                    targets.add(".".join(base))
+            elif node.module:
+                targets.add(node.module)
+
+        elif isinstance(node, ast.Call):
+            func = node.func
+            is_dunder_import = (
+                isinstance(func, ast.Name) and func.id == "__import__"
+            )
+            is_import_module = (
+                isinstance(func, ast.Attribute)
+                and func.attr == "import_module"
+            )
+            if not (is_dunder_import or is_import_module):
+                continue
+            if not node.args:
+                continue
+            arg = node.args[0]
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                targets.add(arg.value)
+
+    return targets
 
 
 def _files(package):
@@ -112,6 +181,18 @@ def _files(package):
     ]
 
 
+def _all_src_files():
+    return [
+        path
+        for path in ROOT.rglob("*.py")
+        if "__pycache__" not in path.parts
+    ]
+
+
+def _rel(path):
+    return path.relative_to(ROOT).as_posix()
+
+
 class ArchitectureBoundaryTest(unittest.TestCase):
     def test_packages_are_discovered(self):
         for package, known in KNOWN_FILES.items():
@@ -120,31 +201,141 @@ class ArchitectureBoundaryTest(unittest.TestCase):
                 self.assertTrue(files, "не найдены .py файлы в %s" % package)
                 self.assertIn(known, files, "не найден ожидаемый файл %s" % known)
 
-    def test_modules_do_not_import_core_or_ui(self):
+    def test_modules_do_not_import_core_app_platform_or_ui(self):
         for path in _files("modules"):
             roots = _imports(path)
-            self.assertNotIn("core", roots, str(path))
-            self.assertNotIn("ui", roots, str(path))
+            for forbidden in ("core", "app", "platform", "ui"):
+                self.assertNotIn(forbidden, roots, str(path))
 
-    def test_sdk_does_not_import_core_ui_or_modules(self):
+    def test_modules_do_not_import_other_modules(self):
+        for path in _files("modules"):
+            own = path.relative_to(ROOT / "modules").parts[0]
+            for name in _import_names(path):
+                parts = name.split(".")
+                if len(parts) > 1 and parts[0] == "modules":
+                    self.assertEqual(
+                        parts[1],
+                        own,
+                        "модуль %s импортирует чужой пакет: %s"
+                        % (path, name),
+                    )
+
+    def test_sdk_does_not_import_internal_layers(self):
         for path in _files("sdk"):
             roots = _imports(path)
-            self.assertNotIn("core", roots, str(path))
-            self.assertNotIn("ui", roots, str(path))
-            self.assertNotIn("modules", roots, str(path))
+            for forbidden in ("core", "app", "platform", "ui", "modules"):
+                self.assertNotIn(forbidden, roots, str(path))
 
-    def test_app_does_not_import_ui_or_modules(self):
+    def test_app_does_not_import_ui_platform_or_modules(self):
         for path in _files("app"):
             roots = _imports(path)
-            self.assertNotIn("ui", roots, str(path))
-            self.assertNotIn("modules", roots, str(path))
+            for forbidden in ("ui", "platform", "modules"):
+                self.assertNotIn(forbidden, roots, str(path))
 
-    def test_core_does_not_import_ui_sdk_or_modules(self):
+    def test_app_has_no_qt(self):
+        for path in _files("app"):
+            roots = _imports(path)
+            self.assertNotIn("PyQt5", roots, str(path))
+
+    def test_app_imports_sdk_only_from_allowlist(self):
+        for path in _files("app"):
+            for target in _module_targets(path):
+                if target != "sdk" and not target.startswith("sdk."):
+                    continue
+                self.assertIn(
+                    target,
+                    APP_SDK_IMPORT_ALLOWLIST,
+                    "app импортирует sdk вне allowlist: %s -> %s"
+                    % (_rel(path), target),
+                )
+
+    def test_core_and_sdk_have_no_qt(self):
+        for layer in ("core", "sdk"):
+            for path in _files(layer):
+                roots = _imports(path)
+                self.assertNotIn(
+                    "PyQt5",
+                    roots,
+                    "Qt в слое %s: %s" % (layer, path),
+                )
+
+    def test_core_does_not_import_other_layers(self):
         for path in _files("core"):
             roots = _imports(path)
-            self.assertNotIn("ui", roots, str(path))
-            self.assertNotIn("sdk", roots, str(path))
+            for forbidden in ("sdk", "app", "platform", "ui", "modules"):
+                self.assertNotIn(forbidden, roots, str(path))
+
+    def test_ui_core_imports_are_allowlisted(self):
+        found = set()
+        for path in _files("ui"):
+            if "core" not in _imports(path):
+                continue
+            rel = _rel(path)
+            found.add(rel)
+            self.assertIn(
+                rel,
+                UI_CORE_IMPORT_ALLOWLIST,
+                "ui импортирует core вне legacy-исключения: %s" % rel,
+            )
+
+        # Allowlist не должен содержать мёртвых исключений.
+        for rel in UI_CORE_IMPORT_ALLOWLIST:
+            path = ROOT / rel
+            self.assertTrue(path.is_file(), rel)
+            self.assertIn("core", _imports(path), rel)
+
+    def test_ui_does_not_import_modules(self):
+        for path in _files("ui"):
+            if _rel(path) in MODULES_PACKAGE_IMPORTERS:
+                continue
+            roots = _imports(path)
             self.assertNotIn("modules", roots, str(path))
+
+    def test_modules_package_is_imported_only_by_loader(self):
+        for path in _all_src_files():
+            rel = _rel(path)
+            if rel.startswith("modules/"):
+                continue
+            if rel in MODULES_PACKAGE_IMPORTERS:
+                continue
+            for name in _import_names(path):
+                if name == "modules" or name.startswith("modules."):
+                    self.fail(
+                        "импорт пакета modules вне ModuleLoader: %s -> %s"
+                        % (rel, name)
+                    )
+
+        for rel in MODULES_PACKAGE_IMPORTERS:
+            path = ROOT / rel
+            self.assertTrue(path.is_file(), rel)
+            self.assertIn("modules", _imports(path), rel)
+
+    def test_qt_widgets_are_limited_to_ui_and_modules(self):
+        for path in _all_src_files():
+            rel = _rel(path)
+            if (
+                rel.startswith("ui/")
+                or rel.startswith("modules/")
+                or rel in QT_WIDGETS_COMPOSITION_ROOTS
+            ):
+                continue
+            for name in _import_names(path):
+                if name == "PyQt5.QtWidgets" or name.startswith(
+                    "PyQt5.QtWidgets."
+                ):
+                    self.fail(
+                        "PyQt5.QtWidgets вне ui/modules: %s -> %s"
+                        % (rel, name)
+                    )
+
+    def test_public_api_allowlist(self):
+        import core
+        import sdk
+
+        self.assertEqual(set(sdk.__all__), set(SDK_PUBLIC_NAMES))
+        self.assertEqual(set(core.__all__), set(CORE_PUBLIC_NAMES))
+        self.assertEqual(len(sdk.__all__), len(set(sdk.__all__)))
+        self.assertEqual(len(core.__all__), len(set(core.__all__)))
 
     def test_sdk_loader_lives_outside_sdk(self):
         self.assertFalse((ROOT / "sdk" / "loader.py").exists())
@@ -180,6 +371,45 @@ class ArchitectureBoundaryTest(unittest.TestCase):
             _resolve_relative(package_parts, 2, "core"),
             ["modules", "core"],
         )
+
+    def test_import_matrix_detects_artificial_violation(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "src"
+            path = root / "modules" / "base_module" / "broken.py"
+            path.parent.mkdir(parents=True)
+            path.write_text("from core import demo\n", encoding="utf-8")
+
+            self.assertIn("core", _imports(path, root=root))
+
+            clean = root / "modules" / "base_module" / "clean.py"
+            clean.write_text("from . import helper\n", encoding="utf-8")
+            self.assertNotIn("core", _imports(clean, root=root))
+
+    def test_dispatch_is_rejected_from_background_thread(self):
+        from tests.qt_support import qapp
+        from ui.bus import EventBus
+
+        app = qapp()
+        self.assertIsNotNone(app)
+        bus = EventBus()
+        calls = []
+        bus.subscribe(
+            "action",
+            lambda payload: calls.append(payload) or True,
+        )
+
+        result = {}
+
+        def run():
+            result["value"] = bus.dispatch("action", 1)
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join(5)
+
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(result.get("value"))
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

@@ -14,6 +14,9 @@
 | `docs/Текущий режим.md` | Текущий этап, запреты и gaps |
 | `docs/Миграционные исключения.md` | Legacy-карантин |
 | `docs/adr/README.md` | ADR и шаблон решений |
+| `docs/Performance baseline.md` | Точка сравнения производительности Этапа 0 |
+| `docs/baseline/stage0.json` | Машиночитаемый снимок baseline |
+| `docs/baseline/stage0-manifest.json` | Эталонный набор секций, ключей, файлов и корней |
 | `docs/Обнаруженые проблемы.md` | Текущий аудит проблем |
 | `docs/main_unit_tests.md` | Правила приёмочных тестов |
 | `docs/Проблема одной секции.txt` | Контекст паритета Resolver4 |

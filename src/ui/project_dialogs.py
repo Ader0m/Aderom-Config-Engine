@@ -520,11 +520,14 @@ class ProjectPreviewDialog(QDialog):
         parent=None,
         on_write: Optional[Callable] = None,
         on_rollback: Optional[Callable] = None,
+        # Fail-safe: запись разрешается только явным write_enabled=True.
+        write_enabled: bool = False,
     ):
         super().__init__(parent)
         self.preview = preview
         self._on_write = on_write
         self._on_rollback = on_rollback
+        self._write_enabled = bool(write_enabled)
 
         self.setWindowTitle("Предпросмотр патча — %s" % preview.project.name)
         self.resize(1100, 720)
@@ -548,6 +551,12 @@ class ProjectPreviewDialog(QDialog):
         self._xml_mode_text = xml_mode
         self._header = QLabel()
         layout.addWidget(self._header)
+        if not self._write_enabled:
+            status = QLabel(
+                "Запись патчей отключена до Этапа 5: "
+                "доступен только предпросмотр."
+            )
+            layout.addWidget(status)
 
         splitter = QSplitter(Qt.Horizontal)
 
@@ -607,6 +616,11 @@ class ProjectPreviewDialog(QDialog):
 
         self.write_button = QPushButton("Записать в патч-мод...")
         self.write_button.clicked.connect(self._write)
+        if not self._write_enabled:
+            self.write_button.setToolTip(
+                "Запись патчей отключена до Этапа 5: "
+                "доступен только предпросмотр."
+            )
         self._refresh_write_button()
         buttons.addWidget(self.write_button)
 
@@ -672,7 +686,9 @@ class ProjectPreviewDialog(QDialog):
             for item in self._selector_items()
         )
         self.write_button.setEnabled(
-            has_ok and self._on_write is not None
+            self._write_enabled
+            and has_ok
+            and self._on_write is not None
         )
 
     def _list_context_menu(self, pos):
@@ -871,7 +887,7 @@ class ProjectPreviewDialog(QDialog):
             self.patch_text.setPlainText(item.error)
 
     def _write(self):
-        if self._on_write is None:
+        if not self._write_enabled or self._on_write is None:
             return
         updated = replace(
             self.preview,
