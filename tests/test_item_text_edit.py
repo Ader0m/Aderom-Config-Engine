@@ -13,12 +13,14 @@ from tests.qt_support import qapp
 from PyQt5.QtCore import QPoint, Qt
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QLineEdit
-from sdk.api import ItemEntry, ItemField, LocalizationString, ProjectOverlay
+from sdk.features.items import ItemEntry, ItemField, LocalizationString
+from sdk.contracts import ProjectOverlay
 from core.items.catalog import ItemCatalogService
 from core.items.localization import (
     LocalizationService,
     edit_localization_text,
 )
+from ui.platform.sdk_bridge import ItemApiAdapter
 from modules.base_module.item_viewer import ItemCardView, ItemViewerFeature
 
 _app = qapp()
@@ -599,6 +601,9 @@ class _Ui:
     def has_resolved_document(self, tab_id):
         return True
 
+    def resolved_document_title(self, tab_id):
+        return ""
+
     def item_entry(self, tab_id, section):
         return self.entry
 
@@ -608,6 +613,18 @@ class _Ui:
     def write_project_text(self, path, text):
         self.files[Path(path)] = str(text)
         return True
+
+    def write_project_text_async(
+        self,
+        path,
+        text,
+        on_done=None,
+        original_text=None,
+    ):
+        ok = self.write_project_text(path, text)
+        if on_done is not None:
+            on_done(ok, "" if ok else "write failed")
+        return ok
 
     def show_error(self, message):
         self.errors.append(str(message))
@@ -628,6 +645,9 @@ class _Ctx:
     def __init__(self, ui):
         self.ui = ui
         self.services = _Services()
+        self.documents = ui
+        self.items = ItemApiAdapter(self.services, ui)
+        self.projects = ui
 
 
 class ItemTextFeatureTest(unittest.TestCase):

@@ -6,14 +6,10 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from sdk import (
-    AppPaths,
-    ForestRef,
-    ProjectOverlay,
-    SectionGraphContribution,
-)
-from sdk.adapters import CoreApiAdapter, UiApiAdapter
-from sdk.forest import forest_ref, unwrap_forest
+from sdk import AppPaths, ForestRef
+from sdk.contracts import ProjectOverlay, SectionGraphContribution
+from ui.platform.sdk_bridge import CoreApiAdapter, UiApiAdapter
+from sdk.contracts.forest import forest_ref, unwrap_forest
 
 
 class _Forest:

@@ -104,7 +104,7 @@ def _dpi():
 def main():
     from PyQt5.QtWidgets import QApplication
 
-    from core.facade import CoreServices
+    from core.api.services import CoreServices
     from core.tools.cache import FileCacheSystem
     from core.tree.builder import TreeBuilder
     from core.tree.query import TreeQueryService
@@ -114,9 +114,10 @@ def main():
     from core.tools.cache import ResolvedCache
     from core.xml.service import XmlResolveService
 
-    from sdk import SDK_VERSION, AppPaths, ModuleContext
+    from sdk import SDK_VERSION, AppPaths
     from ui.module_loader import ModuleLoader
-    from sdk.events import Events
+    from ui.platform.sdk_bridge import build_module_context
+    from sdk.contracts.events import Events
     from ui.bus import CommandBus, EventBus
     from ui.hints import HintService
     from ui.hints.providers import (
@@ -149,7 +150,7 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("LTX Explorer")
-    app.setApplicationVersion("0.2.0")
+    app.setApplicationVersion("0.3.0")
     apply_theme(app)
 
     _install_crash_log(generated_dir)
@@ -241,15 +242,15 @@ def main():
 
     # 3) Загрузка модулей (до построения окна, чтобы регистрации попали в меню).
     def make_context(manifest):
-        return ModuleContext(
-            SDK_VERSION,
-            events,
-            commands,
-            api,
-            tasks,
-            services,
-            paths,
-            module_name=manifest.name,
+        return build_module_context(
+            manifest,
+            sdk_version=SDK_VERSION,
+            events=events,
+            commands=commands,
+            ui=api,
+            tasks=tasks,
+            services=services,
+            paths=paths,
         )
 
     loader = ModuleLoader(make_context)

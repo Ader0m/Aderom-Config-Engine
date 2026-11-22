@@ -249,7 +249,7 @@ class XmlFileOpener:
         rel = self._relative(path)
         tab_id = xml_resolved_tab_id(rel)
         mode = " + DXML" if getattr(result, "dxml_applied", False) else ""
-        self.ctx.ui.open_xml_resolved_tab(
+        self.ctx.documents.open_xml_resolved_tab(
             tab_id,
             "RESOLVED XML%s: %s" % (mode, rel),
             result.text,

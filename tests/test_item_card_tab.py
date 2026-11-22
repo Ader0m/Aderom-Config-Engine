@@ -6,7 +6,7 @@ import unittest
 from tests.support import SRC  # noqa: F401
 
 from tests.qt_support import qapp
-from sdk.api import ItemEntry, ItemField
+from sdk.features.items import ItemEntry, ItemField
 from ui.bus import EventBus
 from app.documents import ResolvedDocument
 from ui.editor_tabs import EditorTabs
@@ -75,6 +75,9 @@ class _Ui:
     def redo_resolved_document(self, tab_id):
         return self.document.redo()
 
+    def resolved_document_title(self, tab_id):
+        return self.document.title
+
     def open_resolved_document(self, tab_id, line_number=None):
         return True
 
@@ -91,11 +94,25 @@ class _Ui:
         return fallback
 
 
+class _Items:
+    def __init__(self, ui):
+        self._ui = ui
+
+    def item_entry(self, tab_id, section):
+        return self._ui.item_entry(tab_id, section)
+
+    def build_item_entry(self, forest, text, section, log=None, overlay=None):
+        return self._ui.item_entry(self._ui.document.tab_id, section)
+
+
 class _Ctx:
     def __init__(self, events, ui):
         self.events = events
         self.ui = ui
         self.services = None
+        self.documents = ui
+        self.items = _Items(ui)
+        self.projects = ui
 
 
 class ItemCardTabTest(unittest.TestCase):

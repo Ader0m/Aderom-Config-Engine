@@ -8,8 +8,9 @@ from pathlib import Path
 from tests.support import SRC  # noqa: F401
 
 from core.patching.writer import PatchWriter
-from sdk import FileReader, FileView
-from sdk.api import ProjectAssetType
+from sdk import FileReader
+from sdk.features.documents import FileView
+from sdk.features.projects import ProjectAssetType
 from tests.helpers import FakeForest
 from app.projects import ProjectService
 from app.projects import ProjectAssetRegistry, ProjectAssetTypeError

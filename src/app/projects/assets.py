@@ -17,7 +17,7 @@ import threading
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple
 
-from sdk.api import ProjectAssetType
+from sdk.features.projects import ProjectAssetType
 
 
 class ProjectAssetTypeError(ValueError):

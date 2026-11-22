@@ -12,7 +12,7 @@ from modules.base_module.section_graph import (
     _node_key,
     _unique_lost,
 )
-from sdk.api import GraphEdgeStyle, GraphMatch, GraphNode, SectionGraph
+from sdk.contracts import GraphEdgeStyle, GraphMatch, GraphNode, SectionGraph
 
 _app = qapp()
 

@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-from sdk.engine_text import engine_text_lines
-from sdk.hints import (
+from sdk.features.documents.engine_text import engine_text_lines
+from sdk.ui.hints import (
     KIND_LOCALIZATION,
     LANGUAGE_LTX,
     SURFACE_RAW,

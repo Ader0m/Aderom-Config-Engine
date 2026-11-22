@@ -20,7 +20,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from sdk import SectionGraphRequest, path_key as _path_key
+from sdk.contracts import SectionGraphRequest
+from sdk import path_key as _path_key
 
 # Маркеры и цвета типов связей. Цвета запрашиваются через ctx.ui,
 # чтобы модуль не импортировал внутренности UI.

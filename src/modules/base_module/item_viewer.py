@@ -22,17 +22,15 @@ from pathlib import Path
 
 from sdk import (
     DEFAULT_SEARCH_DELAY_MS,
-    ITEM_SECTION_MIME,
     HintTargetInfo,
     LANGUAGE_LOCALIZATION_TEXT,
     SURFACE_ENGINE_TEXT,
-    encode_item_section,
-    engine_source_text,
-    parse_engine_text,
     path_key as sdk_path_key,
     same_path as sdk_same_path,
 )
-from sdk.events import Events
+from sdk.features.items import ITEM_SECTION_MIME, encode_item_section
+from sdk.features.documents import engine_source_text, parse_engine_text
+from sdk.contracts.events import Events
 
 from PyQt5.QtCore import (
     QEvent,
@@ -819,11 +817,8 @@ class ItemViewerFeature:
                 )
 
     def _project_overlay(self):
-        fn = getattr(self.ctx.ui, "project_overlay", None)
-        if not callable(fn):
-            return None
         try:
-            return fn()
+            return self.ctx.ui.project_overlay()
         except Exception as exc:
             self.ctx.ui.log(
                 "Слой правок проекта недоступен: %s" % exc
@@ -869,7 +864,7 @@ class ItemViewerFeature:
         token = self._request_seq
         forest = self.session.forest
 
-        root = self.ctx.services.item_catalog_root(forest)
+        root = self.ctx.items.item_catalog_root(forest)
         rel = (
             self.ctx.services.relative_path(forest, root)
             if root is not None
@@ -878,7 +873,7 @@ class ItemViewerFeature:
         tab_id = resolved_tab_id(rel) if rel else ""
         title = "[Res]%s" % rel if rel else ""
 
-        draft = self.ctx.ui.resolved_draft(tab_id) if tab_id else None
+        draft = self.ctx.documents.resolved_draft(tab_id) if tab_id else None
         overlay = self._project_overlay()
         has_overlay = bool(
             getattr(overlay, "source_files", None)
@@ -913,7 +908,7 @@ class ItemViewerFeature:
                 )
                 original = draft.original_text or original_text
                 saved = draft.saved_text
-                catalog = self.ctx.services.build_item_catalog(
+                catalog = self.ctx.items.build_item_catalog(
                     forest,
                     log=log,
                     resolved_text=text,
@@ -925,7 +920,7 @@ class ItemViewerFeature:
                 original = original_text
                 saved = original_text
                 if original_text:
-                    catalog = self.ctx.services.build_item_catalog(
+                    catalog = self.ctx.items.build_item_catalog(
                         forest,
                         log=log,
                         resolved_text=original_text,
@@ -933,7 +928,7 @@ class ItemViewerFeature:
                         overlay=overlay,
                     )
                 else:
-                    catalog = self.ctx.services.build_item_catalog(
+                    catalog = self.ctx.items.build_item_catalog(
                         forest,
                         log=log,
                         overlay=overlay,
@@ -949,7 +944,7 @@ class ItemViewerFeature:
 
             # Ядро декодирует иконки пакетно: кэш регионов + пул процессов.
             # Модуль только превращает готовые RGBA в QImage.
-            icons = self.ctx.services.load_item_icons(catalog, log=log)
+            icons = self.ctx.items.load_item_icons(catalog, log=log)
             images = {
                 icon.section: _image_from_region(icon)
                 for icon in icons
@@ -991,20 +986,12 @@ class ItemViewerFeature:
             card_tab_id = tab_id
             record = self._cards.get(card_tab_id)
             if record is not None:
-                fn = getattr(
-                    self.ctx.ui,
-                    "release_resolved_document",
-                    None,
-                )
-                if callable(fn):
-                    fn(record[0])
+                self.ctx.documents.release_resolved_document(record[0])
         self._cards.clear()
         self._card_retains.clear()
 
         for tab_id in list(self._retained):
-            fn = getattr(self.ctx.ui, "release_resolved_document", None)
-            if callable(fn):
-                fn(tab_id)
+            self.ctx.documents.release_resolved_document(tab_id)
         self._retained.clear()
 
         for sub in (
@@ -1134,10 +1121,10 @@ class ItemViewerFeature:
                     section,
                 ),
                 on_open_text_source=self._open_text_source,
-                on_undo=lambda: self.ctx.ui.undo_resolved_document(
+                on_undo=lambda: self.ctx.documents.undo_resolved_document(
                     self._tab_id
                 ),
-                on_redo=lambda: self.ctx.ui.redo_resolved_document(
+                on_redo=lambda: self.ctx.documents.redo_resolved_document(
                     self._tab_id
                 ),
                 document_title=self._title,
@@ -1199,15 +1186,14 @@ class ItemViewerFeature:
         root_path = context.get("root_path")
         if not tab_id or root_path is None:
             return
-        ensure = getattr(self.ctx.ui, "ensure_resolved_document", None)
-        if callable(ensure):
-            ensure(
-                tab_id,
-                root_path,
-                self._title,
-                str(context.get("text") or ""),
-                tuple(context.get("line_sources") or ()),
-            )
+        ensure = self.ctx.documents.ensure_resolved_document
+        ensure(
+            tab_id,
+            root_path,
+            self._title,
+            str(context.get("text") or ""),
+            tuple(context.get("line_sources") or ()),
+        )
         if previous_tab and previous_tab != tab_id:
             self._release(previous_tab)
         self._retain(tab_id)
@@ -1216,25 +1202,19 @@ class ItemViewerFeature:
         tab_id = str(tab_id or "")
         if not tab_id or tab_id in self._retained:
             return
-        fn = getattr(self.ctx.ui, "retain_resolved_document", None)
-        if callable(fn) and fn(tab_id):
+        if self.ctx.documents.retain_resolved_document(tab_id):
             self._retained.add(tab_id)
 
     def _release(self, tab_id):
         tab_id = str(tab_id or "")
         if tab_id not in self._retained:
             return
-        fn = getattr(self.ctx.ui, "release_resolved_document", None)
-        if callable(fn):
-            fn(tab_id)
+        self.ctx.documents.release_resolved_document(tab_id)
         self._retained.discard(tab_id)
 
     def _item_entry(self, tab_id, section):
-        fn = getattr(self.ctx.ui, "item_entry", None)
-        if not callable(fn):
-            return None
         try:
-            return fn(tab_id, section)
+            return self.ctx.items.item_entry(tab_id, section)
         except Exception as exc:
             self.ctx.ui.log(
                 "Предметы: не удалось получить карточку [%s]: %s"
@@ -1275,7 +1255,7 @@ class ItemViewerFeature:
     def _start_entry_build(self, key, token, tab_id, section):
         run = getattr(getattr(self.ctx, "tasks", None), "run", None)
         forest = getattr(self.session, "forest", None) if self.session else None
-        builder = getattr(self.ctx.services, "build_item_entry", None)
+        builder = self.ctx.items.build_item_entry
         snapshot = self._snapshot(tab_id)
         if (
             snapshot is None
@@ -1374,11 +1354,9 @@ class ItemViewerFeature:
         return self._images.get(section)
 
     def _document_title(self, tab_id):
-        fn = getattr(self.ctx.ui, "resolved_document_title", None)
-        if callable(fn):
-            title = fn(tab_id)
-            if title:
-                return title
+        title = self.ctx.documents.resolved_document_title(tab_id)
+        if title:
+            return title
         if str(tab_id) == self._tab_id:
             return self._title
         return ""
@@ -1386,9 +1364,7 @@ class ItemViewerFeature:
     def _go_to_section(self, tab_id, section):
         entry = self._item_entry(tab_id, section)
         line = entry.line_number if entry is not None else None
-        fn = getattr(self.ctx.ui, "open_resolved_document", None)
-        if callable(fn):
-            fn(tab_id, line)
+        self.ctx.documents.open_resolved_document(tab_id, line)
 
     def _on_document_changed(self, change):
         tab_id = str(getattr(change, "tab_id", "") or "")
@@ -1442,7 +1418,7 @@ class ItemViewerFeature:
             and focus_line
             and self._tab_id
         ):
-            section = self.ctx.ui.resolved_section_at_line(
+            section = self.ctx.documents.resolved_section_at_line(
                 self._tab_id,
                 focus_line,
             )
@@ -1595,8 +1571,8 @@ class ItemViewerFeature:
             ),
             on_go_to_line=lambda line: self._go_to_line(tab_id, line),
             on_save=self._save_now,
-            on_undo=lambda: self.ctx.ui.undo_resolved_document(tab_id),
-            on_redo=lambda: self.ctx.ui.redo_resolved_document(tab_id),
+            on_undo=lambda: self.ctx.documents.undo_resolved_document(tab_id),
+            on_redo=lambda: self.ctx.documents.redo_resolved_document(tab_id),
             on_open_document=lambda: self._go_to_section(
                 tab_id,
                 section,
@@ -1619,12 +1595,11 @@ class ItemViewerFeature:
         card.refresh()
 
     def _can_edit_tab(self, tab_id):
-        has = getattr(self.ctx.ui, "has_resolved_document", None)
-        if callable(has) and has(tab_id):
+        if self.ctx.documents.has_resolved_document(tab_id):
             return bool(self.ctx.ui.is_project_active())
         return bool(
             self.ctx.ui.is_project_active()
-            and self.ctx.ui.resolved_draft(tab_id) is not None
+            and self.ctx.documents.resolved_draft(tab_id) is not None
         )
 
     # -------------------------------------------------- правка
@@ -1633,11 +1608,8 @@ class ItemViewerFeature:
         return sdk_same_path(left, right)
 
     def _snapshot(self, tab_id):
-        reader = getattr(self.ctx.ui, "resolved_draft", None)
-        if not callable(reader):
-            return None
         try:
-            return reader(tab_id)
+            return self.ctx.documents.resolved_draft(tab_id)
         except Exception:
             return None
 
@@ -1705,7 +1677,7 @@ class ItemViewerFeature:
         old_line = lines[index] if 0 <= index < len(lines) else ""
         key = self.ctx.services.ltx_key_from_line(old_line)
 
-        text = self.ctx.ui.read_project_text(path)
+        text = self.ctx.documents.read_project_text(path)
         updated = self.ctx.services.ltx_edit_section(
             text,
             section,
@@ -1720,7 +1692,7 @@ class ItemViewerFeature:
             )
             return False
 
-        if not self.ctx.ui.write_project_text(path, updated):
+        if not self.ctx.documents.write_project_text(path, updated):
             return False
 
         self.ctx.ui.log(
@@ -1784,9 +1756,9 @@ class ItemViewerFeature:
         if not tab_id or not section or not key:
             return False
         if job.get("kind") == "rename":
-            fn = getattr(self.ctx.ui, "rename_resolved_field", None)
+            fn = self.ctx.documents.rename_resolved_field
         else:
-            fn = getattr(self.ctx.ui, "apply_resolved_field_edit", None)
+            fn = self.ctx.documents.apply_resolved_field_edit
         if not callable(fn):
             return False
 
@@ -1929,9 +1901,7 @@ class ItemViewerFeature:
 
     def _execute_field_job(self, job):
         if job.get("kind") == "rename":
-            fn = getattr(self.ctx.ui, "rename_resolved_field", None)
-            if not callable(fn):
-                return False
+            fn = self.ctx.documents.rename_resolved_field
             return bool(
                 fn(
                     job["tab_id"],
@@ -1942,9 +1912,7 @@ class ItemViewerFeature:
                 )
             )
 
-        fn = getattr(self.ctx.ui, "apply_resolved_field_edit", None)
-        if not callable(fn):
-            return False
+        fn = self.ctx.documents.apply_resolved_field_edit
         return bool(
             fn(
                 job["tab_id"],
@@ -2014,14 +1982,10 @@ class ItemViewerFeature:
             )
             return False
 
-        reader = getattr(self.ctx.ui, "read_project_text", None)
-        writer = getattr(self.ctx.ui, "write_project_text", None)
-        async_writer = getattr(
-            self.ctx.ui,
-            "write_project_text_async",
-            None,
-        )
-        editor = getattr(self.ctx.services, "edit_localization_text", None)
+        reader = self.ctx.documents.read_project_text
+        writer = self.ctx.documents.write_project_text
+        async_writer = self.ctx.documents.write_project_text_async
+        editor = self.ctx.items.edit_localization_text
         if not callable(reader) or not callable(editor):
             self.ctx.ui.show_error(
                 "Платформа не предоставляет доступ к черновикам XML."
@@ -2246,7 +2210,7 @@ class ItemViewerFeature:
                 new_line=new_line,
             )
 
-        ok = self.ctx.ui.apply_resolved_line_edit(
+        ok = self.ctx.documents.apply_resolved_line_edit(
             tab_id,
             "replace",
             line_number,
@@ -2267,7 +2231,7 @@ class ItemViewerFeature:
                 "delete",
             )
 
-        ok = self.ctx.ui.apply_resolved_line_edit(
+        ok = self.ctx.documents.apply_resolved_line_edit(
             tab_id,
             "delete",
             line_number,
@@ -2288,7 +2252,7 @@ class ItemViewerFeature:
                 new_line=new_line,
             )
 
-        ok = self.ctx.ui.apply_resolved_line_edit(
+        ok = self.ctx.documents.apply_resolved_line_edit(
             tab_id,
             "insert",
             line_number,
@@ -2320,25 +2284,7 @@ class ItemViewerFeature:
         return False
 
     def _go_to_line(self, tab_id, line_number):
-        opener = getattr(self.ctx.ui, "open_resolved_document", None)
-        if callable(opener):
-            opener(tab_id, int(line_number))
-            return
-
-        snapshot = self._snapshot(tab_id)
-        if snapshot is None:
-            self.ctx.ui.show_error(
-                "Не удалось определить документ для перехода."
-            )
-            return
-        self.ctx.ui.open_resolved_tab(
-            tab_id,
-            self._title if tab_id == self._tab_id else tab_id,
-            snapshot.text,
-            snapshot.line_sources,
-            self._root_path,
-            line_number=int(line_number),
-        )
+        self.ctx.documents.open_resolved_document(tab_id, int(line_number))
 
     def _save_now(self):
         saved = self.ctx.ui.save_project_now()
@@ -2421,8 +2367,8 @@ class ItemViewerFeature:
         item_path = items_dir / ("mod_item_base_~ace_%s.ltx" % tag)
         xml_path = text_dir / ("st_ace_%s.xml" % tag)
 
-        item_text = self.ctx.ui.read_project_text(item_path)
-        xml_text = self.ctx.ui.read_project_text(xml_path)
+        item_text = self.ctx.documents.read_project_text(item_path)
+        xml_text = self.ctx.documents.read_project_text(xml_path)
 
         known_sections = set(
             self.ctx.services.ltx_declared_sections(item_text)
@@ -2474,7 +2420,7 @@ class ItemViewerFeature:
             newline=xml_newline,
         )
 
-        if not self.ctx.ui.write_project_texts(
+        if not self.ctx.documents.write_project_texts(
             (
                 (item_path, item_text),
                 (xml_path, xml_text),

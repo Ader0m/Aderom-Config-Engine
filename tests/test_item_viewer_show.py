@@ -7,16 +7,11 @@ from pathlib import Path
 from tests.support import SRC  # noqa: F401
 
 from tests.qt_support import qapp
-from sdk.api import (
-    ItemCatalog,
-    ItemEntry,
-    ItemField,
-    ItemSection,
-    ProjectChanged,
-)
+from sdk.features.items import ItemCatalog, ItemEntry, ItemField, ItemSection
+from sdk.features.projects import ProjectChanged
 from modules.base_module.item_viewer import ItemViewerFeature
 
-from sdk.events import Events
+from sdk.contracts.events import Events
 from ui.bus import EventBus
 
 _app = qapp()
@@ -82,6 +77,15 @@ class _Ui:
     def resolved_draft(self, tab_id):
         return self.document
 
+    def resolved_document_title(self, tab_id):
+        return ""
+
+    def has_resolved_document(self, tab_id):
+        return self.document is not None
+
+    def open_resolved_document(self, tab_id, line_number=None):
+        return True
+
     def ensure_resolved_document(self, tab_id, root_path, title="", text="",
                                  line_sources=()):
         self.ensured.append((tab_id, Path(root_path), text))
@@ -138,6 +142,9 @@ class _Ctx:
         self.tasks = _Tasks()
         self.events = None
         self.services = self.ui
+        self.documents = self.ui
+        self.items = self.ui
+        self.projects = self.ui
 
 
 class ItemViewerShowTest(unittest.TestCase):

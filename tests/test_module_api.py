@@ -5,18 +5,18 @@ import unittest
 
 from tests.support import SRC  # noqa: F401
 
-from sdk.adapters import (
+from ui.platform.sdk_bridge import (
     CommandApiAdapter,
     CoreApiAdapter,
     EventApiAdapter,
     TaskApiAdapter,
     UiApiAdapter,
-    _to_graph_node_view,
 )
+from ui.platform.sdk_bridge.common import _to_graph_node_view
 from sdk import DEFAULT_SEARCH_DELAY_MS
-from sdk import GraphNode, SectionGraph, SectionGraphRequest
-from sdk import GraphEdgeStyle, SectionGraphContribution
-from sdk.contracts import ModuleBase, ModuleContext, ModuleManifest
+from sdk.contracts import GraphNode, SectionGraph, SectionGraphRequest
+from sdk.contracts import GraphEdgeStyle, SectionGraphContribution
+from sdk.kernel import ModuleBase, ModuleContext, ModuleManifest
 from ui.bus import CommandBus, EventBus
 from ui.debounce import DEFAULT_SEARCH_DELAY_MS as UI_SEARCH_DELAY_MS
 
@@ -36,6 +36,19 @@ class _Tasks:
 
 class _Services:
     pass
+
+
+def _context(events=None, commands=None, ui=None, tasks=None, services=None):
+    return ModuleContext(
+        "0.1.0",
+        module_id="test",
+        services=CoreApiAdapter(services or _Services()),
+        ui=UiApiAdapter(ui or _Ui()),
+        tasks=TaskApiAdapter(tasks or _Tasks()),
+        events=EventApiAdapter(events or EventBus()),
+        commands=CommandApiAdapter(commands or CommandBus()),
+        paths=None,
+    )
 
 
 class ModuleApiTest(unittest.TestCase):
@@ -59,41 +72,16 @@ class ModuleApiTest(unittest.TestCase):
 
     def test_module_base_lifecycle_methods_are_callable(self):
         module = ModuleBase()
-        ui = _Ui()
-        context = ModuleContext(
-            "0.1.0",
-            EventBus(),
-            CommandBus(),
-            ui,
-            _Tasks(),
-            _Services(),
-            None,
-        )
+        context = _context()
 
         module.init(context)
         module.register(context)
         module.activate(context)
         module.deactivate(context)
 
-    def test_context_wraps_buses_and_is_not_global(self):
-        first = ModuleContext(
-            "0.1.0",
-            EventBus(),
-            CommandBus(),
-            _Ui(),
-            _Tasks(),
-            _Services(),
-            None,
-        )
-        second = ModuleContext(
-            "0.1.0",
-            EventBus(),
-            CommandBus(),
-            _Ui(),
-            _Tasks(),
-            _Services(),
-            None,
-        )
+    def test_context_accepts_ready_adapters_and_is_not_global(self):
+        first = _context()
+        second = _context()
 
         self.assertIsInstance(first.events, EventApiAdapter)
         self.assertIsInstance(first.commands, CommandApiAdapter)
@@ -103,6 +91,29 @@ class ModuleApiTest(unittest.TestCase):
         self.assertIsNot(first.events, second.events)
         self.assertIsNot(first.commands, second.commands)
         self.assertIsNot(first.ui, second.ui)
+
+    def test_context_exposes_declared_fields(self):
+        context = _context()
+
+        for name in (
+            "module_id",
+            "kernel",
+            "services",
+            "documents",
+            "patches",
+            "projects",
+            "items",
+            "capabilities",
+            "events",
+            "commands",
+            "tasks",
+            "ui",
+            "paths",
+            "registrations",
+        ):
+            self.assertTrue(hasattr(context, name), name)
+        self.assertEqual(context.module_id, "test")
+        self.assertIs(context.kernel.capabilities, context.capabilities)
 
     def test_section_graph_contributors_are_collected(self):
         class Provider:
@@ -237,15 +248,7 @@ class ModuleApiTest(unittest.TestCase):
 
     def test_context_log_delegates_to_ui(self):
         ui = _Ui()
-        context = ModuleContext(
-            "0.1.0",
-            EventBus(),
-            CommandBus(),
-            ui,
-            _Tasks(),
-            _Services(),
-            None,
-        )
+        context = _context(ui=ui)
 
         context.log("hello")
 

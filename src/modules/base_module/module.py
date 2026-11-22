@@ -18,7 +18,7 @@ PyQt используется только для собственных око�
 """
 
 from sdk import ModuleBase, ModuleManifest
-from sdk.events import Events
+from sdk.contracts.events import Events
 
 from .actions import EditorActions, TreeActions, is_ltx_path, is_xml_path
 from .clean_run import CleanRunFeature

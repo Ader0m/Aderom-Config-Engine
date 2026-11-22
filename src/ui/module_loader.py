@@ -23,12 +23,14 @@ from enum import Enum
 
 import modules as modules_package
 
-from sdk.contracts import (
-    ModuleBase,
-    ModuleRequirement,
-    normalize_requirements,
+from sdk.kernel import ModuleBase, ModuleRequirement, normalize_requirements
+from sdk.kernel.capabilities import (
+    CapabilityConflictError,
+    CapabilityRegistry,
+    CapabilityScope,
 )
-from sdk.version import SDK_VERSION, is_compatible, version_at_least
+from sdk.kernel.levels import check_manifest
+from sdk.kernel.version import SDK_VERSION, version_at_least
 
 
 class ModuleLoadError(Exception):
@@ -87,6 +89,8 @@ class ModuleLoader:
         self.records = {}
         self.skipped = {}
         self.capabilities = {}
+        self.capability_conflicts = {}
+        self.capability_registry = CapabilityRegistry()
         self._order = []
         self._candidates = {}
 
@@ -121,7 +125,7 @@ class ModuleLoader:
         self._candidates = candidates
         for entry in ordered:
             self._start_module(entry, candidates, log)
-        self._rebuild_capabilities()
+        self._rebuild_capabilities(log)
         self._compute_dependents()
         self._refresh_contexts()
 
@@ -153,7 +157,7 @@ class ModuleLoader:
             log("Модуль %s: нет манифеста." % package_name)
             return None
 
-        if not is_compatible(manifest.sdk_min):
+        if not check_manifest(manifest, SDK_VERSION):
             log(
                 "Модуль %s: несовместим (нужен SDK >= %s, текущий %s)."
                 % (package_name, manifest.sdk_min, SDK_VERSION)
@@ -177,7 +181,7 @@ class ModuleLoader:
         учитываются только при наличии провайдера.
         """
         names = set(candidates)
-        self.capabilities = self._build_capabilities(candidates)
+        self.capabilities = self._build_capabilities(candidates, log)
 
         edges = {name: set() for name in names}
         indegree = {name: 0 for name in names}
@@ -369,8 +373,15 @@ class ModuleLoader:
                 )
         return ordered
 
-    def _build_capabilities(self, candidates):
+    def _build_capabilities(self, candidates, log=None):
+        """Собрать карту capability -> провайдер.
+
+        Конфликт двух провайдеров не разрешается «первым победителем»:
+        возможность исключается из карты, а конфликт логируется и
+        сохраняется в ``capability_conflicts``.
+        """
         capabilities = {}
+        conflicts = {}
         for name in sorted(
             candidates,
             key=lambda item: candidates[item].package.lower(),
@@ -378,10 +389,29 @@ class ModuleLoader:
             for capability in _capability_values(
                 candidates[name].manifest.provides
             ):
-                capabilities.setdefault(str(capability), name)
+                key = str(capability)
+                current = capabilities.get(key)
+                if current is None:
+                    capabilities[key] = name
+                    continue
+                if current == name:
+                    continue
+                providers = conflicts.setdefault(key, [current])
+                if name not in providers:
+                    providers.append(name)
+
+        for key, providers in conflicts.items():
+            capabilities.pop(key, None)
+            if log is not None:
+                log(
+                    "Конфликт capability %s: модули %s. "
+                    "Провайдер не выбран."
+                    % (key, ", ".join(providers))
+                )
+        self.capability_conflicts = conflicts
         return capabilities
 
-    def _rebuild_capabilities(self):
+    def _rebuild_capabilities(self, log=None):
         current = {
             name: record
             for name, record in self.records.items()
@@ -390,7 +420,45 @@ class ModuleLoader:
                 ModuleState.ACTIVE,
             )
         }
-        self.capabilities = self._build_capabilities(current)
+        self.capabilities = self._build_capabilities(current, log)
+        self._sync_capability_registry(log)
+
+    def _sync_capability_registry(self, log=None):
+        for name, record in self.records.items():
+            if record.state not in (
+                ModuleState.REGISTERED,
+                ModuleState.ACTIVE,
+            ):
+                self.capability_registry.remove_owner(name)
+        for name, record in self.records.items():
+            if record.state not in (
+                ModuleState.REGISTERED,
+                ModuleState.ACTIVE,
+            ):
+                continue
+            for capability_name, version in _capability_specs(
+                record.manifest.provides
+            ):
+                if capability_name in self.capability_conflicts:
+                    self.capability_registry.discard(capability_name)
+                    continue
+                try:
+                    self.capability_registry.declare(
+                        capability_name,
+                        version,
+                        owner=name,
+                    )
+                except CapabilityConflictError as exc:
+                    self.capability_registry.discard(capability_name)
+                    self.capabilities.pop(capability_name, None)
+                    providers = self.capability_conflicts.setdefault(
+                        capability_name,
+                        [],
+                    )
+                    if name not in providers:
+                        providers.append(name)
+                    if log is not None:
+                        log("Конфликт capability: %s" % exc)
 
     def _compute_dependents(self):
         dependents = {name: set() for name in self.records}
@@ -412,14 +480,12 @@ class ModuleLoader:
                 ModuleState.ACTIVE,
             )
         }
-        capabilities = dict(self.capabilities)
         for record in self.records.values():
             ctx = record.ctx
             if ctx is None:
                 continue
             try:
-                ctx.available_modules = dict(modules)
-                ctx.capabilities = dict(capabilities)
+                ctx.kernel.available_modules = dict(modules)
             except Exception:
                 pass
 
@@ -443,11 +509,13 @@ class ModuleLoader:
             log("Модуль %s: уже загружен." % name)
             return True
 
-        self._rebuild_capabilities()
+        self._rebuild_capabilities(log)
         missing = self._missing_dependencies(record)
         if missing:
             record.state = ModuleState.SKIPPED
             self.records[name] = record
+            self.capability_registry.remove_owner(name)
+            self._rebuild_capabilities(log)
             self.skipped[name] = [
                 ModuleSkip("missing_required", dependency,
                            "зависимость не загружена")
@@ -465,6 +533,8 @@ class ModuleLoader:
             record.state = ModuleState.FAILED
             record.error = "ошибка создания контекста"
             self.records[name] = record
+            self.capability_registry.remove_owner(name)
+            self._rebuild_capabilities(log)
             log(
                 "Модуль %s: ошибка создания контекста.\n%s"
                 % (name, traceback.format_exc())
@@ -475,7 +545,12 @@ class ModuleLoader:
         record.ctx = ctx
         if ctx is not None:
             try:
-                ctx.available_modules = {
+                ctx.capabilities = CapabilityScope(
+                    self.capability_registry,
+                    ctx.module_id,
+                )
+                ctx.kernel.capabilities = ctx.capabilities
+                ctx.kernel.available_modules = {
                     module_name: module_record.manifest.version
                     for module_name, module_record in self.records.items()
                     if module_record.state in (
@@ -483,7 +558,6 @@ class ModuleLoader:
                         ModuleState.ACTIVE,
                     )
                 }
-                ctx.capabilities = dict(self.capabilities)
             except Exception:
                 pass
 
@@ -505,7 +579,7 @@ class ModuleLoader:
         self.records[name] = record
         if name not in self._order:
             self._order.append(name)
-        self._rebuild_capabilities()
+        self._rebuild_capabilities(log)
         log(
             "Модуль загружен: %s %s (SDK min %s)"
             % (
@@ -582,6 +656,14 @@ class ModuleLoader:
                             % (entry.manifest.name, removed)
                         )
             self._release_runtime(entry, ctx, log)
+            removed_caps = self.capability_registry.remove_owner(
+                entry.manifest.name
+            )
+            if removed_caps:
+                log(
+                    "Модуль %s: снято capability %d"
+                    % (entry.manifest.name, removed_caps)
+                )
 
     def _release_runtime(self, entry, ctx, log):
         """Закрыть окна/вкладки и дождаться задач, принадлежащих модулю."""
@@ -629,6 +711,7 @@ class ModuleLoader:
         self._deactivate_entry(entry, ctx, log)
         entry.state = ModuleState.FAILED
         self._drop_order(entry)
+        self._rebuild_capabilities(log)
         self._unload_package(entry, log)
 
     def _drop_order(self, record):
@@ -687,6 +770,9 @@ class ModuleLoader:
                 continue
             self._deactivate_entry(record, record.ctx, log)
             record.state = ModuleState.UNLOADED
+        self._rebuild_capabilities(log)
+        self._compute_dependents()
+        self._refresh_contexts()
 
     # -------------------------------------------------- выгрузка
     def unload(self, name, log=None, force=False):
@@ -728,7 +814,7 @@ class ModuleLoader:
         self._candidates.pop(record.name, None)
         self.skipped.pop(record.name, None)
         self._unload_package(record, log)
-        self._rebuild_capabilities()
+        self._rebuild_capabilities(log)
         self._compute_dependents()
         self._refresh_contexts()
         log("Модуль выгружен: %s" % record.name)
@@ -798,3 +884,19 @@ def _capability_values(values):
     if isinstance(values, str):
         return (values,)
     return tuple(str(value) for value in (values or ()))
+
+
+def _capability_specs(values):
+    """Вернуть пары (name, version) из манифеста."""
+    if isinstance(values, str):
+        values = (values,)
+    result = []
+    for value in values or ():
+        if isinstance(value, (tuple, list)) and value:
+            name = str(value[0])
+            version = str(value[1]) if len(value) > 1 else "1.0.0"
+        else:
+            name = str(value)
+            version = "1.0.0"
+        result.append((name, version))
+    return tuple(result)

@@ -8,7 +8,7 @@ from contextlib import redirect_stderr
 from tests.support import SRC  # noqa: F401
 
 from ui.bus import CommandBus, CommandError, EventBus
-from sdk.events import PLATFORM_OWNER
+from sdk.contracts.events import PLATFORM_OWNER
 
 
 class EventBusTest(unittest.TestCase):

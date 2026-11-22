@@ -13,7 +13,8 @@ from tests.qt_support import qapp
 from tests.support import SRC  # noqa: F401
 
 from sdk import ModuleRequirement, RegistrationHandle, RegistrationScope
-from sdk.contracts import ModuleContext, ModuleManifest
+from sdk.kernel import ModuleContext, ModuleManifest
+from ui.platform.sdk_bridge import build_module_context
 from ui.bus import CommandBus, EventBus
 from ui.module_loader import (
     ModuleLoader,
@@ -128,6 +129,46 @@ class ManifestResolutionTest(unittest.TestCase):
             "missing_capability",
         )
 
+    def test_capability_conflict_is_not_silently_resolved(self):
+        loader = ModuleLoader(lambda manifest: None)
+        logs = []
+        candidates = {
+            "first": _Entry(
+                "first",
+                provides=("shared.cap",),
+                package="a_first",
+            ),
+            "second": _Entry(
+                "second",
+                provides=("shared.cap",),
+                package="b_second",
+            ),
+            "consumer": _Entry(
+                "consumer",
+                needs=("shared.cap",),
+                package="c_consumer",
+            ),
+        }
+
+        ordered = loader._dependency_order(candidates, logs.append)
+
+        self.assertNotIn("shared.cap", loader.capabilities)
+        self.assertEqual(
+            set(loader.capability_conflicts["shared.cap"]),
+            {"first", "second"},
+        )
+        self.assertNotIn(
+            "consumer",
+            [entry.manifest.name for entry in ordered],
+        )
+        self.assertEqual(
+            loader.skipped["consumer"][0].kind,
+            "missing_capability",
+        )
+        self.assertTrue(
+            any("Конфликт capability" in message for message in logs)
+        )
+
     def test_missing_required_skips_dependent(self):
         loader = ModuleLoader(lambda manifest: None)
         candidates = {
@@ -158,8 +199,8 @@ class ManifestResolutionTest(unittest.TestCase):
 
 
 class ActivateFailureTest(unittest.TestCase):
-    def _record(self, name, calls, fail=False, dependencies=()):
-        manifest = ModuleManifest(name=name)
+    def _record(self, name, calls, fail=False, dependencies=(), provides=()):
+        manifest = ModuleManifest(name=name, provides=tuple(provides))
         instance = _Instance(fail_activate=fail)
         record = ModuleRecord(
             manifest=manifest,
@@ -203,6 +244,53 @@ class ActivateFailureTest(unittest.TestCase):
         self.assertTrue(dependent.instance.deactivated)
         self.assertTrue(dependent.ctx.registrations.closed)
         self.assertEqual(loader.records, {})
+
+    def test_failed_activate_removes_own_capability(self):
+        calls = []
+        loader = ModuleLoader(lambda manifest: None)
+        record = self._record(
+            "bad",
+            calls,
+            fail=True,
+            provides=("bad.cap",),
+        )
+        loader.records["bad"] = record
+        loader._order.append("bad")
+        loader.capability_registry.provide(
+            "bad.cap",
+            "1.0.0",
+            object(),
+            owner="bad",
+        )
+
+        loader.activate_all(log=lambda message: None)
+
+        self.assertFalse(loader.capability_registry.has("bad.cap"))
+        self.assertNotIn("bad.cap", loader.capabilities)
+
+    def test_deactivate_all_removes_capability(self):
+        calls = []
+        loader = ModuleLoader(lambda manifest: None)
+        record = self._record(
+            "good",
+            calls,
+            provides=("good.cap",),
+        )
+        record.state = ModuleState.ACTIVE
+        loader.records["good"] = record
+        loader._order.append("good")
+        loader.capability_registry.provide(
+            "good.cap",
+            "1.0.0",
+            object(),
+            owner="good",
+        )
+
+        loader.deactivate_all(log=lambda message: None)
+
+        self.assertEqual(record.state, ModuleState.UNLOADED)
+        self.assertFalse(loader.capability_registry.has("good.cap"))
+        self.assertNotIn("good.cap", loader.capabilities)
 
 
 class PackageLifecycleTest(unittest.TestCase):
@@ -261,22 +349,22 @@ class PackageLifecycleTest(unittest.TestCase):
         api = PlatformApi(events, commands, None, object(), paths)
 
         def make_context(manifest):
-            return ModuleContext(
-                "0.1.0",
-                events,
-                commands,
-                api,
-                None,
-                object(),
-                paths,
-                module_name=manifest.name,
+            return build_module_context(
+                manifest,
+                sdk_version="0.1.0",
+                events=events,
+                commands=commands,
+                ui=api,
+                tasks=None,
+                services=object(),
+                paths=paths,
             )
 
         return api, events, commands, make_context
 
     def _demo_source(self):
         return """
-        from sdk.contracts import ModuleBase, ModuleManifest
+        from sdk.kernel import ModuleBase, ModuleManifest
         from PyQt5.QtWidgets import QWidget
 
         class DemoModule(ModuleBase):
@@ -311,7 +399,7 @@ class PackageLifecycleTest(unittest.TestCase):
 
     def _dependent_source(self):
         return """
-        from sdk.contracts import ModuleBase, ModuleManifest
+        from sdk.kernel import ModuleBase, ModuleManifest
 
         class DependentModule(ModuleBase):
             manifest = ModuleManifest(

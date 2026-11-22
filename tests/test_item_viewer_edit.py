@@ -11,7 +11,7 @@ from PyQt5.QtCore import QPoint
 from PyQt5.QtWidgets import QMenu
 
 from tests.qt_support import qapp
-from sdk.api import ItemCatalog, ItemEntry, ItemField
+from sdk.features.items import ItemCatalog, ItemEntry, ItemField
 from app.documents import ResolvedDocument
 from modules.base_module.item_viewer import (
     ItemCardView,
@@ -65,6 +65,21 @@ class _Ui:
     def open_resolved_document(self, *args, **kwargs):
         pass
 
+    def resolved_document_title(self, tab_id):
+        return ""
+
+    def has_resolved_document(self, tab_id):
+        return self.document is not None and tab_id == self.document.tab_id
+
+    def ensure_resolved_document(self, *args, **kwargs):
+        return True
+
+    def retain_resolved_document(self, tab_id):
+        return True
+
+    def release_resolved_document(self, tab_id):
+        return True
+
     def save_project_now(self):
         return 1
 
@@ -92,6 +107,9 @@ class _Ctx:
         self.ui = _Ui()
         self.events = None
         self.services = None
+        self.documents = self.ui
+        self.items = self.ui
+        self.projects = self.ui
 
 
 class _Session:

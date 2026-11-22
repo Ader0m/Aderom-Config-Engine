@@ -3,7 +3,7 @@
 
 from pathlib import Path
 
-from sdk.events import Events
+from sdk.contracts.events import Events
 
 from .settings import config_dir_candidates
 

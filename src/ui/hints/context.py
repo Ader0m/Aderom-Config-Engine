@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Сборка :class:`sdk.hints.HintContext` из адаптера и цели."""
+"""Сборка :class:`sdk.ui.hints.HintContext` из адаптера и цели."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from core.patching.ltx.syntax import (
     token_at,
     tokenize_line,
 )
-from sdk.hints import (
+from sdk.ui.hints import (
     HintContext,
     HintTargetInfo,
     LANGUAGE_LTX,

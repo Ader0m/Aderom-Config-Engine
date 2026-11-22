@@ -11,8 +11,8 @@ from PyQt5.QtWidgets import QLabel, QToolButton
 from tests.qt_support import qapp
 from tests.support import SRC  # noqa: F401
 
-from sdk import ProjectSetting, ProjectSettingChoice
-from sdk.adapters import UiApiAdapter
+from sdk.features.projects import ProjectSetting, ProjectSettingChoice
+from ui.platform.sdk_bridge import ProjectApiAdapter
 from app.projects import Project, ProjectService
 from ui.project_dialogs import (
     ProjectCreateDialog,
@@ -166,10 +166,10 @@ class _Platform:
         return True
 
 
-class UiApiProjectSettingsTest(unittest.TestCase):
+class ProjectApiSettingsTest(unittest.TestCase):
     def test_adapter_registers_and_reads_settings(self):
         platform = _Platform()
-        ui = UiApiAdapter(platform)
+        ui = ProjectApiAdapter(platform)
         setting = _choice_setting()
 
         self.assertTrue(ui.register_project_setting(setting))
@@ -269,6 +269,9 @@ class _OggCtx:
         self.ui = _OggUi()
         self.commands = _OggCommands()
         self.services = _OggServices()
+        self.documents = self.ui
+        self.items = self.services
+        self.projects = self.ui
 
     def log(self, message):
         self.ui.log(message)

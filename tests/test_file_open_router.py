@@ -6,7 +6,7 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from sdk.contracts import FileOpenHandler
+from sdk.ui import FileOpenHandler
 from ui.file_open_router import FileOpenRouter
 
 

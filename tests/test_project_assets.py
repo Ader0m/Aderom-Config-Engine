@@ -9,7 +9,7 @@ from tests.helpers import FakeForest
 from tests.support import SRC  # noqa: F401
 
 from core.patching.writer import PatchWriter
-from sdk.api import ProjectAssetType
+from sdk.features.projects import ProjectAssetType
 from app.projects import ProjectService
 from app.projects import ProjectAssetRegistry
 

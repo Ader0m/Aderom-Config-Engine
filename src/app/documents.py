@@ -22,9 +22,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from core import parse_ltx_document
-from sdk.api import ResolvedDraftInfo
-from sdk.events import Events
+from core.api.documents import parse_ltx_document
+from sdk.features.documents import ResolvedDraftInfo
+from sdk.contracts.events import Events
 
 log = logging.getLogger(__name__)
 
@@ -972,7 +972,7 @@ class ResolvedDocument:
             if str(section or "").strip()
         )
 
-        from sdk.api import ResolvedDocumentChange
+        from sdk.features.documents import ResolvedDocumentChange
 
         change = ResolvedDocumentChange(
             tab_id=self.tab_id,

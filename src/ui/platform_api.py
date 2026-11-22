@@ -10,15 +10,10 @@ import traceback
 
 from PyQt5.QtWidgets import QApplication, QFileDialog, QMessageBox
 
-from sdk.api import (
-    AssetDraftInfo,
-    FileOpened,
-    FileOpenFailed,
-    ProjectChanged,
-    TreeReady,
-)
-from sdk.events import Events, PLATFORM_OWNER
-from sdk.forest import unwrap_forest
+from sdk.features.projects import AssetDraftInfo, ProjectChanged
+from sdk.contracts import FileOpened, FileOpenFailed, TreeReady
+from sdk.contracts.events import Events, PLATFORM_OWNER
+from sdk.contracts.forest import unwrap_forest
 
 from app.projects import (
     ProjectAssetRegistry,
@@ -38,7 +33,7 @@ from .platform.resolved import ResolvedDocumentMixin
 
 def _path_key(path):
     """Нормализовать путь для сопоставления запроса открытия и события."""
-    from sdk.paths import path_key
+    from sdk.contracts.paths import path_key
 
     return path_key(path)
 
@@ -523,7 +518,7 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         enabled=True,
     ):
         if self.hints is None:
-            from sdk.hints import NullHintsHandle
+            from sdk.ui.hints import NullHintsHandle
 
             return NullHintsHandle()
         return self.hints.attach(

@@ -7,7 +7,7 @@ from tests.support import SRC  # noqa: F401
 
 from PyQt5.QtWidgets import QMenu, QWidget
 
-from sdk.events import Events as BusEvents
+from sdk.contracts.events import Events as BusEvents
 from tests.qt_support import qapp
 from ui.editor_tabs import EditorTabs
 

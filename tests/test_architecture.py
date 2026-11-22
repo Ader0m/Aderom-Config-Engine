@@ -30,7 +30,7 @@ KNOWN_FILES = {
     "app": ROOT / "app" / "projects" / "service.py",
     "core": ROOT / "core" / "facade.py",
     "ui": ROOT / "ui" / "module_loader.py",
-    "sdk": ROOT / "sdk" / "contracts.py",
+    "sdk": ROOT / "sdk" / "kernel" / "context.py",
     "modules": ROOT / "modules" / "base_module" / "section_graph.py",
 }
 
@@ -337,12 +337,96 @@ class ArchitectureBoundaryTest(unittest.TestCase):
         self.assertEqual(len(sdk.__all__), len(set(sdk.__all__)))
         self.assertEqual(len(core.__all__), len(set(core.__all__)))
 
+    def test_sdk_root_has_no_domain_items(self):
+        import sdk
+
+        for name in (
+            "AssetDraftInfo",
+            "FileView",
+            "ItemCardRequest",
+            "ItemCatalog",
+            "ItemEntry",
+            "ItemField",
+            "ItemIcon",
+            "ItemSection",
+            "ItemSectionData",
+            "LocalizationString",
+            "PatchTargetInfo",
+            "ProjectAssetType",
+            "ProjectSetting",
+            "ProjectSettingChoice",
+            "ResolvedDocumentChange",
+            "ResolvedDraftInfo",
+            "ResolvedLineEdit",
+            "SavedDraft",
+            "TextureRegion",
+            "XmlResolveResult",
+        ):
+            self.assertNotIn(name, sdk.__all__, name)
+            self.assertFalse(hasattr(sdk, name), name)
+
+    def test_old_sdk_modules_are_removed(self):
+        for rel in (
+            "sdk/adapters.py",
+            "sdk/api.py",
+            "sdk/constants.py",
+            "sdk/contracts.py",
+            "sdk/dragdrop.py",
+            "sdk/engine_text.py",
+            "sdk/events.py",
+            "sdk/forest.py",
+            "sdk/hints.py",
+            "sdk/paths.py",
+            "sdk/registrations.py",
+            "sdk/version.py",
+        ):
+            self.assertFalse((ROOT / rel).exists(), rel)
+
+    def test_sdk_bridge_does_not_lookup_methods_by_name(self):
+        bridge = ROOT / "ui" / "platform" / "sdk_bridge"
+        for path in bridge.glob("*.py"):
+            tree = _parse(path)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                if not (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id == "getattr"
+                ):
+                    continue
+                if len(node.args) < 2:
+                    continue
+                name = node.args[1]
+                if not isinstance(name, ast.Constant):
+                    continue
+                if not isinstance(name.value, str):
+                    continue
+                target = ast.unparse(node.args[0])
+                if target in ("self._platform", "self._service"):
+                    self.fail(
+                        "bridge ищет метод по имени: %s -> %s"
+                        % (_rel(path), name.value)
+                    )
+
+    def test_app_imports_core_only_through_ports(self):
+        for path in _files("app"):
+            for name in _import_names(path):
+                if name == "core":
+                    self.fail(
+                        "app импортирует core напрямую: %s" % _rel(path)
+                    )
+                if name.startswith("core.") and not name.startswith("core.api"):
+                    self.fail(
+                        "app импортирует внутренности core: %s -> %s"
+                        % (_rel(path), name)
+                    )
+
     def test_sdk_loader_lives_outside_sdk(self):
         self.assertFalse((ROOT / "sdk" / "loader.py").exists())
         self.assertTrue((ROOT / "ui" / "module_loader.py").exists())
 
     def test_hint_contracts_are_qt_free(self):
-        path = ROOT / "sdk" / "hints.py"
+        path = ROOT / "sdk" / "ui" / "hints.py"
         self.assertTrue(path.exists())
         roots = _imports(path)
         self.assertNotIn("PyQt5", roots)

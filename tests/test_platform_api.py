@@ -6,15 +6,10 @@ from types import SimpleNamespace
 
 from tests.support import SRC  # noqa: F401
 
-from sdk import (
-    FileOpened,
-    FileOpenFailed,
-    ForestRef,
-    ProjectSetting,
-    ProjectSettingChoice,
-    TreeReady,
-)
-from sdk.events import Events
+from sdk.contracts import FileOpened, FileOpenFailed, TreeReady
+from sdk import ForestRef
+from sdk.features.projects import ProjectSetting, ProjectSettingChoice
+from sdk.contracts.events import Events
 from ui.bus import EventBus
 from ui.platform_api import PlatformApi
 from app.projects import PreviewItem, ProjectService
@@ -816,7 +811,7 @@ class ResolvedDocumentPlatformTest(unittest.TestCase):
             )
             # Карточка присылает устаревший полный текст, но актуальную
             # строчную правку — должна примениться только она.
-            from sdk.api import ResolvedLineEdit
+            from sdk.features.documents import ResolvedLineEdit
 
             self.assertTrue(
                 api.update_resolved_draft(
@@ -998,7 +993,7 @@ class _FakeServices:
 
     def build_item_entry(self, forest, resolved_text, section, log=None,
                          overlay=None):
-        from sdk.api import ItemEntry, ItemField
+        from sdk.features.items import ItemEntry, ItemField
 
         return ItemEntry(
             section=str(section),

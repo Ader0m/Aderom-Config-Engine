@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import QApplication, QPlainTextEdit, QWidget
 from PyQt5.QtTest import QTest
 
 from core.catalogs.colors import ColorDef, ColorSet
-from sdk.hints import HintItem, HintResult, HintTargetInfo
+from sdk.ui.hints import HintItem, HintResult, HintTargetInfo
 from ui.hints import HintService
 from ui.hints.providers.colors import ColorTagProvider
 from modules.base_module.item_viewer import LocalizedDescriptionEdit

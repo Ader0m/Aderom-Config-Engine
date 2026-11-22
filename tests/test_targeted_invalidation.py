@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 from tests.support import SRC  # noqa: F401
 
-from sdk.api import ProjectOverlay
+from sdk.contracts import ProjectOverlay
 
 from core.facade import CoreServices
 from core.resolver.service import ResolverService

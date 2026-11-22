@@ -14,8 +14,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from sdk.api import FileOpened
-from sdk.events import Events
+from sdk.contracts import FileOpened
+from sdk.contracts.events import Events
 
 from .editor import CodeEditor
 

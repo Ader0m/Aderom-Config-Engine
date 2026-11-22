@@ -41,7 +41,7 @@ from PyQt5.QtWidgets import (
 
 from PyQt5.Qsci import QsciScintilla
 
-from sdk.hints import (
+from sdk.ui.hints import (
     HintTargetInfo,
     LANGUAGE_LTX,
     LANGUAGE_PLAIN,

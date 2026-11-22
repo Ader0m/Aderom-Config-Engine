@@ -5,7 +5,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sdk import FileReader, FileView
+from sdk import FileReader
+from sdk.features.documents import FileView
 
 from .ogg import (
     OggError,

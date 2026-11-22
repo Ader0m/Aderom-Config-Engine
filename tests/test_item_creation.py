@@ -11,13 +11,8 @@ from PyQt5.QtCore import Qt
 from tests.support import SRC  # noqa: F401
 
 from tests.qt_support import qapp
-from sdk.api import (
-    ItemCatalog,
-    ItemEntry,
-    ItemField,
-    ItemSection,
-    ProjectOverlay,
-)
+from sdk.features.items import ItemCatalog, ItemEntry, ItemField, ItemSection
+from sdk.contracts import ProjectOverlay
 from modules.base_module.item_viewer import (
     CreateItemDialog,
     ItemViewerFeature,
@@ -126,6 +121,9 @@ class _Ctx:
     def __init__(self, scan_dir):
         self.ui = _Ui()
         self.services = _Services(scan_dir)
+        self.documents = self.ui
+        self.items = self.ui
+        self.projects = self.ui
 
 
 class _Forest:

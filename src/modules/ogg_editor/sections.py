@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
-from sdk.paths import path_key
+from sdk.contracts.paths import path_key
 
 _SECTION_RE = re.compile(r"^\[([^\]]+)\](?::.*)?$")
 _KEY_RE = re.compile(r"^([^=]+?)\s*=\s*(.*)$")

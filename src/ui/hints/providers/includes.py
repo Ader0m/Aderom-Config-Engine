@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from sdk.hints import (
+from sdk.ui.hints import (
     KIND_DIRECTIVE,
     KIND_INCLUDE,
     LANGUAGE_LTX,

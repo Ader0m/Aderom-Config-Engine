@@ -38,12 +38,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from sdk import (
-    DEFAULT_SEARCH_DELAY_MS,
-    ITEM_SECTION_MIME,
-    decode_item_section,
-    path_key as sdk_path_key,
-)
+from sdk import DEFAULT_SEARCH_DELAY_MS, path_key as sdk_path_key
+from sdk.features.items import ITEM_SECTION_MIME, decode_item_section
 
 from .ogg import (
     OggError,
@@ -1230,7 +1226,7 @@ class OggExplorerWindow(QWidget):
         except OSError:
             pass
         try:
-            return self.ctx.ui.read_project_asset(path) is not None
+            return self.ctx.projects.read_project_asset(path) is not None
         except Exception:
             return False
 
@@ -1285,7 +1281,7 @@ class OggExplorerWindow(QWidget):
         sounds_root = Path(self._game_root) / "sounds"
         drafts = []
         try:
-            for draft in self.ctx.ui.project_asset_drafts():
+            for draft in self.ctx.projects.project_asset_drafts():
                 path = Path(draft.path)
                 try:
                     path.relative_to(sounds_root)
@@ -1597,7 +1593,7 @@ class OggExplorerWindow(QWidget):
                 continue
 
             try:
-                data = self.ctx.ui.read_project_asset(node.path)
+                data = self.ctx.projects.read_project_asset(node.path)
             except Exception:
                 data = None
 

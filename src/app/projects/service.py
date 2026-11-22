@@ -30,9 +30,9 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from core import (
+from core.api.documents import LineSource, analyze_multiline_edit
+from core.api.patches import (
     GeneratedPatch,
-    LineSource,
     PatchFile,
     PatchIssue,
     PatchOptions,
@@ -40,13 +40,12 @@ from core import (
     PatchTarget,
     VerificationCheck,
     VerificationResult,
-    analyze_multiline_edit,
     merge_patch_plans,
-    read_text_safe,
-    read_xml_text,
 )
+from core.api.vfs import read_text_safe, read_xml_text
 
-from sdk.api import ProjectOverlay, SavedDraft
+from sdk.contracts import ProjectOverlay
+from sdk.features.projects import SavedDraft
 
 from app.documents import collapse_duplicated_text
 
@@ -264,7 +263,7 @@ class ProjectService(ProjectPreviewMixin):
 
     @staticmethod
     def path_key(path) -> str:
-        from sdk.paths import path_key
+        from sdk.contracts.paths import path_key
 
         return path_key(path)
 

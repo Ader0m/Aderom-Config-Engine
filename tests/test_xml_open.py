@@ -63,6 +63,9 @@ class _Ctx:
     def __init__(self):
         self.ui = _Ui()
         self.services = _Services()
+        self.documents = self.ui
+        self.items = self.ui
+        self.projects = self.ui
 
 
 class _Result:

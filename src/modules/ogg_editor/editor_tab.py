@@ -23,8 +23,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from sdk.events import Events
-from sdk.paths import path_key
+from sdk.contracts.events import Events
+from sdk.contracts.paths import path_key
 
 from .ogg import (
     CommentFormatError,
@@ -97,7 +97,7 @@ class OggEditorTab(QWidget):
     def _load(self):
         data = None
         try:
-            data = self.ctx.ui.read_project_asset(self.path)
+            data = self.ctx.projects.read_project_asset(self.path)
         except Exception:
             data = None
 
@@ -503,7 +503,7 @@ class OggEditorTab(QWidget):
             return
 
         if self.editor.toPlainText() == self._saved_text:
-            if self.ctx.ui.update_project_asset(
+            if self.ctx.projects.update_project_asset(
                 self.path,
                 self._saved_data,
             ):
@@ -519,7 +519,7 @@ class OggEditorTab(QWidget):
             self.ctx.ui.set_editor_tab_dirty(self.tab_id, True)
             return
 
-        if self.ctx.ui.update_project_asset(self.path, pending):
+        if self.ctx.projects.update_project_asset(self.path, pending):
             self._data = pending
             self._update_status()
             self.ctx.ui.set_editor_tab_dirty(self.tab_id, True)
@@ -552,7 +552,7 @@ class OggEditorTab(QWidget):
         if data is None:
             return
 
-        if not self.ctx.ui.save_project_asset(self.path, data):
+        if not self.ctx.projects.save_project_asset(self.path, data):
             self._update_status("Не удалось сохранить в проект")
             return
 

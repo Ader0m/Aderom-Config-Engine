@@ -308,7 +308,7 @@ class LtxFileOpener:
 
         # Уникальный tab_id — чтобы можно было держать несколько резолвов открытыми
         tab_id = resolved_tab_id(rel)
-        self.ctx.ui.open_resolved_tab(
+        self.ctx.documents.open_resolved_tab(
             tab_id,
             "[Res]%s" % rel,
             text,

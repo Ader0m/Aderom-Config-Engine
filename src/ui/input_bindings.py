@@ -5,8 +5,8 @@ from PyQt5.QtCore import QEvent, QObject, Qt
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import QApplication, QShortcut
 
-from sdk.events import Events
-from sdk.registrations import RegistrationHandle, remove_identity
+from sdk.contracts.events import Events
+from sdk.kernel.registrations import RegistrationHandle, remove_identity
 
 
 _MODIFIERS = {

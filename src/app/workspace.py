@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sdk.forest import ForestRef, unwrap_forest
+from sdk.contracts.forest import ForestRef, unwrap_forest
 
 
 class WorkspaceService:

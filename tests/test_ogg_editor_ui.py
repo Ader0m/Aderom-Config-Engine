@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import QDoubleSpinBox, QStyleOptionViewItem
 from tests.qt_support import qapp
 from tests.support import SRC  # noqa: F401
 
-from sdk import ITEM_SECTION_MIME, encode_item_section
+from sdk.features.items import ITEM_SECTION_MIME, encode_item_section
 from tests.test_ogg_comment import _make_file
 
 from modules.ogg_editor import editor_tab as editor_tab_module
@@ -128,6 +128,9 @@ class _Ctx:
         self.events = _Events()
         self.tasks = _Tasks()
         self.services = None
+        self.documents = self.ui
+        self.items = self.services
+        self.projects = self.ui
 
     def log(self, message):
         self.ui.log(message)

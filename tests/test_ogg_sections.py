@@ -7,8 +7,8 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from sdk import decode_item_section, encode_item_section
-from sdk import GraphNode, SectionGraph, SectionGraphRequest
+from sdk.features.items import decode_item_section, encode_item_section
+from sdk.contracts import GraphNode, SectionGraph, SectionGraphRequest
 from modules.ogg_editor.section_links import OggSectionGraphContributor
 from modules.ogg_editor.sections import (
     extract_sound_paths,

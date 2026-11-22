@@ -56,3 +56,8 @@
   Этапа 5.
 - [ADR-13](ADR-13-architecture-guardrails.md) — архитектурные guardrails
   и allowlist.
+
+Решения Этапа 1:
+
+- [ADR-14](ADR-14-sdk-clean-contract.md) — чистый контракт SDK,
+  capabilities и порты ядра.

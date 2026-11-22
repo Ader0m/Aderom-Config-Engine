@@ -9,8 +9,9 @@ from pathlib import Path
 from app.documents import ResolvedDocument, prepare_field_edit
 from app.projects import ProjectError
 from PyQt5.QtCore import QTimer
-from sdk.api import ItemCardRequest, ResolvedDraftInfo
-from sdk.events import Events
+from sdk.features.items import ItemCardRequest
+from sdk.features.documents import ResolvedDraftInfo
+from sdk.contracts.events import Events
 
 
 class ResolvedDocumentMixin:
@@ -79,7 +80,7 @@ class ResolvedDocumentMixin:
         if not roots:
             return False
 
-        from sdk.paths import path_key
+        from sdk.contracts.paths import path_key
 
         if path_key(path) not in {path_key(root) for root in roots}:
             return False

@@ -15,15 +15,9 @@ from typing import Dict, Optional
 
 from PyQt5.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 
-from sdk import (
-    ModuleBase,
-    ModuleManifest,
-    ProjectAssetType,
-    ProjectSetting,
-    ProjectSettingChoice,
-    path_key,
-)
-from sdk.events import Events
+from sdk import ModuleBase, ModuleManifest, path_key
+from sdk.features.projects import ProjectAssetType, ProjectSetting, ProjectSettingChoice
+from sdk.contracts.events import Events
 
 from .editor_tab import OggEditorTab
 from .explorer import OggExplorerWindow, SoundOpenHandler
@@ -131,7 +125,7 @@ class OggEditorModule(ModuleBase):
         )
 
     def register(self, ctx):
-        self._asset_type_registered = ctx.ui.register_project_asset_type(
+        self._asset_type_registered = ctx.projects.register_project_asset_type(
             ASSET_TYPE
         )
         if self._asset_type_registered:
@@ -145,7 +139,7 @@ class OggEditorModule(ModuleBase):
                 % ASSET_TYPE.key
             )
 
-        self._setting_registered = ctx.ui.register_project_setting(
+        self._setting_registered = ctx.projects.register_project_setting(
             OGG_SAVE_SETTING
         )
         if self._setting_registered:
@@ -159,7 +153,7 @@ class OggEditorModule(ModuleBase):
                 % OGG_SAVE_SETTING.key
             )
 
-        self._file_reader_sub = ctx.ui.register_file_reader(
+        self._file_reader_sub = ctx.projects.register_file_reader(
             OggCommentReader()
         )
 
@@ -213,14 +207,14 @@ class OggEditorModule(ModuleBase):
 
         if self._asset_type_registered:
             try:
-                ctx.ui.unregister_project_asset_type(ASSET_TYPE.key)
+                ctx.projects.unregister_project_asset_type(ASSET_TYPE.key)
             except Exception:
                 pass
             self._asset_type_registered = False
 
         if self._setting_registered:
             try:
-                ctx.ui.unregister_project_setting(OGG_SAVE_SETTING.key)
+                ctx.projects.unregister_project_setting(OGG_SAVE_SETTING.key)
             except Exception:
                 pass
             self._setting_registered = False
@@ -391,11 +385,11 @@ class OggEditorModule(ModuleBase):
             if answer != QMessageBox.Yes:
                 return
 
-        if not self.ctx.ui.update_project_asset(target, data):
+        if not self.ctx.projects.update_project_asset(target, data):
             return
         # Импорт — уже готовое изменение: сразу кладём его в каталог
         # проекта, чтобы новый звук не потерялся до автосохранения.
-        self.ctx.ui.save_project_asset(target, data)
+        self.ctx.projects.save_project_asset(target, data)
 
         if self._window is not None:
             self._window.reload()
@@ -519,7 +513,7 @@ class OggEditorModule(ModuleBase):
 
     # ------------------------------------------------------------ мультиредактирование
     def _read_current_bytes(self, path):
-        data = self.ctx.ui.read_project_asset(path)
+        data = self.ctx.projects.read_project_asset(path)
         if data is None:
             data = Path(path).read_bytes()
         return bytes(data)
@@ -598,9 +592,9 @@ class OggEditorModule(ModuleBase):
 
         self._suspend_refresh = True
         try:
-            if not self.ctx.ui.update_project_asset(path, rewritten):
+            if not self.ctx.projects.update_project_asset(path, rewritten):
                 return False, "Не удалось обновить черновик проекта."
-            if not self.ctx.ui.save_project_asset(path, rewritten):
+            if not self.ctx.projects.save_project_asset(path, rewritten):
                 return False, "Не удалось сохранить черновик проекта."
         finally:
             self._suspend_refresh = False
@@ -687,7 +681,7 @@ class OggEditorModule(ModuleBase):
                     if rewritten is None:
                         failed.append("%s: %s" % (path.name, reason))
                         continue
-                    if self.ctx.ui.update_project_asset(path, rewritten):
+                    if self.ctx.projects.update_project_asset(path, rewritten):
                         applied += 1
                     else:
                         failed.append(

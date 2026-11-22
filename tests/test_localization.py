@@ -94,7 +94,7 @@ class LocalizationTest(unittest.TestCase):
         self.assertNotEqual(first, second)
 
     def test_signature_ignores_unrelated_resolved_edits(self):
-        from sdk.api import ProjectOverlay
+        from sdk.contracts import ProjectOverlay
 
         service = LocalizationService()
         clean = ProjectOverlay()
@@ -114,7 +114,7 @@ class LocalizationTest(unittest.TestCase):
         )
 
     def test_signature_changes_when_overlay_xml_changes(self):
-        from sdk.api import ProjectOverlay
+        from sdk.contracts import ProjectOverlay
 
         service = LocalizationService()
         path = self.configs / "text" / "rus" / "ru.xml"

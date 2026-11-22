@@ -28,7 +28,7 @@ except ImportError:  # pragma: no cover - среда без PyQt
 log = logging.getLogger(__name__)
 
 try:
-    from sdk.events import PLATFORM_OWNER
+    from sdk.contracts.events import PLATFORM_OWNER
 except ImportError:  # pragma: no cover - ui всегда импортирует sdk
     PLATFORM_OWNER = "<platform>"
 

@@ -9,7 +9,7 @@ from PyQt5.QtTest import QTest
 from tests.support import SRC  # noqa: F401
 
 from tests.qt_support import qapp
-from sdk.api import ItemCatalog, ItemEntry, ItemField
+from sdk.features.items import ItemCatalog, ItemEntry, ItemField
 from modules.base_module.item_viewer import ItemViewerWindow
 
 _app = qapp()

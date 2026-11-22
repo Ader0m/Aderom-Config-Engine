@@ -10,7 +10,7 @@ from core.catalogs.colors import ColorDef, ColorSet
 from core.catalogs.includes import IncludeEntry, IncludeSet
 from core.catalogs.localization import EMPTY_LOCALIZATION, LocalizationSet
 from core.catalogs.sections import SectionInfo, SectionSet
-from sdk.hints import HintContext, HintTargetInfo
+from sdk.ui.hints import HintContext, HintTargetInfo
 from ui.hints.providers import (
     ColorTagProvider,
     DirectiveProvider,

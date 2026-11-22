@@ -11,7 +11,7 @@ from tests.helpers import FakeForest, write_text
 from core.patching.models import PatchOptions
 from core.patching.targets import xml_root_candidates
 from core.patching.xml.service import XmlPatchService
-from sdk import ProjectOverlay
+from sdk.contracts import ProjectOverlay
 
 
 class XmlTargetDraftTest(unittest.TestCase):

@@ -21,8 +21,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from sdk import ITEM_SECTION_MIME
-from sdk.events import Events
+from sdk.features.items import ITEM_SECTION_MIME
+from sdk.contracts.events import Events
 
 from .diagnostics import DiagnosticsLog
 from .editor_tabs import EditorTabs

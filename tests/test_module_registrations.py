@@ -11,23 +11,30 @@ from tests.support import SRC  # noqa: F401
 
 from PyQt5.QtWidgets import QWidget
 
-from sdk import (
-    FileReader,
-    ProjectAssetType,
-    ProjectSetting,
-    ProjectSettingChoice,
-    RegistrationHandle,
-    RegistrationScope,
-)
-from sdk.adapters import CoreApiAdapter
-from sdk.contracts import ModuleBase, ModuleContext, ModuleManifest
-from sdk.events import Events
+from sdk import FileReader, RegistrationHandle, RegistrationScope
+from sdk.features.projects import ProjectAssetType, ProjectSetting, ProjectSettingChoice
+from ui.platform.sdk_bridge import CoreApiAdapter, build_module_context
+from sdk.kernel import ModuleBase, ModuleContext, ModuleManifest
+from sdk.contracts.events import Events
 from ui.bus import CommandBus, EventBus
 from ui.file_open_router import FileOpenRouter
 from ui.input_bindings import MouseBindingManager, ShortcutManager
 from ui.module_loader import ModuleLoader, ModuleRecord, ModuleState
 from ui.platform.registration import RegistrationHub
 from ui.platform_api import PlatformApi
+
+
+def _make_context(api, events, commands, paths, services, module_name="demo"):
+    return build_module_context(
+        SimpleNamespace(name=module_name),
+        sdk_version="0.1.0",
+        events=events,
+        commands=commands,
+        ui=api,
+        tasks=None,
+        services=services,
+        paths=paths,
+    )
 
 
 class RegistrationScopeTest(unittest.TestCase):
@@ -38,7 +45,7 @@ class RegistrationScopeTest(unittest.TestCase):
         scope.track(RegistrationHandle(lambda: 1 / 0))
         scope.track(RegistrationHandle(lambda: calls.append("c")))
 
-        with self.assertLogs("sdk.registrations", level="ERROR"):
+        with self.assertLogs("sdk.kernel.registrations", level="ERROR"):
             self.assertEqual(scope.dispose(), 3)
 
         self.assertEqual(calls, ["c", "a"])
@@ -326,16 +333,7 @@ class _ContextMixin:
         events = EventBus()
         commands = CommandBus()
         api = PlatformApi(events, commands, None, object(), paths)
-        ctx = ModuleContext(
-            "0.1.0",
-            events,
-            commands,
-            api,
-            None,
-            object(),
-            paths,
-            module_name=module_name,
-        )
+        ctx = _make_context(api, events, commands, paths, object(), module_name)
         return api, events, commands, ctx
 
 
@@ -350,16 +348,7 @@ class EventOwnershipTest(unittest.TestCase):
         api = PlatformApi(events, commands, None, object(), paths)
 
         def make(name):
-            return ModuleContext(
-                "0.1.0",
-                events,
-                commands,
-                api,
-                None,
-                object(),
-                paths,
-                module_name=name,
-            )
+            return _make_context(api, events, commands, paths, object(), name)
 
         return api, events, make("first"), make("second")
 
@@ -427,7 +416,7 @@ class ModuleContextCleanupTest(_ContextMixin, unittest.TestCase):
             lambda event: False,
         )
         self.assertTrue(
-            ctx.ui.register_project_asset_type(
+            ctx.projects.register_project_asset_type(
                 ProjectAssetType(
                     key="demo.bin",
                     label="Демо",
@@ -437,7 +426,7 @@ class ModuleContextCleanupTest(_ContextMixin, unittest.TestCase):
             )
         )
         self.assertTrue(
-            ctx.ui.register_project_setting(
+            ctx.projects.register_project_setting(
                 ProjectSetting(
                     key="demo.mode",
                     label="Демо",
@@ -449,7 +438,7 @@ class ModuleContextCleanupTest(_ContextMixin, unittest.TestCase):
                 )
             )
         )
-        ctx.ui.register_file_reader(self.Reader())
+        ctx.projects.register_file_reader(self.Reader())
         ctx.commands.register("demo.run", lambda: None)
         subscription = ctx.events.subscribe("demo.event", lambda payload: None)
         ctx.services.register_section_graph_contributor(
@@ -541,16 +530,7 @@ class MainWindowMenuTest(_ContextMixin, unittest.TestCase):
             tree_query=SimpleNamespace(sort_nodes=lambda nodes: nodes),
         )
         api = PlatformApi(events, commands, None, services, paths)
-        ctx = ModuleContext(
-            "0.1.0",
-            events,
-            commands,
-            api,
-            None,
-            services,
-            paths,
-            module_name="demo",
-        )
+        ctx = _make_context(api, events, commands, paths, services, "demo")
 
         handle = ctx.ui.register_menu(
             "Инструменты",

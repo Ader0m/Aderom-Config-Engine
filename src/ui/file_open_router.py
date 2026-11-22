@@ -4,8 +4,8 @@
 import logging
 from pathlib import Path
 
-from sdk.contracts import FileOpenHandler
-from sdk.registrations import RegistrationHandle, remove_identity
+from sdk.ui import FileOpenHandler
+from sdk.kernel.registrations import RegistrationHandle, remove_identity
 
 log = logging.getLogger(__name__)
 

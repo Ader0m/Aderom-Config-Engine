@@ -8,7 +8,9 @@ from types import SimpleNamespace
 from tests.support import SRC  # noqa: F401
 
 from tests.qt_support import qapp
-from sdk.api import ItemEntry, ItemField, ResolvedDraftInfo
+from sdk.features.items import ItemEntry, ItemField
+from sdk.features.documents import ResolvedDraftInfo
+from ui.platform.sdk_bridge import ItemApiAdapter
 from modules.base_module.item_viewer import ItemCardView, ItemViewerFeature
 
 _app = qapp()
@@ -27,6 +29,9 @@ class _Ui:
 
     def has_resolved_document(self, tab_id):
         return True
+
+    def resolved_document_title(self, tab_id):
+        return ""
 
     def resolved_draft(self, tab_id):
         return ResolvedDraftInfo(
@@ -115,6 +120,9 @@ class _Ctx:
         self.tasks = tasks
         self.services = _Services()
         self.events = None
+        self.documents = ui
+        self.items = ItemApiAdapter(self.services, ui)
+        self.projects = ui
 
 
 class _Session:
@@ -303,7 +311,7 @@ class AsyncQueueBackendTest(unittest.TestCase):
 
 class DeferredCardRefreshTest(unittest.TestCase):
     def _entry(self, name="Старое имя"):
-        from sdk.api import LocalizationString
+        from sdk.features.items import LocalizationString
 
         return ItemEntry(
             section="item",

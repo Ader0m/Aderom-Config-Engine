@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Реестр читателей файлов, которые поставляют модули.
 
-Читатель превращает файл (путь + байты) в :class:`sdk.api.FileView`.
+Читатель превращает файл (путь + байты) в :class:`sdk.features.documents.FileView`.
 Проект использует его, когда ему нужен «итоговый вид» файла: сейчас —
 в предпросмотре патча, дальше — в поиске, экспорте и других сценариях.
 
@@ -15,8 +15,8 @@ import threading
 from pathlib import Path
 from typing import List, Optional
 
-from sdk.api import FileView
-from sdk.contracts import FileReader
+from sdk.features.documents import FileView
+from sdk.ui import FileReader
 
 
 class FileReaderError(Exception):

@@ -16,8 +16,8 @@ from pathlib import Path
 from PyQt5.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from core import read_text_safe, read_xml_text
-from sdk.events import Events
-from sdk.api import AssetDraftInfo, ProjectChanged, SavedDraft
+from sdk.contracts.events import Events
+from sdk.features.projects import AssetDraftInfo, ProjectChanged, SavedDraft
 
 from app.projects import (
     ProjectAssetTypeError,

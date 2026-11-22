@@ -10,13 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from sdk import (
-    GraphEdgeStyle,
-    GraphMatch,
-    GraphNode,
-    SectionGraphContribution,
-    path_key as sdk_path_key,
-)
+from sdk.contracts import GraphEdgeStyle, GraphMatch, GraphNode, SectionGraphContribution
+from sdk import path_key as sdk_path_key
 
 from .sections import extract_sound_references, make_section_resolver
 

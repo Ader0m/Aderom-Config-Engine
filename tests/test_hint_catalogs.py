@@ -12,8 +12,8 @@ from core.catalogs.colors import ColorCatalog, parse_color_definitions
 from core.catalogs.includes import IncludeCatalog
 from core.catalogs.localization import LocalizationIndex
 from core.catalogs.sections import SectionCatalog
-from sdk.api import ProjectOverlay
-from sdk.engine_text import parse_color_definitions as sdk_colors
+from sdk.contracts import ProjectOverlay
+from sdk.features.documents.engine_text import parse_color_definitions as sdk_colors
 
 
 COLOR_XML = """<?xml version="1.0" encoding="windows-1251"?>

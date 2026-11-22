@@ -5,7 +5,7 @@ import unittest
 
 from tests.support import SRC  # noqa: F401
 
-from sdk.engine_text import (
+from sdk.features.documents.engine_text import (
     engine_source_text,
     engine_text_lines,
     parse_color_definitions,

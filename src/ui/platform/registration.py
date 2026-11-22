@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import threading
 
-from sdk.registrations import RegistrationHandle, remove_identity
+from sdk.kernel.registrations import RegistrationHandle, remove_identity
 
 
 class RegistrationHub:

@@ -8,7 +8,7 @@ from pathlib import Path
 from tests.support import SRC  # noqa: F401
 from tests.helpers import write_text
 
-from sdk.api import ProjectOverlay
+from sdk.contracts import ProjectOverlay
 
 from core.resolver.prebuild import PrebuildService
 from core.resolver.service import ResolverService

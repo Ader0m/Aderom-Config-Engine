@@ -5,7 +5,7 @@ import unittest
 
 from tests.support import SRC  # noqa: F401
 
-from sdk.events import Events, is_namespaced, namespace_of
+from sdk.contracts.events import Events, is_namespaced, namespace_of
 
 
 class EventsNamespaceTest(unittest.TestCase):

@@ -15,7 +15,7 @@ from core.tree.builder import (
     add_virtual_file,
     remove_virtual_file,
 )
-from sdk.api import ProjectOverlay
+from sdk.contracts import ProjectOverlay
 
 
 class _ForestServices:

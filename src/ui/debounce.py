@@ -8,7 +8,7 @@
 
 from PyQt5.QtCore import QObject, QTimer
 
-from sdk.constants import DEFAULT_SEARCH_DELAY_MS
+from sdk.contracts.constants import DEFAULT_SEARCH_DELAY_MS
 
 
 class Debounce(QObject):

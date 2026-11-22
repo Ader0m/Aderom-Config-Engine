@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 """Реестр настроек проекта, которые добавляют модули.
 
-Модуль описывает настройку через SDK (:class:`sdk.api.ProjectSetting`),
-а платформа:
+Модуль описывает настройку через SDK
+(:class:`sdk.features.projects.ProjectSetting`), а платформа:
 
 - показывает её в окне настроек активного проекта;
 - хранит выбранное значение в ``project.json``;
-- отдаёт значение обратно модулю через ``ctx.ui.project_setting(...)``.
+- отдаёт значение обратно модулю через ``ctx.projects.project_setting(...)``.
 
 Конкретные ключи и подписи не зашиты в UI: ogg-редактор добавляет свою
 настройку так же, как это сможет сделать любой другой модуль.
@@ -17,7 +17,7 @@ from __future__ import annotations
 import threading
 from typing import Dict, Iterable, Optional, Tuple
 
-from sdk.api import ProjectSetting, ProjectSettingChoice
+from sdk.features.projects import ProjectSetting, ProjectSettingChoice
 
 
 _SETTING_KINDS = ("choice", "bool", "text")

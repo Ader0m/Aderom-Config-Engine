@@ -8,7 +8,7 @@ from tests.support import SRC  # noqa: F401
 
 from core.tools.cache import ResolvedCache
 from core.xml.service import XmlResolveService
-from sdk.api import ProjectOverlay
+from sdk.contracts import ProjectOverlay
 
 
 class XmlResolveServiceTest(unittest.TestCase):

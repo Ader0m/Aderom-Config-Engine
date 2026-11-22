@@ -6,13 +6,15 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from sdk import PatchTargetInfo
-from sdk.adapters import (
+from sdk.features.patches import PatchTargetInfo
+from ui.platform.sdk_bridge import (
     CommandApiAdapter,
     CoreApiAdapter,
     EventApiAdapter,
+    TaskApiAdapter,
+    UiApiAdapter,
 )
-from sdk.contracts import ModuleContext
+from sdk.kernel import ModuleContext
 from ui.bus import CommandBus, CommandError, EventBus
 
 
@@ -156,7 +158,7 @@ class SdkAdapterTest(unittest.TestCase):
         events = EventApiAdapter(bus)
         events.bind_owner("demo")
 
-        with self.assertLogs("sdk.adapters", level="WARNING"):
+        with self.assertLogs("ui.platform.sdk_bridge", level="WARNING"):
             events.publish("other_module.event", None)
 
     def test_command_adapter_reports_missing_and_failing_handlers(self):
@@ -173,15 +175,16 @@ class SdkAdapterTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             commands.execute("test.fail", 1)
 
-    def test_module_context_wraps_buses(self):
+    def test_module_context_uses_adapters(self):
         ctx = ModuleContext(
             "0.1.0",
-            EventBus(),
-            CommandBus(),
-            _Ui(),
-            _Tasks(),
-            _Services(),
-            None,
+            module_id="test",
+            events=EventApiAdapter(EventBus()),
+            commands=CommandApiAdapter(CommandBus()),
+            ui=UiApiAdapter(_Ui()),
+            tasks=TaskApiAdapter(_Tasks()),
+            services=CoreApiAdapter(_Services()),
+            paths=None,
         )
 
         self.assertIsInstance(ctx.events, EventApiAdapter)

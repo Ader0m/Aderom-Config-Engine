@@ -16,8 +16,8 @@ from core.catalogs import (
     EMPTY_LOCALIZATION,
     EMPTY_SECTIONS,
 )
-from sdk.events import Events
-from sdk.hints import NullHintsHandle
+from sdk.contracts.events import Events
+from sdk.ui.hints import NullHintsHandle
 from ui.hints.adapters import create_adapter
 from ui.hints.controller import HintController
 from ui.hints.registry import HintRegistry

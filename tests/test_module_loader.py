@@ -11,7 +11,7 @@ from contextlib import redirect_stderr
 
 from tests.support import SRC  # noqa: F401
 
-from sdk.contracts import ModuleManifest
+from sdk.kernel import ModuleManifest
 from ui.module_loader import ModuleLoader
 
 

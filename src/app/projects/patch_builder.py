@@ -14,9 +14,10 @@ from dataclasses import replace
 from pathlib import Path
 from typing import List, Tuple
 
-from sdk.api import ProjectOverlay
+from sdk.contracts import ProjectOverlay
 
-from core import (
+from core.api.documents import analyze_multiline_edit
+from core.api.patches import (
     GeneratedPatch,
     PatchFile,
     PatchIssue,
@@ -25,10 +26,9 @@ from core import (
     PatchTarget,
     VerificationCheck,
     VerificationResult,
-    analyze_multiline_edit,
-    game_root_from_scan_dir,
     merge_patch_plans,
 )
+from core.api.vfs import game_root_from_scan_dir
 
 from .assets import ProjectAssetTypeError
 from .models import (

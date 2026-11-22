@@ -9,10 +9,11 @@ from types import SimpleNamespace
 from tests.support import SRC  # noqa: F401
 
 from tests.qt_support import qapp
-from sdk.api import ItemEntry, ItemField
+from sdk.features.items import ItemEntry, ItemField
 from ui.bus import EventBus
 from ui.editor import ResolvedView
 from ui.editor_tabs import EditorTabs
+from ui.platform.sdk_bridge import ItemApiAdapter
 from ui.platform_api import PlatformApi
 from modules.base_module.item_viewer import ItemCardView, ItemViewerFeature
 
@@ -78,6 +79,9 @@ class _Ctx:
         self.events = events
         self.ui = ui
         self.services = _Services()
+        self.documents = ui
+        self.items = ItemApiAdapter(self.services, ui)
+        self.projects = ui
 
 
 class ResolvedItemFlowTest(unittest.TestCase):
