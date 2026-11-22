@@ -512,9 +512,15 @@ def main(argv=None):
         cache_service=cache_service,
     )
 
+    tree_parts = {}
+
     def build_tree_production():
+        started = time.perf_counter()
         forest = tree_builder.build(scan, use_cache=False)
+        tree_parts["raw_ms"] = (time.perf_counter() - started) * 1000.0
+        started = time.perf_counter()
         snapshot = snapshot_service.observe_forest(forest)
+        tree_parts["snapshot_ms"] = (time.perf_counter() - started) * 1000.0
         forest.cache_id = snapshot.id
         forest.overlay_revision = snapshot.overlay_revision
         return forest
@@ -590,6 +596,14 @@ def main(argv=None):
         },
         "timings_ms": {
             "tree_build": round(tree_ms, 1),
+            "tree_build_raw": round(
+                tree_parts.get("raw_ms", 0.0),
+                1,
+            ),
+            "snapshot_observe": round(
+                tree_parts.get("snapshot_ms", 0.0),
+                1,
+            ),
             "resolver_pass": round(resolver_ms, 1),
             "assemble_system": round(assemble_ms, 1),
             "assemble_disk_cold": disk_cache["cold_ms"],

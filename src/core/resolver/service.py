@@ -212,7 +212,14 @@ class ResolverService:
             )
 
     def cache_stats(self):
-        return self._resolved_cache.stats()
+        if self._cache_service is None:
+            return self._resolved_cache.stats()
+        stats = self._cache_service.stats()
+        result = dict(stats.get("backends", {}).get("resolved", {}))
+        result.update(
+            stats.get("namespaces", {}).get("resolve.text", {})
+        )
+        return result
 
     def overlay_for_root(self, forest, root_path, overlay):
         """Overlay, относящийся к поддереву конкретного корня.

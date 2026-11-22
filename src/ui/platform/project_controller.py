@@ -155,6 +155,14 @@ class ProjectControllerMixin:
                 "Проект: VFS обновлён — добавлено файлов: %d, удалено: %d"
                 % (added, removed)
             )
+        elif self.workspace.is_stale:
+            self.set_status(
+                "Дерево устарело: требуется пересборка VFS",
+            )
+            self.log(
+                "Проект: лес собран для другой ревизии overlay; "
+                "виртуальные файлы не применены до пересборки VFS"
+            )
         return added, removed
 
     def write_project_text(self, path, text):

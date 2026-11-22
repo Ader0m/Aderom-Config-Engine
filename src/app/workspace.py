@@ -126,7 +126,11 @@ class SnapshotService:
         paths = list(getattr(forest, "files", ()) or ())
         paths.extend(getattr(forest, "xml_files", ()) or ())
         files_signature = (
-            file_index_signature(scan, paths=paths)
+            file_index_signature(
+                scan,
+                paths=paths,
+                normalized=True,
+            )
             if scan is not None
             else ""
         )
@@ -276,13 +280,18 @@ class WorkspaceSession:
         if current is None:
             self._stale = False
             return
+        forest_id = str(getattr(forest, "cache_id", "") or "")
         forest_overlay = str(
             getattr(forest, "overlay_revision", "") or ""
         )
-        if forest_overlay:
-            self._stale = forest_overlay != current.overlay_revision
-        else:
-            self._stale = bool(current.overlay_revision)
+        self._stale = bool(
+            (forest_id and current.id and forest_id != current.id)
+            or (
+                forest_overlay
+                and current.overlay_revision
+                and forest_overlay != current.overlay_revision
+            )
+        )
 
     @property
     def virtual_paths(self):
@@ -320,12 +329,15 @@ class WorkspaceSession:
                 forest_overlay = str(
                     getattr(forest, "overlay_revision", "") or ""
                 )
-                if forest_overlay:
-                    self._stale = (
-                        forest_overlay != current.overlay_revision
+                self._stale = bool(
+                    (cache_id and current.id and cache_id != current.id)
+                    or (
+                        forest_overlay
+                        and current.overlay_revision
+                        and forest_overlay != current.overlay_revision
                     )
-                else:
-                    self._stale = bool(current.overlay_revision)
+                    or (not cache_id and current.id)
+                )
         if config_dir is not None:
             self._config_dir = Path(config_dir)
         self._generation += 1
@@ -425,7 +437,33 @@ class WorkspaceSession:
         if forest is None or services is None:
             return 0, 0
 
-        self.update_overlay(getattr(overlay, "revision", ""))
+        overlay_revision = str(getattr(overlay, "revision", "") or "")
+        had_current = self._snapshot_service.current is not None
+        self.update_overlay(overlay_revision)
+
+        if had_current and self._stale:
+            # set_forest уже определил, что полный снимок леса не
+            # совпадает с текущим (например, изменился файловый индекс).
+            # Точечное добавление/удаление файлов не должно выдавать
+            # старый include-граф за новый снимок.
+            self.last_added_paths = set()
+            self.last_removed_paths = set()
+            self.last_removed_roots = set()
+            return 0, 0
+
+        forest_overlay = str(
+            getattr(forest, "overlay_revision", "") or ""
+        )
+        if forest_overlay != overlay_revision:
+            # Лес собран для другой overlay-ревизии (включая случай
+            # «без overlay»). Точечное добавление виртуальных файлов не
+            # делает его снимком новой ревизии: include-граф и структура
+            # остались старыми.
+            self._stale = True
+            self.last_added_paths = set()
+            self.last_removed_paths = set()
+            self.last_removed_roots = set()
+            return 0, 0
 
         source_files = getattr(overlay, "source_files", None) or {}
         wanted = {
@@ -469,8 +507,10 @@ class WorkspaceSession:
             except Exception:
                 continue
 
-        overlay_revision = str(getattr(overlay, "revision", "") or "")
         if added or removed:
+            # Здесь overlay-ревизия совпадает с ревизией леса (или лес
+            # legacy без поля): точечное изменение виртуальных файлов
+            # действительно относится к этому снимку.
             snapshot = self._snapshot_service.observe_forest(
                 forest,
                 overlay_revision=overlay_revision,
@@ -482,6 +522,6 @@ class WorkspaceSession:
             self._stale = False
             self._generation += 1
         else:
-            forest.overlay_revision = overlay_revision
+            # Лес не пересобирался: не приписываем ему новую ревизию.
             self._refresh_stale()
         return added, removed

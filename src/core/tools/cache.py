@@ -147,6 +147,7 @@ def file_index_signature(
     scan_dir,
     suffixes=(".ltx", ".xml"),
     paths=None,
+    normalized=False,
 ) -> str:
     """Подпись файлового индекса VFS: пути + mtime/size/ctime.
 
@@ -160,7 +161,12 @@ def file_index_signature(
         paths = scan_files(scan_dir, suffixes)
 
     digest = hashlib.sha1()
-    items = [(path_key(path), path) for path in paths]
+    identity = (
+        (lambda path: os.path.normcase(os.fspath(path)))
+        if normalized
+        else path_key
+    )
+    items = [(identity(path), path) for path in paths]
     items.sort(key=lambda item: item[0])
     for key, path in items:
         digest.update(key.encode("utf-8", "replace"))

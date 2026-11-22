@@ -548,6 +548,9 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
             or str(getattr(raw, "cache_id", "") or "")
         )
         if self.workspace.is_stale:
+            self.set_status(
+                "Дерево устарело: требуется пересборка VFS",
+            )
             self.log(
                 "Дерево собрано для overlay %s, актуален %s: "
                 "требуется пересборка VFS"

@@ -76,7 +76,12 @@ class XmlResolveService:
 
     # -------------------------------------------------- кэш
     def cache_stats(self):
-        return self._resolved_cache.stats()
+        if self._cache_service is None:
+            return self._resolved_cache.stats()
+        stats = self._cache_service.stats()
+        result = dict(stats.get("backends", {}).get("resolved", {}))
+        result.update(stats.get("namespaces", {}).get("xml", {}))
+        return result
 
     def clear(self):
         self._resolved_cache.clear()

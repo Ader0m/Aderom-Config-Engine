@@ -711,6 +711,12 @@ class ProjectVfsRestoreTest(unittest.TestCase):
                 / "mod_item_base_~ace_p.ltx"
             )
             api.project.save_draft(path, "[item]\n")
+            # Лес в этом тесте не пересобирается; фиксируем ревизию и
+            # снимок, для которых он актуален, чтобы проверить именно
+            # механизм добавления/удаления виртуальных файлов.
+            overlay = api.project_overlay()
+            api._forest.overlay_revision = overlay.revision
+            api._forest.cache_id = api.workspace.snapshot_id
 
             added, removed = api._restore_project_virtual_files()
 
@@ -719,6 +725,9 @@ class ProjectVfsRestoreTest(unittest.TestCase):
             self.assertEqual(api.services.resolver.invalidations, 1)
 
             api.project.remove_draft(path)
+            overlay = api.project_overlay()
+            api._forest.overlay_revision = overlay.revision
+            api._forest.cache_id = api.workspace.snapshot_id
             added, removed = api._restore_project_virtual_files()
 
             self.assertEqual((added, removed), (0, 1))
