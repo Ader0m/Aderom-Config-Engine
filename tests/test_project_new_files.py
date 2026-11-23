@@ -109,6 +109,7 @@ class NewFilePreviewTest(unittest.TestCase):
         self.cfg = Path(self._tmp.name) / "gamedata" / "configs"
         self.cfg.mkdir(parents=True)
         self.forest = _Forest(self.cfg)
+        self.forest.cache_id = "SNAP-N"
         self.service = ProjectService(Path(self._tmp.name) / "projects")
         self.service.create("Проект")
 
@@ -127,6 +128,9 @@ class NewFilePreviewTest(unittest.TestCase):
         item = preview.items[0]
         self.assertEqual(item.kind, "new_file")
         self.assertTrue(item.ok, item.error)
+        self.assertEqual(item.plan.patch_mod, "ACE Patch - Проект")
+        self.assertEqual(item.plan.snapshot_id, "SNAP-N")
+        self.assertEqual(item.generated.plan.snapshot_id, "SNAP-N")
         self.assertEqual(
             item.generated.files[0].relative_path,
             Path("gamedata")

@@ -393,6 +393,17 @@ class MainWindow(QMainWindow):
 
     # -------------------------------------------------- завершение
     def closeEvent(self, event):
+        # Сначала спрашиваем владельца состояния: если идёт запись
+        # патч-мода, окно не разбирается и закрытие откладывается.
+        closers = getattr(self.api, "on_app_close", None)
+        if callable(closers):
+            try:
+                if closers() is False:
+                    event.ignore()
+                    return
+            except Exception:
+                pass
+
         # Окна модулей теперь самостоятельные top-level окна, поэтому
         # приложение не завершится, пока хотя бы одно из них открыто.
         close_windows = getattr(self.api, "close_module_windows", None)
@@ -410,14 +421,6 @@ class MainWindow(QMainWindow):
             self._prebuild_timer.stop()
         if hasattr(self, "_autosave_timer"):
             self._autosave_timer.stop()
-
-        # Последнее автосохранение черновиков проекта.
-        closers = getattr(self.api, "on_app_close", None)
-        if callable(closers):
-            try:
-                closers()
-            except Exception:
-                pass
 
         services = getattr(self.api, "services", None)
         stop_fn = getattr(services, "stop_prebuild", None)

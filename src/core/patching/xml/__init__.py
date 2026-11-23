@@ -5,7 +5,7 @@
 пакета можно было использовать без циклической загрузки сервиса.
 """
 
-__all__ = ["XmlPatchService"]
+__all__ = ["XmlPatchService", "merge_xml_generated"]
 
 
 def __getattr__(name):
@@ -13,4 +13,8 @@ def __getattr__(name):
         from core.patching.xml.service import XmlPatchService
 
         return XmlPatchService
+    if name == "merge_xml_generated":
+        from core.patching.xml.merge import merge_xml_generated
+
+        return merge_xml_generated
     raise AttributeError(name)

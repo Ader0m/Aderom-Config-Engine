@@ -139,9 +139,11 @@ class GenericAssetPreviewTest(unittest.TestCase):
             service.update_asset_draft(texture, b"NEW-DDS")
             service.save_asset_draft(texture)
 
+            forest = FakeForest(cfg, [root])
+            forest.cache_id = "SNAP"
             preview = service.build_preview(
                 None,
-                FakeForest(cfg, [root]),
+                forest,
             )
             items = [item for item in preview.items if item.kind == "asset"]
 

@@ -342,14 +342,18 @@ class ProjectServiceTest(unittest.TestCase):
             self.assertEqual(file.encoding, "windows-1251")
             self.assertIn(patch, item.rollback_paths)
 
-            written = services.write_patch(
-                replace(
-                    item.generated,
-                    plan=replace(item.plan, confirmed=True),
-                ),
-                Path(d) / "patch_mod",
-                forbidden_roots=[cfg],
+            confirmed_risks = services.patch_commit.risk_keys(item.plan)
+            authorization = services.patch_commit.authorize(
+                item.generated,
+                confirmed_risks=confirmed_risks,
             )
+            written = services.patch_commit.commit(
+                item.generated,
+                authorization,
+                Path(d) / "patch_mod",
+                expected_snapshot_id=item.generated.plan.snapshot_id,
+                forbidden_roots=[cfg],
+            ).paths
             self.assertEqual(len(written), 1)
             self.assertEqual(
                 written[0],

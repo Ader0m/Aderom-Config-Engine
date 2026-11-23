@@ -82,3 +82,18 @@
   карточка секции.
 - [ADR-19](ADR-19-semantic-parity.md) — воспроизводимый дамп секций,
   реестр известных отличий и статус 19023/19024.
+
+Решения Этапа 5:
+
+- [ADR-20](ADR-20-patch-engine-contract.md) — контракт патч-движка,
+  оркестратор, форматные движки и переименование SDK-запроса
+  `PatchIntent` → `PatchRequest`.
+- [ADR-21](ADR-21-preview-contributors.md) — предпросмотр asset/new-file
+  через движки и перенос XML-слияния в `core`; закрытие CR-5/DATA-5.
+- [ADR-22](ADR-22-commit-authorization.md) — `PatchCommitService`,
+  `CommitAuthorization`, единственная точка записи и закрытие
+  CR-1/CR-2.
+- [ADR-23](ADR-23-full-roundtrip.md) — полный diff затронутого LTX-корня,
+  проверка источника, дублей и `DLTX_DELETE` перед авторизацией.
+- [ADR-24](ADR-24-async-patch-write-ui.md) — фоновая запись через
+  `TaskService`, прогресс/отмена и UI предпросмотра с diff и рисками.

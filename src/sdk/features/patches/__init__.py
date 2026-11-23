@@ -19,8 +19,8 @@ class PatchUnavailableError(PatchError):
 
 
 @dataclass(frozen=True)
-class PatchIntent:
-    """Намерение модуля предложить изменение."""
+class PatchRequest:
+    """Запрос модуля предложить изменение."""
 
     target: Path
     summary: str = ""
@@ -39,15 +39,15 @@ class PatchProposal:
 class PatchApi(Protocol):
     """Предложение патча. Модуль не может зафиксировать его сам."""
 
-    def propose(self, intent: PatchIntent) -> PatchProposal:
+    def propose(self, request: PatchRequest) -> PatchProposal:
         """Проверить и зарегистрировать предложение."""
 
 
 __all__ = [
     "PatchApi",
     "PatchError",
-    "PatchIntent",
     "PatchProposal",
+    "PatchRequest",
     "PatchTargetInfo",
     "PatchUnavailableError",
 ]

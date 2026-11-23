@@ -74,6 +74,7 @@ class ProjectXmlPatchTest(unittest.TestCase):
         self.source = self.config_dir / "ui" / "test.xml"
         self.source.write_bytes(BEFORE.encode("windows-1251"))
         self.forest = Forest(self.config_dir, [self.source])
+        self.forest.cache_id = "SNAP-X"
         self.services = Services()
         self.project = ProjectService(self.base)
         self.project.create("proj")
@@ -170,6 +171,8 @@ class ProjectXmlPatchTest(unittest.TestCase):
         item = preview.items[0]
         self.assertTrue(item.ok, item.error)
         self.assertEqual(item.plan.xml_mode, "full_copy")
+        self.assertEqual(item.plan.snapshot_id, "SNAP-X")
+        self.assertEqual(item.generated.plan.snapshot_id, "SNAP-X")
         self.assertEqual(len(item.generated.files), 1)
         file = item.generated.files[0]
         self.assertEqual(file.relative_path.name, "test.xml")

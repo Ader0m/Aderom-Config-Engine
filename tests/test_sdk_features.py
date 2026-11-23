@@ -8,7 +8,7 @@ from tests.support import SRC  # noqa: F401
 
 from sdk.contracts.events import Events
 from sdk.features.documents import ResolvedLineEdit
-from sdk.features.patches import PatchIntent, PatchUnavailableError
+from sdk.features.patches import PatchRequest, PatchUnavailableError
 from ui.bus import EventBus
 from ui.platform.sdk_bridge import (
     DocumentApiAdapter,
@@ -76,7 +76,7 @@ class PatchApiAdapterTest(unittest.TestCase):
     def test_propose_is_unavailable_until_stage_five(self):
         adapter = PatchApiAdapter()
         with self.assertRaises(PatchUnavailableError):
-            adapter.propose(PatchIntent(target=Path("a.ltx")))
+            adapter.propose(PatchRequest(target=Path("a.ltx")))
 
 
 if __name__ == "__main__":

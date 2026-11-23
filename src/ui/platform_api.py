@@ -119,6 +119,10 @@ class PlatformApi(
         # Был ли уже построен предпросмотр патча для активного проекта:
         # после него пункт меню называется «Пересобрать патч».
         self._patch_preview_ready = False
+        # Асинхронная запись патч-мода: один активный проход.
+        self._patch_write_running = False
+        self._patch_preview_dialog = None
+        self._close_pending = False
         # Асинхронное автосохранение: один активный проход и один
         # отложенный; повторные запросы объединяются (coalescing).
         self._autosave_running = False

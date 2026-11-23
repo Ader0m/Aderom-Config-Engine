@@ -137,7 +137,11 @@ class PatchPipelineTest(unittest.TestCase):
             "[a]\nx = 1\n",
             "[a]\nx = 2\n",
             forest,
-            PatchOptions(patch_mod="Test", suffix=suffix),
+            PatchOptions(
+                patch_mod="Test",
+                suffix=suffix,
+                snapshot_id="SNAP",
+            ),
         )
         generated = DltxGenerator().generate(plan)
         return (
@@ -265,6 +269,187 @@ class PatchPipelineTest(unittest.TestCase):
             generated = DltxGenerator().generate(plan)
             self.assertTrue(ModelPatchVerifier().verify(generated).ok)
 
+    def test_parent_removal_passes_full_roundtrip(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "gamedata" / "configs"
+            cfg.mkdir(parents=True)
+            root = cfg / "system.ltx"
+            source = cfg / "a.ltx"
+            root.write_text(
+                '[system]\n#include "a.ltx"\n',
+                encoding="cp1251",
+            )
+            source.write_text(
+                "[base]\nx = 1\n[weapon]:base\ny = 2\n",
+                encoding="cp1251",
+            )
+            cache = FileCacheSystem()
+            forest = TreeBuilder(cache).build(
+                cfg,
+                root,
+                use_cache=False,
+            )
+            resolver = ResolverService(cache, ResolvedCache())
+            resolver.ensure_adapter(forest, cfg)
+            services = CoreServices(
+                cache=cache,
+                tree_builder=TreeBuilder(cache),
+                tree_query=TreeQueryService(),
+                graph_builder=ReferenceGraphBuilder(DisabledCache()),
+                resolver_service=resolver,
+                assembly_service=AssemblyService(
+                    resolver,
+                    Path(d) / "generated",
+                ),
+                generated_dir=Path(d) / "generated",
+                xml_resolve_service=XmlResolveService(),
+            )
+            plan = services.plan_document_patch(
+                source,
+                "[base]\nx = 1\n[weapon]:base\ny = 2\n",
+                "[base]\nx = 1\n[weapon]\ny = 2\n",
+                forest,
+                PatchOptions(
+                    patch_mod="Test",
+                    suffix="parent",
+                    snapshot_id="SNAP",
+                ),
+            )
+            self.assertFalse(plan.has_errors, plan.issues)
+            generated = services.generate_patch(plan)
+
+            self.assertTrue(generated.verification.ok)
+            report = services.patch_commit.roundtrip.verify(generated)
+            self.assertTrue(report.ok, report.issues)
+            authorization = services.patch_commit.authorize(
+                generated,
+                confirmed_risks=services.patch_commit.risk_keys(plan),
+            )
+            self.assertIsNotNone(authorization)
+
+    def test_intermediate_parent_removal_passes_full_roundtrip(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "gamedata" / "configs"
+            cfg.mkdir(parents=True)
+            root = cfg / "system.ltx"
+            source = cfg / "a.ltx"
+            root.write_text(
+                '[system]\n#include "a.ltx"\n',
+                encoding="cp1251",
+            )
+            before = (
+                "[root]\nx = 1\n"
+                "[base]:root\n"
+                "[weapon]:base\ny = 2\n"
+            )
+            after = (
+                "[root]\nx = 1\n"
+                "[base]\n"
+                "[weapon]:base\ny = 2\n"
+            )
+            source.write_text(before, encoding="cp1251")
+            cache = FileCacheSystem()
+            forest = TreeBuilder(cache).build(
+                cfg,
+                root,
+                use_cache=False,
+            )
+            resolver = ResolverService(cache, ResolvedCache())
+            resolver.ensure_adapter(forest, cfg)
+            services = CoreServices(
+                cache=cache,
+                tree_builder=TreeBuilder(cache),
+                tree_query=TreeQueryService(),
+                graph_builder=ReferenceGraphBuilder(DisabledCache()),
+                resolver_service=resolver,
+                assembly_service=AssemblyService(
+                    resolver,
+                    Path(d) / "generated",
+                ),
+                generated_dir=Path(d) / "generated",
+                xml_resolve_service=XmlResolveService(),
+            )
+            plan = services.plan_document_patch(
+                source,
+                before,
+                after,
+                forest,
+                PatchOptions(
+                    patch_mod="Test",
+                    suffix="chain",
+                    snapshot_id="SNAP",
+                ),
+            )
+            self.assertFalse(plan.has_errors, plan.issues)
+            generated = services.generate_patch(plan)
+
+            self.assertTrue(generated.verification.ok)
+            report = services.patch_commit.roundtrip.verify(generated)
+            self.assertTrue(report.ok, report.issues)
+            authorization = services.patch_commit.authorize(
+                generated,
+                confirmed_risks=services.patch_commit.risk_keys(plan),
+            )
+            self.assertIsNotNone(authorization)
+
+    def test_inherited_key_removal_passes_full_roundtrip(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = Path(d) / "gamedata" / "configs"
+            cfg.mkdir(parents=True)
+            root = cfg / "system.ltx"
+            source = cfg / "a.ltx"
+            root.write_text(
+                '[system]\n#include "a.ltx"\n',
+                encoding="cp1251",
+            )
+            source.write_text(
+                "[base]\nx = 1\nkeep = 2\n[weapon]:base\ny = 2\n",
+                encoding="cp1251",
+            )
+            cache = FileCacheSystem()
+            forest = TreeBuilder(cache).build(
+                cfg,
+                root,
+                use_cache=False,
+            )
+            resolver = ResolverService(cache, ResolvedCache())
+            resolver.ensure_adapter(forest, cfg)
+            services = CoreServices(
+                cache=cache,
+                tree_builder=TreeBuilder(cache),
+                tree_query=TreeQueryService(),
+                graph_builder=ReferenceGraphBuilder(DisabledCache()),
+                resolver_service=resolver,
+                assembly_service=AssemblyService(
+                    resolver,
+                    Path(d) / "generated",
+                ),
+                generated_dir=Path(d) / "generated",
+                xml_resolve_service=XmlResolveService(),
+            )
+            plan = services.plan_document_patch(
+                source,
+                "[base]\nx = 1\nkeep = 2\n[weapon]:base\ny = 2\n",
+                "[base]\nkeep = 2\n[weapon]:base\ny = 2\n",
+                forest,
+                PatchOptions(
+                    patch_mod="Test",
+                    suffix="inherit",
+                    snapshot_id="SNAP",
+                ),
+            )
+            self.assertFalse(plan.has_errors, plan.issues)
+            generated = services.generate_patch(plan)
+
+            self.assertTrue(generated.verification.ok)
+            report = services.patch_commit.roundtrip.verify(generated)
+            self.assertTrue(report.ok, report.issues)
+            authorization = services.patch_commit.authorize(
+                generated,
+                confirmed_risks=services.patch_commit.risk_keys(plan),
+            )
+            self.assertIsNotNone(authorization)
+
     def test_include_change_does_not_generate_patch(self):
         with tempfile.TemporaryDirectory() as d:
             source = Path(d) / "a.ltx"
@@ -312,7 +497,11 @@ class PatchPipelineTest(unittest.TestCase):
                 "[a]\nx = 1\n",
                 "[a]\nx = 2\n",
                 _Forest(base, [root, source], {source: {root}}),
-                PatchOptions(patch_mod="Test", suffix="write"),
+                PatchOptions(
+                    patch_mod="Test",
+                    suffix="write",
+                    snapshot_id="SNAP",
+                ),
             )
             generated = DltxGenerator().generate(plan)
             self.assertIsNone(generated.verification)
@@ -426,7 +615,11 @@ class PatchPipelineTest(unittest.TestCase):
                 "[a]\nx = 1\ny = 2\n",
                 "[a]\nx = 1\n",
                 _Forest(base, [root, source], {source: {root}}),
-                PatchOptions(patch_mod="Test", suffix="confirm"),
+                PatchOptions(
+                    patch_mod="Test",
+                    suffix="confirm",
+                    snapshot_id="SNAP",
+                ),
             )
             generated = DltxGenerator().generate(plan)
             verified = replace(
@@ -575,21 +768,37 @@ class PatchPipelineTest(unittest.TestCase):
                 xml_resolve_service=XmlResolveService(),
             )
 
+            self.assertIsNotNone(services.patch_commit)
+            self.assertFalse(hasattr(services, "write_patch"))
+
             plan = services.plan_document_patch(
                 source,
                 "[w]\ncost = 100\n",
                 "[w]\ncost = 150\n",
                 forest,
-                PatchOptions(patch_mod="Test", suffix="facade"),
+                PatchOptions(
+                    patch_mod="Test",
+                    suffix="facade",
+                    snapshot_id="SNAP",
+                ),
             )
             generated = services.generate_patch(plan)
 
             self.assertTrue(generated.verification.ok)
-            written = services.write_patch(
-                generated,
-                Path(d) / "mods" / "Test Patch",
-                forbidden_roots=[cfg],
+            roundtrip = services.patch_commit.roundtrip.verify(generated)
+            self.assertTrue(roundtrip.ok, roundtrip.issues)
+            self.assertIn(
+                "full_diff",
+                [check.name for check in roundtrip.checks],
             )
+            authorization = services.patch_commit.authorize(generated)
+            written = services.patch_commit.commit(
+                generated,
+                authorization,
+                Path(d) / "mods" / "Test Patch",
+                expected_snapshot_id=generated.plan.snapshot_id,
+                forbidden_roots=[cfg],
+            ).paths
             self.assertEqual(len(written), 1)
             self.assertIn(
                 "cost = 150",

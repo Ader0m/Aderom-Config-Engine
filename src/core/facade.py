@@ -56,6 +56,9 @@ from core.patching.ltx.override import LtxOverrideService
 from core.patching.ltx.in_place import LtxInPlaceService
 from core.patching.ltx.service import LtxPatchService
 from core.patching.xml.service import XmlPatchService
+from core.patching.commit import PatchCommitService
+from core.patching.engine import PatchOrchestrator
+from core.patching.roundtrip import PatchRoundTripVerifier
 from core.patching.writer import PatchWriter
 
 
@@ -67,6 +70,7 @@ class CoreServices:
     cache_service = None
     snapshot_service = None
     semantic_query = None
+    patch_commit = None
 
     def __init__(
         self,
@@ -161,14 +165,21 @@ class CoreServices:
         self.xml_fork = XmlForkService(self)
         self.ltx_override = LtxOverrideService()
         self.ltx_in_place = LtxInPlaceService(self)
-        self.patch_writer = PatchWriter(
+        self._patch_writer = PatchWriter(
             require_verification=True,
             require_resolver=True,
+        )
+        self.patch_roundtrip = PatchRoundTripVerifier(self.resolver)
+        self.patch_commit = PatchCommitService(
+            self._patch_writer,
+            roundtrip=self.patch_roundtrip,
         )
 
         # Единые формато-специфичные входы (тот же план/результат).
         self.ltx_patch = LtxPatchService(self)
         self.xml_patch = XmlPatchService(self)
+        # Оркестратор — единая точка входа в форматные движки.
+        self.patch_orchestrator = PatchOrchestrator(self)
 
         # Для обратной совместимости (модули пока используют старые имена)
         self._adapter = None  # Устаревшее, использовать через .resolver
@@ -1037,20 +1048,3 @@ class CoreServices:
 
         verifier = ResolverPatchVerifier(adapter)
         return verifier.verify(generated)
-
-    def write_patch(
-        self,
-        generated,
-        patch_mod_root,
-        forbidden_roots=(),
-        overwrite=False,
-        asset_rules=None,
-    ):
-        """Записать проверенный патч в отдельный мод."""
-        return self.patch_writer.write(
-            generated,
-            patch_mod_root,
-            forbidden_roots=forbidden_roots,
-            overwrite=overwrite,
-            asset_rules=asset_rules,
-        )

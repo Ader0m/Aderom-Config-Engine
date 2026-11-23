@@ -19,9 +19,9 @@ class PatchApiAdapter:
     def __init__(self, service=None):
         self._service = service
 
-    def propose(self, intent) -> PatchProposal:
+    def propose(self, request) -> PatchProposal:
         if self._service is None:
             raise PatchUnavailableError(
                 "Движок патчей будет предоставлен на Этапе 5"
             )
-        return self._service.propose(intent)
+        return self._service.propose(request)

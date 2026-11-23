@@ -58,7 +58,7 @@ class LtxOverrideTest(unittest.TestCase):
             "[item]\nx = old\n",
             "[item]\nx = new\n",
             forest=self.forest,
-            options=PatchOptions(),
+            options=PatchOptions(snapshot_id="SNAP"),
         )
         self.assertTrue(result.generated.verification.ok)
         self.assertEqual(len(result.generated.files), 1)

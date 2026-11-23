@@ -194,6 +194,14 @@ def _rel(path):
     return path.relative_to(ROOT).as_posix()
 
 
+def _call_name(func):
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return ""
+
+
 class ArchitectureBoundaryTest(unittest.TestCase):
     def test_packages_are_discovered(self):
         for package, known in KNOWN_FILES.items():
@@ -495,6 +503,94 @@ class ArchitectureBoundaryTest(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertFalse(result.get("value"))
         self.assertEqual(calls, [])
+
+
+class AppPatchConstructionBoundaryTest(unittest.TestCase):
+    """CR-5: app не собирает патч-модели вручную.
+
+    Планы, патчи и проверки создают core-движки. Статический guard
+    ловит возврат ручной сборки, в том числе через import-as и
+    обращение к атрибуту модуля.
+    """
+
+    FORBIDDEN = frozenset({
+        "GeneratedPatch",
+        "PatchFile",
+        "PatchPlan",
+        "PatchResult",
+        "PatchTarget",
+        "VerificationCheck",
+        "VerificationResult",
+    })
+
+    @classmethod
+    def _offenders(cls, path):
+        tree = _parse(path)
+        local_names = set(cls.FORBIDDEN)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    if alias.name in cls.FORBIDDEN:
+                        local_names.add(alias.asname or alias.name)
+
+        found = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = _call_name(node.func)
+            if name in local_names:
+                found.append((node.lineno, name))
+        return found
+
+    def test_app_does_not_build_patch_models(self):
+        offenders = []
+        for path in _files("app"):
+            for line, name in self._offenders(path):
+                offenders.append(
+                    "%s:%d %s" % (_rel(path), line, name)
+                )
+        self.assertEqual(offenders, [])
+
+    def test_guard_detects_manual_and_aliased_construction(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "broken.py"
+            path.write_text(
+                "from core.api.patches import PatchPlan as P\n"
+                "P(None)\n"
+                "import core.patching.models as m\n"
+                "m.GeneratedPatch(None)\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                sorted(self._offenders(path)),
+                [(2, "P"), (4, "GeneratedPatch")],
+            )
+
+    def test_app_and_ui_do_not_bypass_commit_service(self):
+        offenders = []
+        for package in ("app", "ui"):
+            for path in _files(package):
+                tree = _parse(path)
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    if _call_name(node.func) == "PatchWriter":
+                        offenders.append(
+                            "%s:%d PatchWriter" % (_rel(path), node.lineno)
+                        )
+                    for keyword in node.keywords:
+                        if keyword.arg != "confirmed":
+                            continue
+                        value = keyword.value
+                        if (
+                            isinstance(value, ast.Constant)
+                            and value.value is True
+                        ):
+                            offenders.append(
+                                "%s:%d confirmed=True"
+                                % (_rel(path), node.lineno)
+                            )
+        self.assertEqual(offenders, [])
 
 
 class DocumentMutationBoundaryTest(unittest.TestCase):

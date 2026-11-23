@@ -9,6 +9,15 @@
 Общие модели и запись патча не зависят от формата.
 """
 
+from core.patching.commit import (
+    CommitAuthorization,
+    PatchCommitError,
+    PatchCommitResult,
+    PatchCommitService,
+)
+from core.patching.engine import PatchEngine, PatchOrchestrator
+from core.patching.intent import PatchBundle, PatchIntent, PatchSnapshot
+from core.patching.roundtrip import RoundTripReport
 from core.patching.models import (
     GeneratedPatch,
     PatchFile,
@@ -22,13 +31,23 @@ from core.patching.models import (
 )
 
 __all__ = [
+    "CommitAuthorization",
     "GeneratedPatch",
+    "PatchBundle",
+    "PatchCommitError",
+    "PatchCommitResult",
+    "PatchCommitService",
+    "PatchEngine",
     "PatchFile",
+    "PatchIntent",
     "PatchIssue",
     "PatchOptions",
+    "PatchOrchestrator",
     "PatchPlan",
     "PatchResult",
+    "PatchSnapshot",
     "PatchTarget",
+    "RoundTripReport",
     "VerificationCheck",
     "VerificationResult",
     "LtxPatchService",

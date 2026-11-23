@@ -2,6 +2,7 @@
 """Исключение файлов и откат изменений в предпросмотре патча."""
 
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,7 +13,13 @@ from tests.qt_support import qapp
 from tests.support import SRC  # noqa: F401
 
 from app.projects import PreviewItem, Project, ProjectPatchPreview
-from core.patching.models import PatchPlan, PatchTarget
+from core.patching.models import (
+    GeneratedPatch,
+    PatchFile,
+    PatchPlan,
+    PatchTarget,
+    VerificationResult,
+)
 from ui.project_dialogs import ProjectPreviewDialog
 
 _app = qapp()
@@ -30,11 +37,22 @@ def _preview(excluded=False):
         patch_mod="ACE Patch",
         patch_file_rel=Path("mod_ace.ltx"),
     )
+    generated = GeneratedPatch(
+        plan=plan,
+        files=(
+            PatchFile(
+                relative_path=Path("gamedata/configs/mod_ace.ltx"),
+                text="[a]\n",
+            ),
+        ),
+        text="[a]\n",
+        verification=VerificationResult(ok=True),
+    )
     item = PreviewItem(
         title="a.ltx",
         source_path=source,
         plan=plan,
-        generated=None,
+        generated=generated,
         kind="file",
         excluded=excluded,
         rollback_paths=(source,),
@@ -63,6 +81,13 @@ class PatchPreviewExclusionTest(unittest.TestCase):
 
     def test_write_passes_excluded_flag_to_callback(self):
         preview = _preview()
+        second = replace(
+            preview.items[0],
+            title="b.ltx",
+            source_path=Path("gamedata") / "configs" / "b.ltx",
+            rollback_paths=(Path("gamedata") / "configs" / "b.ltx",),
+        )
+        preview = replace(preview, items=(preview.items[0], second))
         captured = {}
 
         def on_write(updated):
@@ -78,7 +103,7 @@ class PatchPreviewExclusionTest(unittest.TestCase):
         dialog._write()
 
         self.assertTrue(captured["preview"].items[0].excluded)
-        self.assertEqual(captured["preview"].included_items, ())
+        self.assertEqual(len(captured["preview"].included_items), 1)
         # Исходный предпросмотр не мутируется.
         self.assertFalse(preview.items[0].excluded)
 

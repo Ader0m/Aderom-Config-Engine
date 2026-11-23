@@ -1557,7 +1557,20 @@ class ProjectControllerMixin:
 
     def on_app_close(self):
         if not self.project.is_active:
-            return
+            return True
+        if getattr(self, "_patch_write_running", False):
+            # Не блокируем UI и не разбираем окно: отменяем запись и
+            # повторим закрытие из _on_patch_write_done.
+            self._close_pending = True
+            project = self.project.active
+            if project is not None:
+                try:
+                    self.tasks.cancel_owner(project.id)
+                except Exception:
+                    pass
+            self.set_status("Отмена записи патч-мода…")
+            return False
+
         self._flush_editor_pending()
         self._save_open_tabs()
 
@@ -1575,6 +1588,7 @@ class ProjectControllerMixin:
             self.project.flush()
         except Exception as exc:
             self.log("Проект: ошибка сохранения при закрытии: %s" % exc)
+        return True
 
     def build_patch_preview(self):
         if self.window is None:
@@ -1658,15 +1672,84 @@ class ProjectControllerMixin:
 
         self._patch_preview_ready = True
         self._apply_patch_action_label()
+        self._verify_preview_roundtrip(preview, project, forest)
 
+    def _verify_preview_roundtrip(self, preview, project, forest):
+        """Полный round-trip в фоне; результат прикладывается к элементам."""
+        verifier = self.services.patch_roundtrip
+
+        def work(log):
+            reports = []
+            for item in preview.items:
+                report = None
+                if item.is_patch and item.generated is not None:
+                    if log:
+                        log("Патч: полная проверка — %s" % item.title)
+                    report = verifier.verify_report(item.generated)
+                reports.append((item, report))
+            return reports
+
+        self.set_status("Полная проверка патча…")
+        try:
+            self.tasks.run(
+                work,
+                on_done=lambda reports, error: self._on_roundtrip_done(
+                    preview,
+                    reports,
+                    error,
+                    project,
+                    forest,
+                ),
+                on_log=self.log,
+                owner=project.id,
+            )
+        except Exception as exc:
+            self.log("Патч: не удалось запустить полную проверку: %s" % exc)
+            self._show_preview_dialog(preview)
+
+    def _on_roundtrip_done(self, preview, reports, error, project, forest):
+        if preview.project is not self.project.active:
+            self.set_status("Проект изменён: проверка отменена", 6000)
+            return
+        if not self._forest_is_current(forest):
+            self.set_status("Лес устарел: проверка отменена", 6000)
+            return
+        if error is not None:
+            self.log("Патч: полная проверка не выполнена: %s" % error)
+            self.show_error(
+                "Полная проверка патча не выполнена:\n%s" % error
+            )
+            return
+
+        reports = list(reports or ())
+        items = tuple(
+            replace(
+                item,
+                roundtrip=(
+                    reports[index][1]
+                    if index < len(reports)
+                    else None
+                ),
+            )
+            for index, item in enumerate(preview.items)
+        )
+        self._show_preview_dialog(replace(preview, items=items))
+
+    def _show_preview_dialog(self, preview):
         dialog = ProjectPreviewDialog(
             preview,
             self.window,
             on_write=self.write_preview,
             on_rollback=self.rollback_preview_item,
+            on_cancel=self.cancel_patch_write,
             write_enabled=patch_write_enabled(),
         )
-        dialog.exec_()
+        self._patch_preview_dialog = dialog
+        try:
+            dialog.exec_()
+        finally:
+            if getattr(self, "_patch_preview_dialog", None) is dialog:
+                self._patch_preview_dialog = None
 
     def _forest_is_current(self, forest) -> bool:
         current = self._forest
@@ -1680,8 +1763,23 @@ class ProjectControllerMixin:
     def write_preview(self, preview):
         if not patch_write_enabled():
             self.show_error(
-                "Запись патчей отключена до Этапа 5: "
-                "доступен только предпросмотр."
+                "Запись патчей отключена: доступен только предпросмотр."
+            )
+            return False
+        if getattr(self, "_patch_write_running", False):
+            self.show_error(
+                "Запись патч-мода уже выполняется: дождитесь завершения."
+            )
+            return False
+
+        project = self.project.active
+        if project is None:
+            self.show_error("Создайте или загрузите проект.")
+            return False
+        forest = self._forest
+        if forest is None:
+            self.show_error(
+                "Дерево не построено: сначала выполните «Пересобрать VFS»."
             )
             return False
 
@@ -1694,25 +1792,158 @@ class ProjectControllerMixin:
         if not directory:
             return False
 
-        try:
-            result = write_preview_use_case(
+        risks = []
+        for item in preview.items:
+            if not item.is_patch or item.excluded or not item.ok:
+                continue
+            if item.plan is None:
+                continue
+            risks.extend(self.services.patch_commit.risk_keys(item.plan))
+        risks = tuple(dict.fromkeys(risks))
+        if risks:
+            answer = QMessageBox.question(
+                self.window,
+                "Подтверждение патча",
+                "Патч содержит опасные изменения:\n\n- %s"
+                "\n\nЗаписать патч?" % "\n- ".join(risks),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return False
+
+        asset_rules = self.asset_types.patch_rules()
+        owner = project.id
+        self._patch_write_running = True
+        self.set_status("Запись патч-мода…")
+        worker_holder = {}
+
+        def cancelled():
+            worker = worker_holder.get("worker")
+            return bool(
+                worker is not None
+                and worker.isInterruptionRequested()
+            )
+
+        def work(log):
+            return write_preview_use_case(
                 self.project,
                 self.services,
                 preview,
                 directory,
-                forest=self._forest,
-                asset_rules=self.asset_types.patch_rules(),
+                forest=forest,
+                asset_rules=asset_rules,
                 allow_write=True,
+                confirmed_risks=risks,
+                log=log,
+                cancel_check=cancelled,
+                snapshot_provider=lambda: self.workspace.snapshot_id,
             )
-        except ProjectError as exc:
-            self.show_error(str(exc))
+
+        try:
+            worker_holder["worker"] = self.tasks.run(
+                work,
+                on_done=self._on_patch_write_done,
+                on_log=self.log,
+                owner=owner,
+            )
+        except Exception as exc:
+            self._patch_write_running = False
+            self.show_error(
+                "Не удалось запустить запись патч-мода: %s" % exc
+            )
             return False
+        return True
+
+    def _patch_report_lines(self, result):
+        lines = []
+        for record in result.audit:
+            report = record.roundtrip_report
+            if report is None:
+                continue
+            for check in report.checks:
+                if (
+                    check.ok
+                    and check.name not in (
+                        "full_diff",
+                        "source",
+                        "dltx_artifacts",
+                        "parents",
+                        "roundtrip",
+                    )
+                ):
+                    continue
+                lines.append(
+                    "%s: %s"
+                    % (
+                        check.name,
+                        check.detail or ("OK" if check.ok else "ОШИБКА"),
+                    )
+                )
+        return lines
+
+    def cancel_patch_write(self):
+        """Явно попросить фоновую запись завершиться."""
+        project = self.project.active
+        if project is None or not getattr(
+            self,
+            "_patch_write_running",
+            False,
+        ):
+            return False
+        try:
+            self.tasks.cancel_owner(project.id)
+        except Exception as exc:
+            self.log("Проект: не удалось отменить запись: %s" % exc)
+            return False
+        self.set_status("Отмена записи патч-мода…")
+        return True
+
+    def _on_patch_write_done(self, result, error):
+        self._patch_write_running = False
+        dialog = getattr(self, "_patch_preview_dialog", None)
+        if dialog is not None:
+            try:
+                dialog.finish_write(result, error)
+            except RuntimeError:
+                pass
+        if getattr(self, "_close_pending", False):
+            self._close_pending = False
+            if dialog is not None:
+                try:
+                    dialog.accept()
+                except RuntimeError:
+                    pass
+            if error is not None:
+                self.log("Проект: ошибка записи при закрытии: %s" % error)
+            if self.window is not None:
+                self.window.close()
+            return
+        if error is not None:
+            self.set_status("Ошибка записи патча", 6000)
+            self.log("Проект: ошибка записи патча: %s" % error)
+            self.show_error(str(error))
+            return
+        if result is None:
+            return
 
         self.set_status(
             "Патч-мод создан: %s" % result.mod_dir.name,
             7000,
         )
         self.log("Проект: записано файлов патча %d" % len(result.written))
+        for record in result.audit:
+            self.log(
+                "Патч: план %s, снимок %s, файлов %d"
+                % (
+                    record.plan_id,
+                    record.snapshot_id,
+                    len(record.paths),
+                )
+            )
+        report_lines = self._patch_report_lines(result)
+        for line in report_lines:
+            self.log("Патч: " + line)
 
         if result.excluded_count:
             self.log(
@@ -1720,6 +1951,11 @@ class ProjectControllerMixin:
                 % result.excluded_count
             )
 
+        report_text = (
+            "\n\nПолная проверка:\n%s" % "\n".join(report_lines)
+            if report_lines
+            else ""
+        )
         if result.skipped:
             text = (
                 "Записаны не все файлы. Пропущены:\n%s"
@@ -1730,14 +1966,14 @@ class ProjectControllerMixin:
                     "\n\nИсключено из патча: %d."
                     % result.excluded_count
                 )
+            text += report_text
             QMessageBox.warning(self.window, "Проект", text)
         else:
             text = "Патч-мод создан:\n%s" % result.mod_dir
             if result.excluded_count:
                 text += "\n\nИсключено из патча: %d." % result.excluded_count
+            text += report_text
             QMessageBox.information(self.window, "Проект", text)
-
-        return True
 
     def rollback_preview_item(self, item):
         """Удалить черновики файлов, из которых собран пункт патча."""

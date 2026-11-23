@@ -571,21 +571,13 @@ class LtxResolverAdapter:
             engine=engine,
         )
 
-    def resolve_with_virtual_patch(
+    def _resolve_with_virtual_patch_resolver(
         self,
         root_path,
         patch_filename: str,
         patch_text: str,
     ):
-        """Разрешить корень с виртуально подмешанным патчем.
-
-        Патч не записывается на диск: экземпляру резолвера подменяются
-        чтение файла, список файлов и загрузка include. Это позволяет
-        проверять патч тем же ``Resolver4``, который видит игра.
-
-        Returns:
-            dict: ``{section: {key: value}}`` для итогового состояния.
-        """
+        """Загрузить корень с виртуальным патчем и вернуть Resolver4."""
         import os
 
         from core.tools.fs import pattern_match
@@ -645,8 +637,48 @@ class LtxResolverAdapter:
         resolver._file_list = file_list
 
         resolver.load()
+        return resolver
 
+    def resolve_with_virtual_patch(
+        self,
+        root_path,
+        patch_filename: str,
+        patch_text: str,
+    ):
+        """Разрешить корень с виртуально подмешанным патчем.
+
+        Патч не записывается на диск: экземпляру резолвера подменяются
+        чтение файла, список файлов и загрузка include. Это позволяет
+        проверять патч тем же ``Resolver4``, который видит игра.
+
+        Returns:
+            dict: ``{section: {key: value}}`` для итогового состояния.
+        """
+        resolver = self._resolve_with_virtual_patch_resolver(
+            root_path,
+            patch_filename,
+            patch_text,
+        )
         return self._to_section_dict(resolver)
+
+    def resolve_with_virtual_patch_details(
+        self,
+        root_path,
+        patch_filename: str,
+        patch_text: str,
+    ):
+        """Виртуальный патч + источники, дубли и родители."""
+        resolver = self._resolve_with_virtual_patch_resolver(
+            root_path,
+            patch_filename,
+            patch_text,
+        )
+        return (
+            self._to_section_dict(resolver),
+            self._to_section_sources(resolver),
+            self._to_section_duplicates(resolver),
+            self._to_section_parents(resolver),
+        )
 
     @staticmethod
     def _to_section_dict(resolver):
@@ -659,11 +691,61 @@ class LtxResolverAdapter:
             for section_name, section in resolver.data
         }
 
+    @staticmethod
+    def _to_section_sources(resolver):
+        return {
+            section_name: {
+                item.first: str(getattr(item, "filename", "") or "")
+                for item in section.data
+                if getattr(item, "first", None)
+            }
+            for section_name, section in resolver.data
+        }
+
+    @staticmethod
+    def _to_section_duplicates(resolver):
+        duplicates = {}
+        for section_name, section in resolver.data:
+            seen = set()
+            repeated = []
+            for item in section.data:
+                key = getattr(item, "first", None)
+                if not key:
+                    continue
+                if key in seen:
+                    repeated.append(key)
+                seen.add(key)
+            if repeated:
+                duplicates[section_name] = tuple(repeated)
+        return duplicates
+
     def resolve_sections(self, root_path):
         """Разрешить корень и вернуть итоговые секции без патча."""
         resolver = self._make(root_path)
         resolver.load()
         return self._to_section_dict(resolver)
+
+    def resolve_sections_details(self, root_path):
+        """Разрешить корень: секции и цепочки родителей."""
+        resolver = self._make(root_path)
+        resolver.load()
+        return (
+            self._to_section_dict(resolver),
+            self._to_section_parents(resolver),
+        )
+
+    @staticmethod
+    def _to_section_parents(resolver):
+        return {
+            str(name).lower(): tuple(
+                str(parent).lstrip("!").lower()
+                for parent in parents
+                if parent
+            )
+            for name, parents in (
+                getattr(resolver, "resolved_parent_data_map", None) or {}
+            ).items()
+        }
 
     def assemble_to_file(self, root_path, out_dir, source_map=None) -> Path:
         """

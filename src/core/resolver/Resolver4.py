@@ -173,6 +173,9 @@ class LtxResolver:
         self.base_parent_data_map = {}
         self.base_data = OrderedDict()
         self.override_parent_data_map = {}
+        # Снимок родителей после load: нужен диагностике round-trip.
+        # На разрешение секций не влияет.
+        self.resolved_parent_data_map = {}
         self.override_data = OrderedDict()
         self.override_modify_list_data = {}
         self.data = []
@@ -701,6 +704,7 @@ class LtxResolver:
 
     def load(self):
         """CInifile::Load (Xr_ini.cpp:1297-1420) + кэш конструктора (189-206)."""
+        self.resolved_parent_data_map = {}
         cache_key = self.root_path.lower()
         if self.use_cache and self.file_name:
             if cache_key in self._cache:
@@ -725,6 +729,10 @@ class LtxResolver:
                     del self.override_data[s]
         self.data = sorted(((k, v) for k, v in resolved.items()),
                            key=lambda kv: _key(kv[0]))
+        self.resolved_parent_data_map = {
+            name: tuple(parents)
+            for name, parents in self.base_parent_data_map.items()
+        }
         if self.use_cache and self.file_name:
             self._cache[cache_key] = self.data
         # cleanup

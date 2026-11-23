@@ -8,7 +8,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from core.api.patches import GeneratedPatch, PatchPlan
+from core.api.patches import (
+    GeneratedPatch,
+    PatchPlan,
+    RoundTripReport,
+)
 from core.api.paths import path_key
 
 
@@ -201,6 +205,9 @@ class PreviewItem:
     resolved: Optional[ProjectResolvedDraft] = None
     notes: Tuple[str, ...] = ()
     text: str = ""
+    # Полный round-trip, полученный в фоне до записи. None — ещё не
+    # проверялся; неуспешный отчёт делает элемент неготовым к записи.
+    roundtrip: Optional[RoundTripReport] = None
     # DLTX-планы, которые несёт XML-форк: уровень проекта в режиме Root
     # объединяет их с планами того же корня.
     plans: Tuple[PatchPlan, ...] = ()
@@ -228,6 +235,8 @@ class PreviewItem:
         if self.error:
             return False
         if self.plan is None or self.generated is None:
+            return False
+        if self.roundtrip is not None and not self.roundtrip.ok:
             return False
         return bool(
             self.generated.verification

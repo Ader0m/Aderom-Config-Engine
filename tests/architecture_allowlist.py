@@ -139,8 +139,6 @@ CORE_PUBLIC_NAMES = frozenset({
     'PatchPlanningError',
     'PatchResult',
     'PatchTarget',
-    'PatchWriteError',
-    'PatchWriter',
     'RESOLVER_CANDIDATES',
     'ReferenceGraphBuilder',
     'ResolvedCache',

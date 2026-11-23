@@ -6,7 +6,8 @@
 ``ProjectPatchPreview``. Не знает про Qt, UI и активный проект: это
 входные данные.
 
-Ручные ``PatchPlan`` внутри остаются до Этапа 5 (CR-5).
+Планы и патчи собирают core-движки; ``app`` владеет только DTO
+предпросмотра и оркестрацией.
 """
 
 from __future__ import annotations
@@ -23,15 +24,15 @@ from sdk.contracts import ProjectOverlay
 
 from core.api.documents import analyze_multiline_edit
 from core.api.patches import (
-    GeneratedPatch,
-    PatchFile,
-    PatchIssue,
+    AssetPatchEngine,
+    NewFilePatchEngine,
+    PatchIntent,
     PatchOptions,
-    PatchPlan,
-    PatchTarget,
-    VerificationCheck,
-    VerificationResult,
+    PatchOrchestrator,
+    PatchPlanningError,
+    PatchSnapshot,
     merge_patch_plans,
+    merge_xml_generated,
 )
 from core.api.paths import path_key
 from core.api.vfs import game_root_from_scan_dir
@@ -178,6 +179,14 @@ class ProjectPreviewBuilder:
     def __init__(self, asset_registry, file_readers):
         self.asset_registry = asset_registry
         self.file_readers = file_readers
+        # Предпросмотр asset/new-file не требует CoreServices: движки
+        # собирают план и патч из уже разрешённых данных проекта.
+        self._file_patch_orchestrator = PatchOrchestrator(
+            engines=(
+                AssetPatchEngine(),
+                NewFilePatchEngine(),
+            ),
+        )
         self._preview_cache = OrderedDict()
         self._preview_cache_sizes = {}
         self._preview_cache_chars = 0
@@ -447,15 +456,15 @@ class ProjectPreviewBuilder:
             )
 
         patch_rel = Path("gamedata") / relative
-        plan = PatchPlan(
+        intent = PatchIntent(
+            kind="asset",
             source_path=Path(draft.path),
-            target=PatchTarget(
-                source_path=Path(draft.path),
-                root_path=Path(getattr(forest, "scan_dir", "")).parent,
-                reason="Двоичный ресурс проекта",
-            ),
             patch_mod="ACE Patch - %s" % project_name,
-            patch_file_rel=relative,
+            relative_path=relative,
+            patch_root=Path(getattr(forest, "scan_dir", "")).parent,
+            vfs_root=asset_type.vfs_root,
+            asset_save_mode=save_mode,
+            asset_data=bytes(draft.current_bytes),
             changes=(
                 AssetChange(
                     kind="asset",
@@ -463,13 +472,39 @@ class ProjectPreviewBuilder:
                     description="%s: заменить файл целиком" % asset_type.label,
                 ),
             ),
-            issues=(),
-            warnings=(),
-            preview="",
-            format="asset",
-            patch_target_dir=asset_type.vfs_root,
-            asset_mode=save_mode,
         )
+        snapshot = PatchSnapshot(
+            forest=forest,
+            snapshot_id=str(getattr(forest, "cache_id", "") or ""),
+        )
+        try:
+            bundle = self._file_patch_orchestrator.build(
+                intent,
+                snapshot,
+            )
+        except PatchPlanningError as exc:
+            return PreviewItem(
+                title=title,
+                source_path=Path(draft.path),
+                plan=None,
+                generated=None,
+                error=str(exc),
+                kind="asset",
+                draft=draft,
+                rollback_paths=(Path(draft.path),),
+            )
+        if bundle.generated is None:
+            return PreviewItem(
+                title=title,
+                source_path=Path(draft.path),
+                plan=bundle.plan,
+                generated=None,
+                error="Патч ресурса не сгенерирован",
+                kind="asset",
+                draft=draft,
+                rollback_paths=(Path(draft.path),),
+            )
+
         view_text = ""
         reader_notes = []
         try:
@@ -486,33 +521,15 @@ class ProjectPreviewBuilder:
                     reader_notes.append("Представление: %s" % view.label)
                 reader_notes.extend(view.details)
 
-        generated = GeneratedPatch(
-            plan=plan,
-            files=(
-                PatchFile(
-                    relative_path=patch_rel,
-                    text="",
-                    data=bytes(draft.current_bytes),
-                ),
-            ),
-            text="",
-            verification=VerificationResult(
-                ok=True,
-                checks=(
-                    VerificationCheck(
-                        name="asset",
-                        ok=True,
-                        detail="Файл будет записан целиком: %s" % patch_rel,
-                    ),
-                ),
-            ),
-        )
         return PreviewItem(
             title=title,
             source_path=Path(draft.path),
-            plan=plan,
-            generated=generated,
-            error="",
+            plan=bundle.plan,
+            generated=bundle.generated,
+            error=(
+                "" if not bundle.plan.has_errors
+                else "План содержит ошибки"
+            ),
             kind="asset",
             draft=None,
             notes=(
@@ -546,73 +563,53 @@ class ProjectPreviewBuilder:
                 rollback_paths=(Path(draft.path),),
             )
 
-        suffix = Path(draft.path).suffix.lower()
-        if suffix not in (".ltx", ".xml"):
-            return PreviewItem(
-                title=title,
-                source_path=Path(draft.path),
-                plan=None,
-                generated=None,
-                error="Новый файл должен быть .ltx или .xml",
-                kind="new_file",
-                draft=draft,
-                rollback_paths=(Path(draft.path),),
-            )
-
-        if not str(draft.current_text or "").strip():
-            return PreviewItem(
-                title=title,
-                source_path=Path(draft.path),
-                plan=None,
-                generated=None,
-                error="Содержимое нового файла пустое",
-                kind="new_file",
-                draft=draft,
-                rollback_paths=(Path(draft.path),),
-            )
-
-        plan = PatchPlan(
+        intent = PatchIntent(
+            kind="new_file",
             source_path=Path(draft.path),
-            target=PatchTarget(
-                source_path=Path(draft.path),
-                root_path=None,
-                reason="Новый файл проекта",
-            ),
             patch_mod="ACE Patch - %s" % project_name,
-            patch_file_rel=relative_path,
-            changes=(),
-            issues=(),
-            warnings=(),
-            preview=str(draft.current_text),
-            format="xml" if suffix == ".xml" else "ltx",
+            after_text=str(draft.current_text),
+            relative_path=relative_path,
         )
-        generated = GeneratedPatch(
-            plan=plan,
-            files=(
-                PatchFile(
-                    relative_path=(
-                        Path("gamedata") / "configs" / relative_path
-                    ),
-                    text=str(draft.current_text),
-                ),
-            ),
-            text=str(draft.current_text),
-            verification=VerificationResult(
-                ok=True,
-                checks=(
-                    VerificationCheck(
-                        name="new_file",
-                        ok=True,
-                        detail="Файл будет записан как новый",
-                    ),
-                ),
-            ),
+        snapshot = PatchSnapshot(
+            forest=forest,
+            snapshot_id=str(getattr(forest, "cache_id", "") or ""),
         )
+        try:
+            bundle = self._file_patch_orchestrator.build(
+                intent,
+                snapshot,
+            )
+        except PatchPlanningError as exc:
+            return PreviewItem(
+                title=title,
+                source_path=Path(draft.path),
+                plan=None,
+                generated=None,
+                error=str(exc),
+                kind="new_file",
+                draft=draft,
+                rollback_paths=(Path(draft.path),),
+            )
+        if bundle.generated is None:
+            return PreviewItem(
+                title=title,
+                source_path=Path(draft.path),
+                plan=bundle.plan,
+                generated=None,
+                error="Патч нового файла не сгенерирован",
+                kind="new_file",
+                draft=draft,
+                rollback_paths=(Path(draft.path),),
+            )
         return PreviewItem(
             title=title,
             source_path=Path(draft.path),
-            plan=plan,
-            generated=generated,
+            plan=bundle.plan,
+            generated=bundle.generated,
+            error=(
+                "" if not bundle.plan.has_errors
+                else "План содержит ошибки"
+            ),
             kind="new_file",
             draft=draft,
             notes=(
@@ -799,6 +796,7 @@ class ProjectPreviewBuilder:
                 allow_delete_section=True,
                 allow_delete_xml_element=True,
                 xml_patch_mode=snapshot.xml_patch_mode,
+                snapshot_id=str(getattr(forest, "cache_id", "") or ""),
             )
 
             if kind == "file" and not is_xml and _is_mod_ltx(source_path):
@@ -1185,9 +1183,12 @@ class ProjectPreviewBuilder:
 
             try:
                 if is_xml:
-                    merged, generated = self._merge_xml_generated(
+                    merged, generated = merge_xml_generated(
                         services,
-                        group,
+                        [
+                            (item.plan, item.generated, item.source_path)
+                            for item in group
+                        ],
                     )
                 else:
                     plans = [
@@ -1237,93 +1238,5 @@ class ProjectPreviewBuilder:
                 )
 
         return ProjectPatchPreview(project=base.project, items=tuple(items))
-
-    def _merge_xml_generated(self, services, group):
-        """Собрать XML-патч проекта: копии файлов + один файл добавлений."""
-        generated_items = []
-        changes = []
-        issues = []
-        warnings = []
-        checks = []
-        all_ok = True
-        modes = {}
-
-        for item in group:
-            plan = item.plan
-            changes.extend(plan.changes)
-            issues.extend(plan.issues)
-            warnings.extend(plan.warnings)
-
-            source_key = str(item.source_path).lower()
-            mode = plan.xml_mode
-            if source_key in modes and modes[source_key] != mode:
-                issues.append(
-                    PatchIssue(
-                        code="xml_mode_conflict",
-                        message=(
-                            "Один XML-файл изменён и как сырой, и как "
-                            "resolved: выберите один режим, иначе патчи "
-                            "могут противоречить друг другу"
-                        ),
-                        severity="error",
-                    )
-                )
-                all_ok = False
-            modes[source_key] = mode
-
-            if not plan.can_generate:
-                all_ok = False
-                continue
-
-            if getattr(plan, "format", "") == "xml_fork" and item.generated is not None:
-                generated = item.generated
-            else:
-                generated = services.generate_patch(plan)
-            if generated.verification is None or not generated.verification.ok:
-                all_ok = False
-            if generated.verification is not None:
-                checks.extend(generated.verification.checks)
-                issues.extend(generated.verification.issues)
-            generated_items.append((item, generated))
-
-        first_plan = group[0].plan
-        merged_plan = replace(
-            first_plan,
-            changes=tuple(changes),
-            issues=tuple(issues),
-            warnings=tuple(warnings),
-            preview="",
-            diff=None,
-        )
-
-        files = []
-        for _item, generated in generated_items:
-            for file in generated.files:
-                if Path(file.relative_path).suffix.lower() == ".ltx":
-                    # DLTX перепривязок уже объединён с патчем своего
-                    # корня в _build_preview_root: второй файл с тем же
-                    # именем писать нельзя.
-                    continue
-                files.append(file)
-
-        preview_parts = []
-        for file in files:
-            preview_parts.append("-- Файл: %s" % file.relative_path)
-            preview_parts.append(file.text.rstrip())
-            preview_parts.append("")
-        preview = "\n".join(preview_parts)
-
-        verification = VerificationResult(
-            ok=all_ok and bool(files),
-            checks=tuple(checks),
-            issues=tuple(issues),
-        )
-        generated = GeneratedPatch(
-            plan=merged_plan,
-            files=tuple(files),
-            text=preview,
-            verification=verification,
-        )
-        return merged_plan, generated
 
     # -------------------------------------------------- служебное

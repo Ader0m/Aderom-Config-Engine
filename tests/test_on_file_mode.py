@@ -72,6 +72,7 @@ class OnFileModeTest(unittest.TestCase):
                 self.second: {self.root},
             },
         )
+        self.forest.cache_id = "SNAP-L"
 
     def test_one_patch_per_changed_file_for_common_root(self):
         projects = ProjectService(Path(self.temp.name) / "projects")
@@ -90,6 +91,8 @@ class OnFileModeTest(unittest.TestCase):
         # Оба патча адресованы корню system.ltx, а не include-файлам.
         for item in preview.items:
             self.assertEqual(item.plan.target.root_path, self.root)
+            self.assertEqual(item.plan.snapshot_id, "SNAP-L")
+            self.assertEqual(item.generated.plan.snapshot_id, "SNAP-L")
             self.assertEqual(len(item.generated.files), 1)
 
         names = {

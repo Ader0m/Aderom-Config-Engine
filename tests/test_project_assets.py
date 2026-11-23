@@ -90,6 +90,7 @@ class ProjectAssetDraftTest(unittest.TestCase):
             ogg.write_bytes(b"OLD")
 
             forest = FakeForest(cfg, [root])
+            forest.cache_id = "SNAP-A"
             service, _project = self._project(d)
             service.update_asset_draft(ogg, b"NEW-OGG")
             service.save_asset_draft(ogg)
@@ -100,6 +101,12 @@ class ProjectAssetDraftTest(unittest.TestCase):
             self.assertEqual(len(items), 1)
             item = items[0]
             self.assertTrue(item.ok)
+            self.assertEqual(item.plan.patch_mod, "ACE Patch - Sounds")
+            self.assertEqual(item.plan.snapshot_id, "SNAP-A")
+            self.assertEqual(
+                item.generated.plan.snapshot_id,
+                "SNAP-A",
+            )
             self.assertEqual(
                 item.generated.files[0].relative_path,
                 Path("gamedata") / "sounds" / "a.ogg",

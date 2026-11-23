@@ -520,6 +520,7 @@ class ProjectPreviewDialog(QDialog):
         parent=None,
         on_write: Optional[Callable] = None,
         on_rollback: Optional[Callable] = None,
+        on_cancel: Optional[Callable] = None,
         # Fail-safe: запись разрешается только явным write_enabled=True.
         write_enabled: bool = False,
     ):
@@ -527,7 +528,10 @@ class ProjectPreviewDialog(QDialog):
         self.preview = preview
         self._on_write = on_write
         self._on_rollback = on_rollback
+        self._on_cancel = on_cancel
         self._write_enabled = bool(write_enabled)
+        self._writing = False
+        self._cancel_requested = False
 
         self.setWindowTitle("Предпросмотр патча — %s" % preview.project.name)
         self.resize(1100, 720)
@@ -553,8 +557,7 @@ class ProjectPreviewDialog(QDialog):
         layout.addWidget(self._header)
         if not self._write_enabled:
             status = QLabel(
-                "Запись патчей отключена до Этапа 5: "
-                "доступен только предпросмотр."
+                "Запись патчей отключена: доступен только предпросмотр."
             )
             layout.addWidget(status)
 
@@ -581,7 +584,7 @@ class ProjectPreviewDialog(QDialog):
 
         self.details = QPlainTextEdit()
         self.details.setReadOnly(True)
-        self.details.setMaximumHeight(170)
+        self.details.setMaximumHeight(230)
         right_layout.addWidget(self.details)
 
         separator = QFrame()
@@ -596,6 +599,9 @@ class ProjectPreviewDialog(QDialog):
 
         self.patch_text = QPlainTextEdit()
         self.patch_text.setReadOnly(True)
+        self.patch_text.setPlaceholderText(
+            "Полный текст сгенерированного патча (diff)"
+        )
         fixed = QFontDatabase.systemFont(QFontDatabase.FixedFont)
         self.patch_text.setFont(fixed)
         if PALETTE is not None:
@@ -618,15 +624,19 @@ class ProjectPreviewDialog(QDialog):
         self.write_button.clicked.connect(self._write)
         if not self._write_enabled:
             self.write_button.setToolTip(
-                "Запись патчей отключена до Этапа 5: "
-                "доступен только предпросмотр."
+                "Запись патчей отключена: доступен только предпросмотр."
             )
         self._refresh_write_button()
         buttons.addWidget(self.write_button)
 
-        close_button = QPushButton("Закрыть")
-        close_button.clicked.connect(self.accept)
-        buttons.addWidget(close_button)
+        self.cancel_button = QPushButton("Отменить запись")
+        self.cancel_button.clicked.connect(self._cancel_write)
+        self.cancel_button.setVisible(False)
+        buttons.addWidget(self.cancel_button)
+
+        self.close_button = QPushButton("Закрыть")
+        self.close_button.clicked.connect(self.accept)
+        buttons.addWidget(self.close_button)
 
         layout.addLayout(buttons)
 
@@ -680,16 +690,24 @@ class ProjectPreviewDialog(QDialog):
             text += " Исключено: %d." % excluded
         self._header.setText(text)
 
-    def _refresh_write_button(self):
-        has_ok = any(
+    def _has_verified_items(self):
+        return any(
             item.is_patch and item.ok and not item.excluded
             for item in self._selector_items()
         )
+
+    def _refresh_write_button(self):
+        has_ok = self._has_verified_items()
         self.write_button.setEnabled(
             self._write_enabled
             and has_ok
             and self._on_write is not None
+            and not self._writing
         )
+        if self._write_enabled and not has_ok:
+            self.write_button.setToolTip(
+                "Нет проверенных файлов для записи."
+            )
 
     def _list_context_menu(self, pos):
         entry = self.list.itemAt(pos)
@@ -861,14 +879,73 @@ class ProjectPreviewDialog(QDialog):
             for issue in item.plan.warnings:
                 lines.append("Предупреждение: %s" % issue.message)
 
+            if item.plan.needs_confirmation:
+                lines.append("Опасные изменения (требуют подтверждения):")
+                for change in item.plan.changes:
+                    if getattr(change, "risk", "") != "confirm":
+                        continue
+                    label = (
+                        getattr(change, "description", "")
+                        or getattr(change, "note", "")
+                        or getattr(change, "kind", "")
+                    )
+                    if label:
+                        lines.append("  " + str(label))
+
         if item.generated is not None and item.generated.verification is not None:
             verification = item.generated.verification
             lines.append(
                 "Проверка: %s" % ("успешно" if verification.ok else "ошибка")
             )
-            for check in verification.failed_checks:
-                lines.append("  %s: %s" % (check.name, check.detail))
+            important = {
+                "full_diff",
+                "source",
+                "dltx_artifacts",
+                "parents",
+                "roundtrip",
+            }
+            for check in verification.checks:
+                if check.ok and check.name not in important:
+                    continue
+                lines.append(
+                    "  %s: %s"
+                    % (
+                        "OK" if check.ok else "ОШИБКА",
+                        check.name,
+                    )
+                )
+                if check.detail:
+                    lines.append("    " + str(check.detail))
             for issue in verification.issues:
+                if issue.severity == "error":
+                    lines.append("  %s" % issue.message)
+
+        if item.roundtrip is not None:
+            report = item.roundtrip
+            lines.append(
+                "Полная проверка root: %s"
+                % ("успешно" if report.ok else "ошибка")
+            )
+            important = {
+                "full_diff",
+                "source",
+                "dltx_artifacts",
+                "parents",
+                "roundtrip",
+            }
+            for check in report.checks:
+                if check.ok and check.name not in important:
+                    continue
+                lines.append(
+                    "  %s: %s"
+                    % (
+                        "OK" if check.ok else "ОШИБКА",
+                        check.name,
+                    )
+                )
+                if check.detail:
+                    lines.append("    " + str(check.detail))
+            for issue in report.issues:
                 if issue.severity == "error":
                     lines.append("  %s" % issue.message)
 
@@ -887,11 +964,58 @@ class ProjectPreviewDialog(QDialog):
             self.patch_text.setPlainText(item.error)
 
     def _write(self):
-        if not self._write_enabled or self._on_write is None:
+        if (
+            not self._write_enabled
+            or self._on_write is None
+            or self._writing
+        ):
+            return
+        if not self._has_verified_items():
             return
         updated = replace(
             self.preview,
             items=self._selector_items(),
         )
         if self._on_write(updated):
-            self.accept()
+            self._writing = True
+            self._cancel_requested = False
+            self.write_button.setEnabled(False)
+            self.close_button.setEnabled(False)
+            self.cancel_button.setVisible(True)
+            self.cancel_button.setEnabled(True)
+            self.setWindowTitle(
+                "Запись патча — %s" % self.preview.project.name
+            )
+
+    def _cancel_write(self):
+        if not self._writing or self._cancel_requested:
+            return
+        self._cancel_requested = True
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.setText("Отмена запрошена…")
+        if self._on_cancel is not None:
+            self._on_cancel()
+
+    def finish_write(self, result=None, error=None):
+        """Завершить фоновую запись и вернуть диалог в обычное состояние."""
+        self._writing = False
+        self.cancel_button.setVisible(False)
+        self.cancel_button.setEnabled(True)
+        self.cancel_button.setText("Отменить запись")
+        self.close_button.setEnabled(True)
+        self._refresh_write_button()
+        if error is not None:
+            self.details.appendPlainText(
+                "\nЗапись не выполнена: %s" % error
+            )
+            return
+        if result is not None:
+            self.details.appendPlainText(
+                "\nЗапись завершена: %s" % result.mod_dir
+            )
+        self.accept()
+
+    def reject(self):
+        if self._writing:
+            return
+        super().reject()

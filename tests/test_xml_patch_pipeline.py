@@ -70,6 +70,7 @@ class XmlPatchPipelineTest(unittest.TestCase):
         options = options or PatchOptions(
             project_tag="proj",
             allow_delete_xml_element=True,
+            snapshot_id="SNAP",
         )
         if resolved:
             return self.planner.plan_xml_resolved_edit(

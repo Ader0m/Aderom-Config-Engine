@@ -79,7 +79,18 @@ class PatchWriter:
         if not generated.files:
             raise PatchWriteError("Нет файлов для записи")
 
-        if generated.plan.needs_confirmation and not generated.plan.confirmed:
+        plan = generated.plan
+        if plan.has_errors:
+            raise PatchWriteError(
+                "План содержит ошибки: %s"
+                % "; ".join(issue.message for issue in plan.errors())
+            )
+        if not str(plan.snapshot_id or ""):
+            raise PatchWriteError(
+                "Патч не привязан к снимку VFS"
+            )
+
+        if plan.needs_confirmation and not plan.confirmed:
             raise PatchWriteError(
                 "План содержит опасные изменения; требуется подтверждение"
             )
@@ -192,6 +203,15 @@ class PatchWriter:
                 os.replace(str(temp_name), str(destination))
                 written.append(destination)
         except Exception:
+            # При overwrite=False уже записанные файлы можно удалить:
+            # иначе неудачная запись оставит частичный патч-мод.
+            if not overwrite:
+                for destination in written:
+                    try:
+                        if destination.exists():
+                            destination.unlink()
+                    except OSError:
+                        pass
             for temp_name, _destination in prepared:
                 try:
                     if temp_name.exists():

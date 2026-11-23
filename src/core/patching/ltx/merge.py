@@ -42,7 +42,7 @@ def merge_patch_plans(
 
     if any(getattr(plan, "is_xml", False) for plan in valid):
         raise ValueError(
-            "XML-планы объединяются через _merge_xml_generated, а не DLTX"
+            "XML-планы объединяются через merge_xml_generated, а не DLTX"
         )
 
     roots = {

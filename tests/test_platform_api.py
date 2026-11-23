@@ -1044,6 +1044,9 @@ class _DeferredTasks:
         self.cancelled.append(str(owner))
         return 1
 
+    def wait_owner(self, owner, timeout_ms=5000):
+        return True
+
 
 class ProjectAutosaveTest(unittest.TestCase):
     def _api(self, tasks):
@@ -1168,6 +1171,16 @@ class ProjectAutosaveTest(unittest.TestCase):
                 source,
             )
             self.assertFalse(target.is_file())
+
+    def test_app_close_is_deferred_while_patch_write_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            api = self._api(_DeferredTasks())
+            self._dirty_project(api, d)
+            api._patch_write_running = True
+
+            self.assertFalse(api.on_app_close())
+            self.assertTrue(api._close_pending)
+            self.assertEqual(api.tasks.cancelled, [api.project.active.id])
 
     def test_app_close_invalidates_running_autosave(self):
         with tempfile.TemporaryDirectory() as d:

@@ -119,6 +119,7 @@ def _dpi():
 def main():
     from PyQt5.QtWidgets import QApplication
 
+    from app.patching.audit import PatchAuditLog
     from app.paths import PathsAdapter
     from app.workspace import SnapshotService
     from core.api.services import CoreServices
@@ -237,6 +238,9 @@ def main():
         xml_resolve_service=xml_resolve_service,
         cache_service=cache_service,
         snapshot_service=snapshot_service,
+    )
+    services.patch_commit.audit = PatchAuditLog.for_session(
+        generated_dir,
     )
 
     # 2) Сервисы платформы.

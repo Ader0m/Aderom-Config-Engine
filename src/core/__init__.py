@@ -199,7 +199,6 @@ from core.patching.ltx.in_place import (
     LtxInPlaceResult,
     LtxInPlaceService,
 )
-from core.patching.writer import PatchWriteError, PatchWriter
 from core.tree.graph import ReferenceGraphBuilder
 from core.xml.slaxml import (
     SlaxmlParser,
@@ -377,8 +376,6 @@ __all__ = [
     "ModelPatchVerifier",
     "ResolverPatchVerifier",
     "apply_patch_document",
-    "PatchWriter",
-    "PatchWriteError",
     "resolve_patch_target",
     "choose_load_last_suffix",
     "root_candidates",

@@ -19,6 +19,7 @@ from app.projects import (
 from app.projects.use_cases import rollback_preview_item
 from core.api.patches import (
     GeneratedPatch,
+    PatchCommitError,
     PatchFile,
     PatchPlan,
     PatchTarget,
@@ -28,18 +29,75 @@ from core.api.patches import (
 
 class _Forest:
     scan_dir = "C:/game/gamedata/configs"
+    cache_id = "SNAP-1"
+
+
+class _CommitResult:
+    def __init__(self, paths):
+        self.paths = tuple(paths)
+
+
+class _Commit:
+    def __init__(self, owner):
+        self.owner = owner
+        self.authorized = []
+        self.commits = []
+        self.audit_outcomes = []
+
+    def risk_keys(self, plan):
+        return tuple(
+            str(change.description)
+            for change in plan.changes
+            if getattr(change, "risk", "") == "confirm"
+        )
+
+    def authorize(
+        self,
+        generated,
+        confirmed_risks=(),
+        roundtrip_report=None,
+    ):
+        risks = self.risk_keys(generated.plan)
+        missing = [risk for risk in risks if risk not in confirmed_risks]
+        if missing:
+            raise PatchCommitError(
+                "Требуется подтверждение: %s" % "; ".join(missing)
+            )
+        self.authorized.append(
+            (generated, tuple(confirmed_risks), roundtrip_report)
+        )
+        if self.owner.on_authorize is not None:
+            self.owner.on_authorize()
+        return object()
+
+    def commit(self, generated, authorization, mod_dir, **kwargs):
+        self.commits.append((generated, authorization, mod_dir, kwargs))
+        if self.owner.error is not None:
+            raise self.owner.error
+        if self.owner.fail_on_call == len(self.commits):
+            raise RuntimeError("boom")
+        file = generated.files[0]
+        path = Path(mod_dir) / file.relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if file.data is not None:
+            path.write_bytes(file.data)
+        else:
+            path.write_bytes(file.text.encode(file.encoding))
+        if self.owner.on_commit is not None:
+            self.owner.on_commit()
+        return _CommitResult([path])
+
+    def audit_outcome(self, result, status, reason=""):
+        self.audit_outcomes.append((result, status, reason))
 
 
 class _Services:
     def __init__(self, error=None):
-        self.calls = []
         self.error = error
-
-    def write_patch(self, generated, mod_dir, **kwargs):
-        self.calls.append((generated, mod_dir, kwargs))
-        if self.error is not None:
-            raise self.error
-        return [Path(mod_dir) / generated.files[0].relative_path]
+        self.fail_on_call = 0
+        self.on_authorize = None
+        self.on_commit = None
+        self.patch_commit = _Commit(self)
 
 
 def _preview_item(
@@ -49,7 +107,10 @@ def _preview_item(
     excluded=False,
     ok=True,
     kind="file",
+    relative_path=None,
+    snapshot_id="SNAP-1",
 ) -> PreviewItem:
+    relative_path = Path("a.ltx") if relative_path is None else relative_path
     plan = PatchPlan(
         source_path=source,
         target=PatchTarget(
@@ -58,7 +119,7 @@ def _preview_item(
             reason="test",
         ),
         patch_mod="ACE Patch - Proj",
-        patch_file_rel=Path("a.ltx"),
+        patch_file_rel=relative_path,
         changes=(
             AssetChange(
                 kind="asset",
@@ -67,12 +128,13 @@ def _preview_item(
                 risk=risk,
             ),
         ),
+        snapshot_id=snapshot_id,
         format="ltx",
     )
     generated = GeneratedPatch(
         plan=plan,
         files=(
-            PatchFile(relative_path=Path("a.ltx"), text="[a]\n"),
+            PatchFile(relative_path=relative_path, text="[a]\n"),
         ),
         text="[a]\n",
         verification=VerificationResult(ok=ok, checks=()),
@@ -229,7 +291,15 @@ class WritePreviewUseCaseTest(unittest.TestCase):
         )
         self.assertEqual(result.skipped, ())
         self.assertEqual(result.excluded_count, 0)
-        _generated, mod_dir, kwargs = services.calls[0]
+        generated, authorization, mod_dir, kwargs = (
+            services.patch_commit.commits[0]
+        )
+        self.assertIs(generated, preview.items[0].generated)
+        self.assertIsNotNone(authorization)
+        self.assertEqual(
+            services.patch_commit.authorized[0][1],
+            (),
+        )
         self.assertEqual(mod_dir, result.mod_dir)
         self.assertFalse(kwargs["overwrite"])
         self.assertEqual(
@@ -237,6 +307,145 @@ class WritePreviewUseCaseTest(unittest.TestCase):
             [Path(_Forest.scan_dir)],
         )
         self.assertEqual(len(kwargs["asset_rules"]), 1)
+
+    def test_stale_snapshot_is_rejected_before_write(self):
+        services = _Services()
+        preview = self._preview(
+            _preview_item(self.source, snapshot_id="SNAP-OLD"),
+        )
+        forest = _Forest()
+        forest.cache_id = "SNAP-NEW"
+
+        with self.assertRaises(ProjectError) as ctx:
+            write_preview(
+                self.service,
+                services,
+                preview,
+                self.root,
+                forest=forest,
+                allow_write=True,
+            )
+
+        self.assertIn("Снимок", str(ctx.exception))
+        self.assertEqual(services.patch_commit.commits, [])
+
+    def test_snapshot_provider_checked_after_authorize(self):
+        services = _Services()
+        snapshot = {"id": "SNAP-1"}
+        services.on_authorize = lambda: snapshot.__setitem__("id", "SNAP-2")
+        preview = self._preview(_preview_item(self.source))
+
+        with self.assertRaises(ProjectError) as ctx:
+            write_preview(
+                self.service,
+                services,
+                preview,
+                self.root,
+                forest=_Forest(),
+                allow_write=True,
+                snapshot_provider=lambda: snapshot["id"],
+            )
+
+        self.assertIn("Снимок VFS", str(ctx.exception))
+        self.assertEqual(services.patch_commit.commits, [])
+
+    def test_cancel_during_authorize_rejects_item(self):
+        services = _Services()
+        cancelled = {"value": False}
+        services.on_authorize = lambda: cancelled.__setitem__("value", True)
+        preview = self._preview(_preview_item(self.source))
+
+        with self.assertRaises(ProjectError) as ctx:
+            write_preview(
+                self.service,
+                services,
+                preview,
+                self.root,
+                forest=_Forest(),
+                allow_write=True,
+                cancel_check=lambda: cancelled["value"],
+            )
+
+        self.assertIn("отменена", str(ctx.exception))
+        self.assertEqual(services.patch_commit.commits, [])
+
+    def test_cancel_during_commit_removes_current_file(self):
+        services = _Services()
+        cancelled = {"value": False}
+        services.on_commit = lambda: cancelled.__setitem__("value", True)
+        preview = self._preview(_preview_item(self.source))
+        mod_path = (
+            self.root
+            / "ACE Patch - Proj"
+            / "a.ltx"
+        )
+
+        with self.assertRaises(ProjectError) as ctx:
+            write_preview(
+                self.service,
+                services,
+                preview,
+                self.root,
+                forest=_Forest(),
+                allow_write=True,
+                cancel_check=lambda: cancelled["value"],
+            )
+
+        self.assertIn("отменена", str(ctx.exception))
+        self.assertFalse(mod_path.exists())
+        self.assertTrue(services.patch_commit.audit_outcomes)
+        self.assertEqual(
+            services.patch_commit.audit_outcomes[-1][1],
+            "cancelled",
+        )
+
+    def test_second_item_failure_rolls_back_first(self):
+        services = _Services()
+        services.fail_on_call = 2
+        preview = self._preview(
+            _preview_item(self.source),
+            _preview_item(
+                self.root / "b.ltx",
+                relative_path=Path("b.ltx"),
+            ),
+        )
+
+        with self.assertRaises(ProjectError):
+            write_preview(
+                self.service,
+                services,
+                preview,
+                self.root,
+                forest=_Forest(),
+                allow_write=True,
+            )
+
+        mod_dir = self.root / "ACE Patch - Proj"
+        self.assertFalse((mod_dir / "a.ltx").exists())
+        self.assertFalse((mod_dir / "b.ltx").exists())
+        self.assertTrue(services.patch_commit.audit_outcomes)
+        self.assertEqual(
+            services.patch_commit.audit_outcomes[-1][1],
+            "rolled_back",
+        )
+
+    def test_cancel_before_write_leaves_no_files(self):
+        services = _Services()
+        preview = self._preview(_preview_item(self.source))
+
+        with self.assertRaises(ProjectError) as ctx:
+            write_preview(
+                self.service,
+                services,
+                preview,
+                self.root,
+                forest=_Forest(),
+                allow_write=True,
+                cancel_check=lambda: True,
+            )
+
+        self.assertIn("отменена", str(ctx.exception))
+        self.assertEqual(services.patch_commit.commits, [])
 
     def test_rejects_stale_project(self):
         other = Project(
@@ -274,21 +483,40 @@ class WritePreviewUseCaseTest(unittest.TestCase):
             )
         self.assertIn("исключены", str(ctx.exception))
 
-    def test_confirms_risky_plan(self):
+    def test_risky_plan_requires_explicit_confirmation(self):
         services = _Services()
-        preview = self._preview(_preview_item(self.source, risk="confirm"))
+        preview = self._preview(
+            _preview_item(self.source, risk="confirm"),
+        )
 
-        write_preview(
+        with self.assertRaises(ProjectError) as ctx:
+            write_preview(
+                self.service,
+                services,
+                preview,
+                self.root,
+                forest=_Forest(),
+                allow_write=True,
+            )
+        self.assertIn("подтверждение", str(ctx.exception))
+        self.assertEqual(services.patch_commit.commits, [])
+
+        result = write_preview(
             self.service,
             services,
             preview,
             self.root,
             forest=_Forest(),
             allow_write=True,
+            confirmed_risks=("test",),
         )
 
-        generated = services.calls[0][0]
-        self.assertTrue(generated.plan.confirmed)
+        self.assertEqual(result.skipped, ())
+        self.assertEqual(
+            services.patch_commit.authorized[0][1],
+            ("test",),
+        )
+        self.assertEqual(len(services.patch_commit.commits), 1)
 
     def test_wraps_write_error(self):
         services = _Services(error=RuntimeError("disk"))
