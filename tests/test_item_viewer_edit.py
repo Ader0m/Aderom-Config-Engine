@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import QMenu
 
 from tests.qt_support import qapp
 from sdk.features.items import ItemCatalog, ItemEntry, ItemField
-from app.documents import ResolvedDocument
+from app.documents import ResolvedDocumentSession
 from modules.base_module.item_viewer import (
     ItemCardView,
     ItemViewerFeature,
@@ -120,7 +120,7 @@ class _Session:
 class ItemLineEditTest(unittest.TestCase):
     def setUp(self):
         self.ctx = _Ctx()
-        self.document = ResolvedDocument(
+        self.document = ResolvedDocumentSession(
             "base.resolved:system.ltx",
             Path("system.ltx"),
             "[Res]system.ltx",

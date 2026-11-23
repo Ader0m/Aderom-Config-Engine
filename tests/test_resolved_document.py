@@ -5,7 +5,7 @@ import unittest
 
 from tests.support import SRC  # noqa: F401
 
-from app.documents import ResolvedDocument, apply_line_edit
+from app.documents import ResolvedDocumentSession, apply_line_edit
 
 
 class _Events:
@@ -25,7 +25,7 @@ class ResolvedDocumentTest(unittest.TestCase):
             self.persisted.append(doc.current_text)
             return True
 
-        doc = ResolvedDocument(
+        doc = ResolvedDocumentSession(
             "res.test",
             "system.ltx",
             "RESOLVED: system.ltx",
@@ -218,7 +218,7 @@ class ResolvedDocumentTest(unittest.TestCase):
 
     def test_undo_delete_restores_line_source(self):
         source = object()
-        doc = ResolvedDocument(
+        doc = ResolvedDocumentSession(
             "res.test",
             "system.ltx",
             "[Res]system.ltx",

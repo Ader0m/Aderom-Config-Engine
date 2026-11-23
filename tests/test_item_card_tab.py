@@ -8,7 +8,7 @@ from tests.support import SRC  # noqa: F401
 from tests.qt_support import qapp
 from sdk.features.items import ItemEntry, ItemField
 from ui.bus import EventBus
-from app.documents import ResolvedDocument
+from app.documents import ResolvedDocumentSession
 from ui.editor_tabs import EditorTabs
 from modules.base_module.item_viewer import ItemCardView, ItemViewerFeature
 
@@ -119,7 +119,7 @@ class ItemCardTabTest(unittest.TestCase):
     def setUp(self):
         self.bus = EventBus()
         self.tabs = EditorTabs(events=self.bus)
-        self.document = ResolvedDocument(
+        self.document = ResolvedDocumentSession(
             "base.resolved:system.ltx",
             "system.ltx",
             "[Res]system.ltx",

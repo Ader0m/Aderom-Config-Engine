@@ -10,7 +10,7 @@ from .readers import (
     FileReaderSubscription,
     ProjectFileReaderRegistry,
 )
-from .service import (
+from .models import (
     AssetChange,
     PreviewItem,
     Project,
@@ -20,9 +20,11 @@ from .service import (
     ProjectInfo,
     ProjectPatchPreview,
     ProjectResolvedDraft,
+    normalize_save_mode,
+)
+from .service import (
     ProjectService,
     SavedDraft,
-    normalize_save_mode,
 )
 from .repository import (
     PROJECT_SCHEMA_VERSION,

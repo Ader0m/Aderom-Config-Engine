@@ -114,6 +114,12 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
         # Был ли уже построен предпросмотр патча для активного проекта:
         # после него пункт меню называется «Пересобрать патч».
         self._patch_preview_ready = False
+        # Асинхронное автосохранение: один активный проход и один
+        # отложенный; повторные запросы объединяются (coalescing).
+        self._autosave_running = False
+        self._autosave_pending = False
+        self._autosave_project = None
+        self._autosave_pending_project = None
         # На старте действует обычная тема. ``False`` (а не ``None``)
         # избавляет первую правку от повторной установки stylesheet.
         self._override_theme_enabled = False

@@ -21,22 +21,9 @@ import shutil
 import threading
 import time
 import traceback
-from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
-from core.api.documents import analyze_multiline_edit
-from core.api.patches import (
-    GeneratedPatch,
-    PatchFile,
-    PatchIssue,
-    PatchOptions,
-    PatchPlan,
-    PatchTarget,
-    VerificationCheck,
-    VerificationResult,
-    merge_patch_plans,
-)
 from core.api.vfs import read_text_safe, read_xml_text
 
 from sdk.contracts import ProjectOverlay
@@ -44,12 +31,10 @@ from sdk.features.projects import SavedDraft
 
 from app.documents import collapse_duplicated_text
 
-from .assets import (
-    ProjectAssetRegistry,
-    ProjectAssetTypeError,
-)
-from .readers import FileReaderError, ProjectFileReaderRegistry
+from .assets import ProjectAssetRegistry
+from .readers import ProjectFileReaderRegistry
 from .drafts import DraftStore
+from .overlay import OverlayBuilder
 from .session import ProjectSession
 from .repository import (
     ASSETS_DIR as PROJECT_ASSETS_DIR,
@@ -62,19 +47,13 @@ from .repository import (
 )
 
 
-from .patch_builder import ProjectPreviewMixin
 from .models import (
-    AssetChange,
-    PreviewItem,
     Project,
     ProjectAssetDraft,
     ProjectDraft,
     ProjectError,
     ProjectInfo,
-    ProjectPatchPreview,
     ProjectResolvedDraft,
-    SAVE_MODES,
-    _LEGACY_SAVE_MODES,
     normalize_save_mode,
     resolved_key,
 )
@@ -85,7 +64,7 @@ log = logging.getLogger(__name__)
 _MISSING_SETTING = object()
 
 
-class ProjectService(ProjectPreviewMixin):
+class ProjectService:
     """Хранилище проектов и черновиков."""
 
     META_NAME = PROJECT_META_NAME
@@ -96,11 +75,6 @@ class ProjectService(ProjectPreviewMixin):
     # Сессия редактора: какие вкладки были открыты при прошлом закрытии.
     TABS_NAME = PROJECT_TABS_NAME
     TABS_VERSION = 1
-
-    PREVIEW_CACHE_SIZE = 128
-    # Кэш предпросмотра ограничен и по объёму: GeneratedPatch хранит
-    # полные тексты файлов, а не только план.
-    PREVIEW_CACHE_MAX_CHARS = 32_000_000
 
     def __init__(
         self,
@@ -126,10 +100,7 @@ class ProjectService(ProjectPreviewMixin):
             if file_readers is not None
             else ProjectFileReaderRegistry()
         )
-        self._preview_cache = OrderedDict()
-        self._preview_cache_sizes = {}
-        self._preview_cache_chars = 0
-        self._preview_lock = threading.RLock()
+        self.preview_builder = self._create_preview_builder()
         # Сериализует запись файлов черновиков: фоновая запись текста и
         # автосохранение не должны одновременно писать один файл.
         self._write_lock = threading.RLock()
@@ -137,8 +108,10 @@ class ProjectService(ProjectPreviewMixin):
         # Защищает словари проекта и кэш overlay от чтения во время
         # фонового предпросмотра/автосохранения.
         self._state_lock = threading.RLock()
-        self._overlay_cache = None
-        self._overlay_cache_key = None
+        # Эпоха автосохранения: close/flush/смена проекта запрещают
+        # старым фоновым проходам писать после этой точки.
+        self._autosave_epoch = 0
+        self.overlay_builder = OverlayBuilder(self._state_lock)
         # Путь фактического JSON-файла resolved-черновика. Нужен для
         # миграции старых имён файлов: при сохранении перезаписываем
         # именно исходный файл, а не создаём рядом второй.
@@ -155,83 +128,14 @@ class ProjectService(ProjectPreviewMixin):
         return self.session.is_active
 
     def _clear_overlay_cache(self):
-        with self._state_lock:
-            self._overlay_cache = None
-            self._overlay_cache_key = None
-
-    def _overlay_state_key(self):
-        project = self.active
-        if project is None:
-            return None
-        return (
-            str(project.id),
-            tuple(
-                (
-                    self.path_key(draft.path),
-                    int(draft.revision),
-                    bool(draft.is_new),
-                )
-                for draft in sorted(
-                    project.drafts.values(),
-                    key=lambda item: str(item.path).lower(),
-                )
-            ),
-            tuple(
-                (
-                    self.path_key(draft.root_path),
-                    str(draft.tab_id),
-                    int(draft.revision),
-                )
-                for draft in sorted(
-                    project.resolved_drafts.values(),
-                    key=lambda item: str(item.root_path).lower(),
-                )
-            ),
-        )
+        self.overlay_builder.clear()
 
     def project_overlay(self) -> ProjectOverlay:
         """Снимок правок проекта. Собирается один раз на состояние."""
-        with self._state_lock:
-            project = self.active
-            if project is None:
-                return ProjectOverlay()
-
-            key = self._overlay_state_key()
-            if self._overlay_cache is not None and key == self._overlay_cache_key:
-                return self._overlay_cache
-
-            source_files = {}
-            new_files = set()
-            for draft in project.drafts.values():
-                path = Path(draft.path)
-                source_files[path] = str(draft.current_text or "")
-                if draft.is_new:
-                    new_files.add(path)
-
-            resolved_edits = {}
-            for draft in project.resolved_drafts.values():
-                resolved_edits[Path(draft.root_path)] = (
-                    str(draft.original_text or ""),
-                    str(draft.current_text or ""),
-                    tuple(draft.line_sources or ()),
-                )
-
-            revision_token = (
-                hashlib.sha1(
-                    repr(key).encode("utf-8", "replace")
-                ).hexdigest()
-                if key is not None
-                else ""
-            )
-            overlay = ProjectOverlay(
-                source_files=source_files,
-                resolved_edits=resolved_edits,
-                new_files=frozenset(new_files),
-                revision_token=revision_token,
-            )
-            self._overlay_cache = overlay
-            self._overlay_cache_key = key
-            return overlay
+        return self.overlay_builder.build(
+            self.active,
+            is_current=lambda project: self.active is project,
+        )
 
     def patch_mode(self) -> str:
         state = self.session.state()
@@ -527,6 +431,9 @@ class ProjectService(ProjectPreviewMixin):
             self.invalidate_preview_cache()
             self._clear_overlay_cache()
             return
+        # Запрещаем фоновым проходам писать старый снимок; их запись
+        # будет отвергнута, а flush ниже запишет актуальный текст.
+        self.invalidate_autosave()
         try:
             self.flush()
         except Exception as exc:
@@ -744,6 +651,7 @@ class ProjectService(ProjectPreviewMixin):
 
         self.invalidate_preview_cache()
         self._clear_overlay_cache()
+        self.invalidate_autosave()
 
         if not target.exists():
             self.session.deactivate()
@@ -893,19 +801,22 @@ class ProjectService(ProjectPreviewMixin):
 
     def mark_draft_saved(self, path, revision, saved_at=None) -> bool:
         """Зафиксировать успешную фоновую запись в памяти проекта."""
-        draft = self.get_draft(path)
-        if draft is None or int(draft.revision) != int(revision):
-            return False
-        draft.saved_text = draft.current_text
-        draft.saved_at = (
-            time.time() if saved_at is None else float(saved_at)
-        )
-        return True
+        with self._state_lock:
+            draft = self.get_draft(path)
+            if draft is None or int(draft.revision) != int(revision):
+                return False
+            draft.saved_text = draft.current_text
+            draft.saved_at = (
+                time.time() if saved_at is None else float(saved_at)
+            )
+            return True
 
     def restore_draft(self, draft: ProjectDraft) -> ProjectDraft:
         """Вернуть снимок черновика (откат транзакции)."""
         project = self._require_active()
-        project.drafts[self.path_key(draft.path)] = draft
+        with self._state_lock:
+            project.drafts[self.path_key(draft.path)] = draft
+            self._clear_overlay_cache()
         self._invalidate_preview_cache(draft.path)
         self._write_draft(project, draft)
         return draft
@@ -914,30 +825,56 @@ class ProjectService(ProjectPreviewMixin):
         """Сохранить конкретный текст как текущую версию черновика."""
         return self.save_draft(path, text)
 
-    def autosave(self) -> List[SavedDraft]:
-        project = self._require_active()
+    def autosave(
+        self,
+        expected_project=None,
+        should_stop=None,
+    ) -> List[SavedDraft]:
+        """Записать грязные черновики.
+
+        ``expected_project`` фиксирует проект, для которого запущен проход:
+        если активный проект сменился, проход ничего не делает. ``epoch``
+        защищает от записи старого снимка после close/flush или смены
+        проекта. ``should_stop`` — кооперативная отмена.
+        """
         saved: List[SavedDraft] = []
 
         # Снимок списков — под state-lock. Сама запись идёт под
         # write-lock, чтобы не держать блокировку состояния на время
         # сериализации десятков мегабайт (иначе UI встанет).
         with self._state_lock:
+            project = self._require_active()
+            if (
+                expected_project is not None
+                and project is not expected_project
+            ):
+                return []
+            epoch = self._autosave_epoch
             drafts = [
-                draft for draft in project.drafts.values()
+                (draft, int(draft.revision))
+                for draft in project.drafts.values()
                 if draft.is_dirty
             ]
             assets = [
-                draft for draft in project.assets.values()
+                (draft, int(draft.revision))
+                for draft in project.assets.values()
                 if draft.is_dirty
             ]
             resolved = [
-                draft for draft in project.resolved_drafts.values()
+                (draft, int(draft.revision))
+                for draft in project.resolved_drafts.values()
                 if draft.is_dirty
             ]
 
-        for draft in drafts:
+        def stopped():
+            return bool(should_stop is not None and should_stop())
+
+        for draft, revision in drafts:
+            if stopped():
+                break
             text = str(draft.current_text or "")
             saved_at = time.time()
+            key = self.path_key(draft.path)
             target = self.draft_store.text_target(
                 project.root_dir,
                 draft.path,
@@ -947,68 +884,120 @@ class ProjectService(ProjectPreviewMixin):
                 saved_text=text,
                 saved_at=saved_at,
             )
-            self.draft_store.write_payload(target, payload)
+            with self._write_lock:
+                with self._state_lock:
+                    if not self._autosave_can_write(project, epoch):
+                        return saved
+                    if project.drafts.get(key) is not draft:
+                        continue
+                    if int(draft.revision) != revision:
+                        # Черновик изменился после снимка: не пишем
+                        # устаревший текст.
+                        continue
+                self.draft_store.write_payload(target, payload)
             with self._state_lock:
+                if project.drafts.get(key) is not draft:
+                    # Черновик удалён во время записи: не публикуем
+                    # событие о восстановленном файле.
+                    continue
                 if draft.current_text == text:
                     draft.saved_text = text
                     draft.saved_at = saved_at
-            saved.append(
-                SavedDraft(
-                    kind="file",
-                    key=self.path_key(draft.path),
-                    path=draft.path,
-                    revision=int(draft.revision),
-                    size=len(text),
+                saved.append(
+                    SavedDraft(
+                        kind="file",
+                        key=key,
+                        path=draft.path,
+                        revision=int(draft.revision),
+                        size=len(text),
+                    )
                 )
-            )
 
-        for draft in assets:
+        for draft, revision in assets:
+            if stopped():
+                break
             data = bytes(draft.current_bytes)
             saved_at = time.time()
-            self._write_asset_draft(
-                project,
-                draft,
-                saved_bytes=data,
-                saved_at=saved_at,
-            )
+            key = self.path_key(draft.path)
+            with self._write_lock:
+                with self._state_lock:
+                    if not self._autosave_can_write(project, epoch):
+                        return saved
+                    if project.assets.get(key) is not draft:
+                        continue
+                    if int(draft.revision) != revision:
+                        continue
+                self._write_asset_draft(
+                    project,
+                    draft,
+                    saved_bytes=data,
+                    saved_at=saved_at,
+                )
             with self._state_lock:
+                if project.assets.get(key) is not draft:
+                    continue
                 if draft.current_bytes == data:
                     draft.saved_bytes = data
                     draft.saved_at = saved_at
-            saved.append(
-                SavedDraft(
-                    kind="asset",
-                    key=self.path_key(draft.path),
-                    path=draft.path,
-                    revision=int(draft.revision),
-                    size=len(data),
+                saved.append(
+                    SavedDraft(
+                        kind="asset",
+                        key=key,
+                        path=draft.path,
+                        revision=int(draft.revision),
+                        size=len(data),
+                    )
                 )
-            )
 
-        for draft in resolved:
+        for draft, revision in resolved:
+            if stopped():
+                break
             text = str(draft.current_text or "")
             saved_at = time.time()
-            self._write_resolved_draft(
-                project,
-                draft,
-                saved_text=text,
-                saved_at=saved_at,
-            )
+            key = self.resolved_key(draft.tab_id, draft.root_path)
+            with self._write_lock:
+                with self._state_lock:
+                    if not self._autosave_can_write(project, epoch):
+                        return saved
+                    if project.resolved_drafts.get(key) is not draft:
+                        continue
+                    if int(draft.revision) != revision:
+                        continue
+                self._write_resolved_draft(
+                    project,
+                    draft,
+                    saved_text=text,
+                    saved_at=saved_at,
+                )
             with self._state_lock:
+                if project.resolved_drafts.get(key) is not draft:
+                    continue
                 if draft.current_text == text:
                     draft.saved_text = text
                     draft.saved_at = saved_at
-            saved.append(
-                SavedDraft(
-                    kind="resolved",
-                    key=self.resolved_key(draft.tab_id, draft.root_path),
-                    path=draft.root_path,
-                    revision=int(draft.revision),
-                    size=len(text),
+                saved.append(
+                    SavedDraft(
+                        kind="resolved",
+                        key=key,
+                        path=draft.root_path,
+                        revision=int(draft.revision),
+                        size=len(text),
+                    )
                 )
-            )
 
         return saved
+
+    def invalidate_autosave(self) -> None:
+        """Запретить фоновым проходам писать после этой точки."""
+        with self._state_lock:
+            self._autosave_epoch += 1
+
+    def _autosave_can_write(self, project, epoch) -> bool:
+        """Проверка под state-lock: проход всё ещё для того проекта."""
+        return (
+            self._autosave_epoch == epoch
+            and self.active is project
+        )
 
     def flush(self) -> List[SavedDraft]:
         if self.active is None:
@@ -1031,12 +1020,17 @@ class ProjectService(ProjectPreviewMixin):
     def remove_draft(self, path) -> bool:
         project = self._require_active()
         key = self.path_key(path)
-        draft = project.drafts.pop(key, None)
-        if draft is None:
-            return False
-
+        with self._write_lock:
+            with self._state_lock:
+                if self.active is not project:
+                    return False
+                draft = project.drafts.pop(key, None)
+                if draft is None:
+                    return False
+                self.invalidate_autosave()
+                self._clear_overlay_cache()
+            self.draft_store.delete_text(project.root_dir, path)
         self._invalidate_preview_cache(path)
-        self.draft_store.delete_text(project.root_dir, path)
         return True
 
     def changed_paths(self) -> List[Path]:
@@ -1166,13 +1160,16 @@ class ProjectService(ProjectPreviewMixin):
     def remove_asset_draft(self, path) -> bool:
         project = self._require_active()
         key = self.path_key(path)
-        with self._state_lock:
-            draft = project.assets.pop(key, None)
-        if draft is None:
-            return False
-
+        with self._write_lock:
+            with self._state_lock:
+                if self.active is not project:
+                    return False
+                draft = project.assets.pop(key, None)
+                if draft is None:
+                    return False
+                self.invalidate_autosave()
+            self.draft_store.delete_asset(project.root_dir, path)
         self._invalidate_preview_cache(path)
-        self.draft_store.delete_asset(project.root_dir, path)
         return True
 
     def changed_asset_drafts(self) -> List[ProjectAssetDraft]:
@@ -1303,18 +1300,22 @@ class ProjectService(ProjectPreviewMixin):
     def remove_resolved_draft(self, tab_id) -> bool:
         project = self._require_active()
         key = str(tab_id)
-        with self._state_lock:
-            draft = project.resolved_drafts.pop(key, None)
-        if draft is None:
-            return False
-
-        target = self._resolved_draft_files.pop(key, None)
-        if target is None:
-            target = self.draft_store.resolved_target(
-                project.root_dir,
-                draft,
-            )
-        self.draft_store.delete_resolved(target)
+        with self._write_lock:
+            with self._state_lock:
+                if self.active is not project:
+                    return False
+                draft = project.resolved_drafts.pop(key, None)
+                if draft is None:
+                    return False
+                self.invalidate_autosave()
+                self._clear_overlay_cache()
+                target = self._resolved_draft_files.pop(key, None)
+            if target is None:
+                target = self.draft_store.resolved_target(
+                    project.root_dir,
+                    draft,
+                )
+            self.draft_store.delete_resolved(target)
         return True
 
     def changed_resolved_drafts(self) -> List[ProjectResolvedDraft]:
@@ -1381,7 +1382,59 @@ class ProjectService(ProjectPreviewMixin):
             )
         )
 
-    # -------------------------------------------------- кэш предпросмотра
+    # -------------------------------------------------- предпросмотр
+    def _create_preview_builder(self):
+        # Локальный импорт разрывает цикл app.projects <-> app.patching.
+        from app.patching.preview import ProjectPreviewBuilder
+
+        return ProjectPreviewBuilder(
+            self.asset_registry,
+            self.file_readers,
+        )
+
+    def invalidate_preview_cache(self):
+        """Сбросить кэш предпросмотра (например, после смены типов)."""
+        self.preview_builder.invalidate()
+
+    def _invalidate_preview_cache(self, path=None):
+        self.preview_builder.invalidate(path)
+
+    def build_preview(
+        self,
+        services,
+        forest,
+        log=None,
+        expected_project=None,
+    ):
+        """Собрать предпросмотр по снимку активного проекта.
+
+        ``expected_project`` — проект, для которого запущен фон: если
+        активный проект сменился, возвращается ``None``, а не чужой
+        предпросмотр.
+        """
+        from app.patching.preview import PreviewSnapshot
+
+        project, state = self.session.snapshot()
+        if project is None or state is None:
+            if expected_project is not None:
+                return None
+            raise ProjectError("Проект не создан")
+        if expected_project is not None and project is not expected_project:
+            return None
+        with self._state_lock:
+            snapshot = PreviewSnapshot.capture(
+                project,
+                save_mode=state.save_mode,
+                xml_patch_mode=state.xml_patch_mode,
+                module_settings=state.module_settings,
+            )
+        return self.preview_builder.build(
+            services,
+            forest,
+            snapshot,
+            log=log,
+        )
+
     def _require_active(self) -> Project:
         return self.session.require_active()
 
@@ -1427,6 +1480,9 @@ class ProjectService(ProjectPreviewMixin):
             )
             if compact != draft.current_text:
                 draft.current_text = compact
+                # Текст изменился без роста ревизии: кэш overlay
+                # больше не соответствует состоянию.
+                self._clear_overlay_cache()
             saved = compact if saved_text is None else str(saved_text)
 
             key = self.resolved_key(draft.tab_id, draft.root_path)

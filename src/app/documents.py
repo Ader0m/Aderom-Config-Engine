@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Живые документы прикладного слоя.
 
-Один :class:`ResolvedDocument` — единственный владелец состояния
+Один :class:`ResolvedDocumentSession` — единственный владелец состояния
 resolved-файла: текста, карты источников, ревизии и признака изменений.
 Все представления (resolved-вид, карточка предмета, preview) являются
 проекциями документа и не хранят собственных копий.
@@ -13,7 +13,6 @@ resolved-файла: текста, карты источников, ревизи
 
 from __future__ import annotations
 
-import bisect
 import copy
 import logging
 import re
@@ -261,7 +260,7 @@ class DocumentSubscription:
     """Подписка на изменения документа."""
 
     _callback: Callable
-    _owner: "ResolvedDocument"
+    _owner: "ResolvedDocumentSession"
     closed: bool = field(default=False)
 
     def unsubscribe(self):
@@ -271,8 +270,157 @@ class DocumentSubscription:
         self._owner._unsubscribe(self._callback)
 
 
-class ResolvedDocument:
-    """Единственный владелец состояния одного resolved-файла."""
+@dataclass(frozen=True)
+class LineEditIntent:
+    """Правка одной строки документа."""
+
+    action: str
+    line_number: int
+    text: str = ""
+    section: Optional[str] = None
+    persist: bool = True
+    prepared: Optional[tuple] = None
+    parsed: object = None
+
+
+@dataclass(frozen=True)
+class UndoIntent:
+    """Отменить последнюю правку."""
+
+
+@dataclass(frozen=True)
+class RedoIntent:
+    """Повторить отменённую правку."""
+
+
+@dataclass(frozen=True)
+class ResetIntent:
+    """Полная перезагрузка состояния документа (lifecycle)."""
+
+    text: str
+    line_sources: Optional[tuple] = None
+    saved_text: Optional[str] = None
+    original_text: Optional[str] = None
+    persist: bool = False
+
+
+@dataclass(frozen=True)
+class FieldEditIntent:
+    section: str
+    key: str
+    value: str
+
+
+@dataclass(frozen=True)
+class RenameFieldIntent:
+    section: str
+    old_key: str
+    new_key: str
+    value: str
+
+
+@dataclass(frozen=True)
+class DeleteFieldIntent:
+    section: str
+    key: str
+
+
+@dataclass(frozen=True)
+class InsertFieldIntent:
+    section: str
+    key: str
+    value: str
+
+
+@dataclass(frozen=True)
+class ReplaceTextIntent:
+    text: str
+    line_sources: Optional[tuple] = None
+    origin: Optional[object] = None
+    sections: tuple = ()
+    persist: bool = True
+    atomic: bool = False
+    focus_line: Optional[int] = None
+    full: bool = False
+
+
+class ResolvedDocumentSession:
+    """Единственный владелец состояния одного resolved-файла.
+
+    Публичный вход правок — :meth:`apply`. Прямые мутаторы
+    (``replace_text``, ``apply_line_edit``, ``apply_field_edit``,
+    ``rename_field``, ``delete_field``, ``insert_field``, ``reset``,
+    ``undo``, ``redo``) — implementation detail и lifecycle: UI обязан
+    вызывать только ``apply(intent)`` (это проверяет
+    ``tests/test_architecture.py``).
+    """
+
+    def apply(self, intent) -> bool:
+        """Применить правку документа (единственный вход из UI).
+
+        Поддерживаются ``LineEditIntent``, ``FieldEditIntent``,
+        ``RenameFieldIntent``, ``DeleteFieldIntent``,
+        ``InsertFieldIntent``, ``ReplaceTextIntent``, ``ResetIntent``,
+        ``UndoIntent`` и ``RedoIntent``. Неизвестный тип — ошибка, а не
+        молчаливый no-op.
+        """
+        if isinstance(intent, LineEditIntent):
+            return self.apply_line_edit(
+                intent.action,
+                intent.line_number,
+                intent.text,
+                section=intent.section,
+                persist=intent.persist,
+                prepared=intent.prepared,
+                parsed=intent.parsed,
+            )
+        if isinstance(intent, FieldEditIntent):
+            return self.apply_field_edit(
+                intent.section,
+                intent.key,
+                intent.value,
+            )
+        if isinstance(intent, RenameFieldIntent):
+            return self.rename_field(
+                intent.section,
+                intent.old_key,
+                intent.new_key,
+                intent.value,
+            )
+        if isinstance(intent, DeleteFieldIntent):
+            return self.delete_field(intent.section, intent.key)
+        if isinstance(intent, InsertFieldIntent):
+            return self.insert_field(
+                intent.section,
+                intent.key,
+                intent.value,
+            )
+        if isinstance(intent, ReplaceTextIntent):
+            return self.replace_text(
+                intent.text,
+                line_sources=intent.line_sources,
+                origin=intent.origin,
+                sections=intent.sections,
+                persist=intent.persist,
+                atomic=intent.atomic,
+                focus_line=intent.focus_line,
+                full=intent.full,
+            )
+        if isinstance(intent, UndoIntent):
+            return self.undo()
+        if isinstance(intent, RedoIntent):
+            return self.redo()
+        if isinstance(intent, ResetIntent):
+            return self.reset(
+                intent.text,
+                line_sources=intent.line_sources,
+                saved_text=intent.saved_text,
+                original_text=intent.original_text,
+                persist=intent.persist,
+            )
+        raise TypeError(
+            "Неизвестная правка документа: %r" % (intent,)
+        )
 
     def __init__(
         self,
@@ -458,7 +606,7 @@ class ResolvedDocument:
             and normalized == self._text + self._text
         ):
             log.error(
-                "ResolvedDocument %s: отклонена замена текста его "
+                "ResolvedDocumentSession %s: отклонена замена текста его "
                 "двойной копией.\n%s",
                 self.tab_id,
                 "".join(traceback.format_stack(limit=16)),
@@ -830,7 +978,7 @@ class ResolvedDocument:
         original_text=None,
         persist=False,
     ) -> bool:
-        """Полная перезагрузка состояния (загрузка проекта, сброс)."""
+        """Полная перезагрузка состояния (lifecycle; через ``ResetIntent``)."""
         original = (
             self._original_text
             if original_text is None

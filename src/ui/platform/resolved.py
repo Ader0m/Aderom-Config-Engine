@@ -6,7 +6,17 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from app.documents import ResolvedDocument, prepare_field_edit
+from app.documents import (
+    ResolvedDocumentSession,
+    FieldEditIntent,
+    LineEditIntent,
+    RedoIntent,
+    RenameFieldIntent,
+    ReplaceTextIntent,
+    ResetIntent,
+    UndoIntent,
+    prepare_field_edit,
+)
 from app.projects import ProjectError
 from PyQt5.QtCore import QTimer
 from sdk.features.items import ItemCardRequest
@@ -146,12 +156,14 @@ class ResolvedDocumentMixin:
             text, sources = result
             document = self._resolved_documents.get(tab_id)
             if document is not None:
-                document.reset(
-                    text,
-                    line_sources=sources,
-                    saved_text=text,
-                    original_text=text,
-                    persist=False,
+                document.apply(
+                    ResetIntent(
+                        text,
+                        line_sources=sources,
+                        saved_text=text,
+                        original_text=text,
+                        persist=False,
+                    )
                 )
             else:
                 document = self._ensure_resolved_document(
@@ -233,7 +245,7 @@ class ResolvedDocumentMixin:
             if root_path is None:
                 return None
 
-            document = ResolvedDocument(
+            document = ResolvedDocumentSession(
                 tab_id,
                 root_path,
                 title or ("[Res]%s" % Path(root_path).name),
@@ -291,12 +303,14 @@ class ResolvedDocumentMixin:
                     self.project.remove_resolved_draft(document.tab_id)
                 except Exception:
                     pass
-            document.reset(
-                text,
-                line_sources=line_sources,
-                saved_text=text,
-                original_text=text,
-                persist=False,
+            document.apply(
+                ResetIntent(
+                    text,
+                    line_sources=line_sources,
+                    saved_text=text,
+                    original_text=text,
+                    persist=False,
+                )
             )
             view = (
                 self.window.editor.get_tab(document.tab_id)
@@ -488,7 +502,9 @@ class ResolvedDocumentMixin:
         document = self._get_or_restore_document(tab_id)
         if document is None:
             return False
-        ok = document.apply_line_edit(action, line_number, text)
+        ok = document.apply(
+            LineEditIntent(action, line_number, text)
+        )
         if ok and self.window is not None:
             self.window.editor.set_tab_dirty(
                 document.tab_id,
@@ -501,7 +517,9 @@ class ResolvedDocumentMixin:
         document = self._get_or_restore_document(tab_id)
         if document is None:
             return False
-        ok = document.apply_field_edit(section, key, value)
+        ok = document.apply(
+            FieldEditIntent(section, key, value)
+        )
         if ok and self.window is not None:
             self.window.editor.set_tab_dirty(
                 document.tab_id,
@@ -521,11 +539,13 @@ class ResolvedDocumentMixin:
         document = self._get_or_restore_document(tab_id)
         if document is None:
             return False
-        ok = document.rename_field(
-            section,
-            old_key,
-            new_key,
-            value,
+        ok = document.apply(
+            RenameFieldIntent(
+                section,
+                old_key,
+                new_key,
+                value,
+            )
         )
         if ok and self.window is not None:
             self.window.editor.set_tab_dirty(
@@ -670,17 +690,21 @@ class ResolvedDocumentMixin:
     def _apply_resolved_edit_sync(self, document, job):
         tab_id = document.tab_id
         if job.get("kind") == "rename":
-            ok = document.rename_field(
-                job.get("section", ""),
-                job.get("old_key", ""),
-                job.get("new_key", ""),
-                job.get("value", ""),
+            ok = document.apply(
+                RenameFieldIntent(
+                    job.get("section", ""),
+                    job.get("old_key", ""),
+                    job.get("new_key", ""),
+                    job.get("value", ""),
+                )
             )
         else:
-            ok = document.apply_field_edit(
-                job.get("section", ""),
-                job.get("key", ""),
-                job.get("value", ""),
+            ok = document.apply(
+                FieldEditIntent(
+                    job.get("section", ""),
+                    job.get("key", ""),
+                    job.get("value", ""),
+                )
             )
         if ok and self.window is not None:
             self.window.editor.set_tab_dirty(
@@ -722,13 +746,15 @@ class ResolvedDocumentMixin:
             return
 
         try:
-            ok = document.apply_line_edit(
-                prepared.action,
-                prepared.line_number,
-                prepared.body,
-                section=prepared.section,
-                prepared=(prepared.new_text, prepared.new_sources),
-                parsed=prepared.parsed,
+            ok = document.apply(
+                LineEditIntent(
+                    prepared.action,
+                    prepared.line_number,
+                    prepared.body,
+                    section=prepared.section,
+                    prepared=(prepared.new_text, prepared.new_sources),
+                    parsed=prepared.parsed,
+                )
             )
         except Exception as exc:
             self._finish_resolved_edit(tab_id, job, False, str(exc))
@@ -759,11 +785,15 @@ class ResolvedDocumentMixin:
 
     def undo_resolved_document(self, tab_id):
         document = self._get_or_restore_document(tab_id)
-        return bool(document is not None and document.undo())
+        return bool(
+            document is not None and document.apply(UndoIntent())
+        )
 
     def redo_resolved_document(self, tab_id):
         document = self._get_or_restore_document(tab_id)
-        return bool(document is not None and document.redo())
+        return bool(
+            document is not None and document.apply(RedoIntent())
+        )
 
     def resolved_section_at_line(self, tab_id, line_number):
         document = self._get_or_restore_document(tab_id)
@@ -893,10 +923,12 @@ class ResolvedDocumentMixin:
         # текст, если документ уже изменился из другой поверхности.
         if document.current_text == str(current_text or ""):
             return True
-        return document.replace_text(
-            current_text,
-            line_sources=line_sources,
-            atomic=True,
+        return document.apply(
+            ReplaceTextIntent(
+                current_text,
+                line_sources=line_sources,
+                atomic=True,
+            )
         )
 
     def sync_resolved_line_edit(self, tab_id, edit):
@@ -912,11 +944,13 @@ class ResolvedDocumentMixin:
         """Обновить открытую resolved-вкладку без переключения на неё."""
         document = self._resolved_documents.get(str(tab_id or ""))
         if document is not None:
-            document.replace_text(
-                text,
-                line_sources=line_sources,
-                persist=False,
-                atomic=False,
+            document.apply(
+                ReplaceTextIntent(
+                    text,
+                    line_sources=line_sources,
+                    persist=False,
+                    atomic=False,
+                )
             )
 
         if self.window is None:
@@ -987,12 +1021,14 @@ class ResolvedDocumentMixin:
                 ):
                     if self.project.is_active:
                         self.project.remove_resolved_draft(tab_id)
-                    document.reset(
-                        text,
-                        line_sources=line_sources,
-                        saved_text=text,
-                        original_text=text,
-                        persist=False,
+                    document.apply(
+                        ResetIntent(
+                            text,
+                            line_sources=line_sources,
+                            saved_text=text,
+                            original_text=text,
+                            persist=False,
+                        )
                     )
                     self._reload_resolved_view(
                         existing_widget,
@@ -1176,12 +1212,14 @@ class ResolvedDocumentMixin:
                         self.project.remove_resolved_draft(tab_id)
                     except Exception:
                         pass
-                document.reset(
-                    text,
-                    line_sources=sources,
-                    saved_text=text,
-                    original_text=text,
-                    persist=False,
+                document.apply(
+                    ResetIntent(
+                        text,
+                        line_sources=sources,
+                        saved_text=text,
+                        original_text=text,
+                        persist=False,
+                    )
                 )
                 self._reload_resolved_view(
                     existing_widget,

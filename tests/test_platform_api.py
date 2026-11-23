@@ -59,6 +59,7 @@ class FakeEditor:
         self.busy = False
         self.tab_busy = set()
         self.calls = []
+        self.clean_paths = []
 
     def currentWidget(self):
         return self.current
@@ -71,6 +72,9 @@ class FakeEditor:
 
     def mark_tab_clean(self, tab_id):
         self.dirty[tab_id] = False
+
+    def mark_clean(self, path):
+        self.clean_paths.append(Path(path))
 
     def setCurrentWidget(self, widget):
         self.current = widget
@@ -1008,6 +1012,189 @@ class _FakeServices:
             section=str(section),
             fields=(ItemField("kind", "i_food", 2),),
         )
+
+
+class _InlineTasks:
+    def __init__(self):
+        self.count = 0
+
+    def run(self, fn, on_done=None, on_log=None, owner=None):
+        self.count += 1
+        try:
+            result = fn(lambda _message: None)
+        except Exception as exc:
+            if on_done is not None:
+                on_done(None, exc)
+            return None
+        if on_done is not None:
+            on_done(result, None)
+        return None
+
+
+class _DeferredTasks:
+    def __init__(self):
+        self.calls = []
+        self.cancelled = []
+
+    def run(self, fn, on_done=None, on_log=None, owner=None):
+        self.calls.append((fn, on_done))
+        return object()
+
+    def cancel_owner(self, owner):
+        self.cancelled.append(str(owner))
+        return 1
+
+
+class ProjectAutosaveTest(unittest.TestCase):
+    def _api(self, tasks):
+        api = PlatformApi(FakeEvents(), FakeCommands(), tasks, None, None)
+        api.window = FakeWindow()
+        return api
+
+    def _dirty_project(self, api, root):
+        api.project.create("Auto")
+        source = Path(root) / "configs" / "a.ltx"
+        source.parent.mkdir(parents=True)
+        source.write_text("[a]\nx = 1\n", encoding="cp1251")
+        api.project.update_draft(source, "[a]\nx = 2\n")
+        return source
+
+    def test_autosave_runs_through_tasks_and_publishes_event(self):
+        with tempfile.TemporaryDirectory() as d:
+            tasks = _InlineTasks()
+            api = self._api(tasks)
+            source = self._dirty_project(api, d)
+            events = []
+            api.events.subscribe(Events.PROJECT_SAVED, events.append)
+
+            api.autosave_project()
+
+            self.assertEqual(tasks.count, 1)
+            self.assertFalse(api.project.get_draft(source).is_dirty)
+            self.assertEqual(len(events), 1)
+            self.assertIn(source, api.window.editor.clean_paths)
+
+    def test_repeated_requests_are_coalesced(self):
+        with tempfile.TemporaryDirectory() as d:
+            tasks = _DeferredTasks()
+            api = self._api(tasks)
+            source = self._dirty_project(api, d)
+
+            api.autosave_project()
+            api.autosave_project()
+            api.autosave_project()
+
+            self.assertEqual(len(tasks.calls), 1)
+            self.assertTrue(api._autosave_pending)
+
+            work, on_done = tasks.calls[0]
+            saved = work(lambda _message: None)
+            on_done(saved, None)
+
+            self.assertEqual(len(tasks.calls), 2)
+            self.assertFalse(api._autosave_pending)
+            self.assertIn(source, api.window.editor.clean_paths)
+
+    def test_stale_save_does_not_mark_editor_clean(self):
+        with tempfile.TemporaryDirectory() as d:
+            tasks = _DeferredTasks()
+            api = self._api(tasks)
+            source = self._dirty_project(api, d)
+
+            api.autosave_project()
+            work, on_done = tasks.calls[0]
+            saved = work(lambda _message: None)
+
+            api.project.update_draft(source, "[a]\nx = 3\n")
+            on_done(saved, None)
+
+            self.assertNotIn(source, api.window.editor.clean_paths)
+            self.assertTrue(api.project.get_draft(source).is_dirty)
+
+    def test_switched_project_is_not_autosaved(self):
+        with tempfile.TemporaryDirectory() as d:
+            tasks = _DeferredTasks()
+            api = self._api(tasks)
+            self._dirty_project(api, d)
+
+            api.autosave_project()
+            work, _on_done = tasks.calls[0]
+
+            api.project.create("Other")
+            other = Path(d) / "other" / "b.ltx"
+            other.parent.mkdir(parents=True)
+            other.write_text("[b]\nx = 1\n", encoding="cp1251")
+            api.project.update_draft(other, "[b]\nx = 2\n")
+
+            self.assertEqual(work(lambda _message: None), [])
+            self.assertTrue(api.project.get_draft(other).is_dirty)
+
+    def test_events_from_old_project_are_discarded(self):
+        with tempfile.TemporaryDirectory() as d:
+            tasks = _DeferredTasks()
+            api = self._api(tasks)
+            source = self._dirty_project(api, d)
+            events = []
+            api.events.subscribe(Events.PROJECT_SAVED, events.append)
+
+            api.autosave_project()
+            work, on_done = tasks.calls[0]
+            saved = work(lambda _message: None)
+
+            api.project.create("Other")
+            on_done(saved, None)
+
+            self.assertEqual(events, [])
+            self.assertNotIn(source, api.window.editor.clean_paths)
+
+    def test_removed_draft_event_is_not_published(self):
+        with tempfile.TemporaryDirectory() as d:
+            tasks = _DeferredTasks()
+            api = self._api(tasks)
+            source = self._dirty_project(api, d)
+            events = []
+            api.events.subscribe(Events.PROJECT_SAVED, events.append)
+
+            api.autosave_project()
+            work, on_done = tasks.calls[0]
+            saved = work(lambda _message: None)
+            api.project.remove_draft(source)
+            on_done(saved, None)
+
+            self.assertEqual(events, [])
+            self.assertNotIn(source, api.window.editor.clean_paths)
+            target = api.project.draft_store.text_target(
+                api.project.active.root_dir,
+                source,
+            )
+            self.assertFalse(target.is_file())
+
+    def test_app_close_invalidates_running_autosave(self):
+        with tempfile.TemporaryDirectory() as d:
+            tasks = _DeferredTasks()
+            api = self._api(tasks)
+            source = self._dirty_project(api, d)
+
+            api.autosave_project()
+            before = api.project._autosave_epoch
+            api.on_app_close()
+
+            self.assertGreater(api.project._autosave_epoch, before)
+            self.assertFalse(api._autosave_pending)
+            self.assertFalse(api.project.get_draft(source).is_dirty)
+
+    def test_project_activation_cancels_autosave_owner(self):
+        with tempfile.TemporaryDirectory() as d:
+            tasks = _DeferredTasks()
+            api = self._api(tasks)
+            self._dirty_project(api, d)
+            project = api.project.active
+
+            api.autosave_project()
+            api._begin_project_activation()
+
+            self.assertIn(project.id, tasks.cancelled)
+            self.assertFalse(api._autosave_pending)
 
 
 if __name__ == "__main__":

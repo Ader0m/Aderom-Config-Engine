@@ -8,22 +8,24 @@
 from __future__ import annotations
 
 import logging
-import re
-import time
 from dataclasses import replace
 from pathlib import Path
 
+from PyQt5.QtCore import QThread
 from PyQt5.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from core import read_text_safe, read_xml_text
 from sdk.contracts.events import Events
 from sdk.features.projects import AssetDraftInfo, ProjectChanged, SavedDraft
 
+from app.documents import ResetIntent
 from app.projects import (
     ProjectAssetTypeError,
     ProjectError,
     ProjectSettingError,
 )
+from app.patching.commit import write_preview as write_preview_use_case
+from app.projects import use_cases as project_use_cases
 from ..project_dialogs import (
     ProjectCreateDialog,
     ProjectLoadDialog,
@@ -899,6 +901,17 @@ class ProjectControllerMixin:
         # Правка, ещё не доехавшая из редактора, относится к старому
         # проекту: фиксируем её до close()/load().
         self._flush_editor_pending()
+        # Старый autosave не должен конкурировать за файлы и события:
+        # просим его остановиться; epoch в ProjectService.close()
+        # гарантирует, что он не запишет старый снимок после flush().
+        project = self.project.active
+        if project is not None:
+            try:
+                self.tasks.cancel_owner(project.id)
+            except Exception:
+                pass
+        self._autosave_pending = False
+        self._autosave_pending_project = None
         self._set_project_loading(True)
 
     def _end_project_activation(self):
@@ -1318,12 +1331,14 @@ class ProjectControllerMixin:
             draft = self.project.get_resolved_draft(tab_id)
             if draft is None:
                 continue
-            document.reset(
-                draft.current_text,
-                line_sources=draft.line_sources,
-                saved_text=draft.saved_text,
-                original_text=draft.original_text,
-                persist=False,
+            document.apply(
+                ResetIntent(
+                    draft.current_text,
+                    line_sources=draft.line_sources,
+                    saved_text=draft.saved_text,
+                    original_text=draft.original_text,
+                    persist=False,
+                )
             )
             view = editor.get_tab(tab_id)
             if view is not None and hasattr(view, "set_content"):
@@ -1411,28 +1426,88 @@ class ProjectControllerMixin:
             editor.set_tab_dirty(tab_id, document.is_dirty)
 
     def autosave_project(self):
-        if not self.project.is_active:
+        project = self.project.active
+        if project is None:
+            return
+        if self._autosave_running:
+            # Coalescing: пока идёт запись, повторные запросы объединяются
+            # в один отложенный проход для актуального проекта.
+            self._autosave_pending = True
+            self._autosave_pending_project = project
             return
 
         self._flush_editor_pending()
+        self._autosave_running = True
+        self._autosave_project = project
+        self._autosave_pending = False
+        self._autosave_pending_project = None
+
+        def work(_log):
+            return self.project.autosave(
+                expected_project=project,
+                should_stop=(
+                    lambda: QThread.currentThread()
+                    .isInterruptionRequested()
+                ),
+            )
+
         try:
-            saved = self.project.autosave()
-        except Exception as exc:
-            self.log("Проект: ошибка автосохранения: %s" % exc)
-            return
+            self.tasks.run(
+                work,
+                on_done=lambda saved, err: self._on_autosave_done(
+                    project,
+                    saved,
+                    err,
+                ),
+                owner=project.id,
+            )
+        except Exception:
+            self._autosave_running = False
+            self._autosave_project = None
+            raise
 
-        if not saved:
-            return
+    def _on_autosave_done(self, project, saved, err):
+        self._autosave_running = False
+        self._autosave_project = None
 
-        self._invalidate_saved(saved)
+        # События старого проекта не применяются и не публикуются:
+        # подписчики не должны видеть чужой PROJECT_SAVED.
+        if self.project.active is project:
+            if err is not None:
+                self.log("Проект: ошибка автосохранения: %s" % err)
+            elif saved:
+                self._apply_autosave(project, saved)
+
+        if self._autosave_pending:
+            pending = self._autosave_pending_project
+            self._autosave_pending = False
+            self._autosave_pending_project = None
+            if pending is not None and self.project.active is pending:
+                self.autosave_project()
+
+    def _apply_autosave(self, project, saved):
+        if self.project.active is not project:
+            return
+        events = [
+            event for event in saved
+            if self._autosave_event_exists(event)
+        ]
+        if not events:
+            self._update_project_status()
+            return
+        self._invalidate_saved(events)
 
         if self.window is not None:
-            for event in saved:
+            for event in events:
                 if event.kind == "file":
+                    if not self._file_saved_current(event):
+                        continue
                     # Текст в событии больше не передаётся: перед
                     # автосохранением вкладки уже синхронизированы.
                     self.window.editor.mark_clean(event.path)
                 elif event.kind == "resolved":
+                    if not self._resolved_saved_current(event):
+                        continue
                     self.window.editor.mark_tab_clean(event.key)
                     document = self._resolved_documents.get(str(event.key))
                     if document is not None:
@@ -1447,21 +1522,61 @@ class ProjectControllerMixin:
                             else:
                                 view.set_dirty_state(False)
 
-        for event in saved:
+        for event in events:
             self.events.publish(Events.PROJECT_SAVED, event)
 
         self.set_status(
-            "Автосохранение проекта: %d файл(ов)" % len(saved),
+            "Автосохранение проекта: %d файл(ов)" % len(events),
             4000,
         )
-        self.log("Проект: автосохранено файлов %d" % len(saved))
+        self.log("Проект: автосохранено файлов %d" % len(events))
         self._update_project_status()
+
+    def _autosave_event_exists(self, event) -> bool:
+        """Черновик события всё ещё принадлежит текущему проекту."""
+        if event.kind == "file":
+            return self.project.get_draft(event.path) is not None
+        if event.kind == "asset":
+            return self.project.get_asset_draft(event.path) is not None
+        if event.kind == "resolved":
+            return self.project.get_resolved_draft(event.key) is not None
+        return False
+
+    def _file_saved_current(self, event) -> bool:
+        """Событие относится к актуальной версии черновика."""
+        draft = self.project.get_draft(event.path)
+        if draft is None:
+            return False
+        return (
+            int(draft.revision) == int(event.revision)
+            and not draft.is_dirty
+        )
+
+    def _resolved_saved_current(self, event) -> bool:
+        draft = self.project.get_resolved_draft(event.key)
+        if draft is None:
+            return False
+        return (
+            int(draft.revision) == int(event.revision)
+            and not draft.is_dirty
+        )
 
     def on_app_close(self):
         if not self.project.is_active:
             return
         self._flush_editor_pending()
         self._save_open_tabs()
+
+        project = self.project.active
+        if project is not None:
+            try:
+                self.tasks.cancel_owner(project.id)
+            except Exception:
+                pass
+        self._autosave_pending = False
+        self._autosave_pending_project = None
+        # Старый фоновый проход не должен записать снимок после flush().
+        self.project.invalidate_autosave()
         try:
             self.project.flush()
         except Exception as exc:
@@ -1471,7 +1586,8 @@ class ProjectControllerMixin:
         if self.window is None:
             return
 
-        if not self.project.is_active:
+        project = self.project.active
+        if project is None:
             self.show_error("Создайте или загрузите проект.")
             return
 
@@ -1481,11 +1597,7 @@ class ProjectControllerMixin:
             )
             return
 
-        if (
-            not self.project.changed_drafts()
-            and not self.project.changed_resolved_drafts()
-            and not self.project.changed_asset_drafts()
-        ):
+        if not self.project.has_changes():
             QMessageBox.information(
                 self.window,
                 "Проект",
@@ -1504,15 +1616,21 @@ class ProjectControllerMixin:
                 self.services,
                 forest,
                 log=log,
+                expected_project=project,
             )
 
         self.tasks.run(
             work,
-            on_done=self._on_preview_ready,
+            on_done=lambda preview, err: self._on_preview_ready(
+                preview,
+                err,
+                project=project,
+                forest=forest,
+            ),
             on_log=self.log,
         )
 
-    def _on_preview_ready(self, preview, err):
+    def _on_preview_ready(self, preview, err, project=None, forest=None):
         if err is not None:
             self.set_status("Ошибка подготовки патча")
             self.log("Проект: ошибка подготовки патча: %s" % err)
@@ -1522,10 +1640,20 @@ class ProjectControllerMixin:
         if preview is None:
             return
 
-        if preview.project is not self.project.active:
+        if (
+            preview.project is not self.project.active
+            or (project is not None and preview.project is not project)
+        ):
             self.set_status("Проект изменён: предпросмотр устарел", 6000)
             self.log(
                 "Проект: предпросмотр отменён — активный проект изменился"
+            )
+            return
+
+        if forest is not None and not self._forest_is_current(forest):
+            self.set_status("Лес устарел: предпросмотр отменён", 6000)
+            self.log(
+                "Проект: предпросмотр отменён — изменился снимок VFS"
             )
             return
 
@@ -1546,29 +1674,20 @@ class ProjectControllerMixin:
         )
         dialog.exec_()
 
+    def _forest_is_current(self, forest) -> bool:
+        current = self._forest
+        if current is None:
+            return False
+        current_id = getattr(current, "cache_id", "")
+        if current_id:
+            return current_id == getattr(forest, "cache_id", "")
+        return forest is current
+
     def write_preview(self, preview):
         if not patch_write_enabled():
             self.show_error(
                 "Запись патчей отключена до Этапа 5: "
                 "доступен только предпросмотр."
-            )
-            return False
-        if self._forest is None:
-            self.show_error("Нет построенного дерева.")
-            return False
-        if preview.project is not self.project.active:
-            self.show_error(
-                "Активный проект изменился: патч не записан."
-            )
-            return False
-
-        included = [
-            item for item in preview.items
-            if item.is_patch and not item.excluded
-        ]
-        if not included:
-            self.show_error(
-                "Все файлы исключены из патча: записывать нечего."
             )
             return False
 
@@ -1581,114 +1700,60 @@ class ProjectControllerMixin:
         if not directory:
             return False
 
-        safe_name = re.sub(
-            r'[<>:"/\\|?*]+',
-            "_",
-            preview.project.name,
-        ).strip(" .") or "ACE Patch"
-
-        mod_dir = Path(directory) / ("ACE Patch - " + safe_name)
-        written = []
-        skipped = []
-
-        for item in preview.items:
-            if not item.is_patch:
-                continue
-            if item.excluded:
-                continue
-            if not item.ok:
-                skipped.append(item.title)
-                continue
-
-            plan = item.plan
-            if plan.needs_confirmation:
-                plan = replace(plan, confirmed=True)
-            generated = replace(item.generated, plan=plan)
-
-            try:
-                paths = self.services.write_patch(
-                    generated,
-                    mod_dir,
-                    forbidden_roots=[Path(self._forest.scan_dir)],
-                    overwrite=False,
-                    asset_rules=self.asset_types.patch_rules(),
-                )
-                written.extend(paths)
-            except Exception as exc:
-                self.show_error(
-                    "Не удалось записать %s:\n%s"
-                    % (item.title, exc)
-                )
-                return False
-
-        if not written:
-            self.show_error("Патчи не записаны.")
+        try:
+            result = write_preview_use_case(
+                self.project,
+                self.services,
+                preview,
+                directory,
+                forest=self._forest,
+                asset_rules=self.asset_types.patch_rules(),
+                allow_write=True,
+            )
+        except ProjectError as exc:
+            self.show_error(str(exc))
             return False
 
         self.set_status(
-            "Патч-мод создан: %s" % mod_dir.name,
+            "Патч-мод создан: %s" % result.mod_dir.name,
             7000,
         )
-        self.log("Проект: записано файлов патча %d" % len(written))
+        self.log("Проект: записано файлов патча %d" % len(result.written))
 
-        excluded_count = sum(
-            1 for item in preview.items
-            if item.is_patch and item.excluded
-        )
-        if excluded_count:
+        if result.excluded_count:
             self.log(
-                "Проект: исключено из патча файлов %d" % excluded_count
+                "Проект: исключено из патча файлов %d"
+                % result.excluded_count
             )
 
-        if skipped:
+        if result.skipped:
             text = (
                 "Записаны не все файлы. Пропущены:\n%s"
-                % "\n".join(skipped)
+                % "\n".join(result.skipped)
             )
-            if excluded_count:
-                text += "\n\nИсключено из патча: %d." % excluded_count
+            if result.excluded_count:
+                text += (
+                    "\n\nИсключено из патча: %d."
+                    % result.excluded_count
+                )
             QMessageBox.warning(self.window, "Проект", text)
         else:
-            text = "Патч-мод создан:\n%s" % mod_dir
-            if excluded_count:
-                text += "\n\nИсключено из патча: %d." % excluded_count
+            text = "Патч-мод создан:\n%s" % result.mod_dir
+            if result.excluded_count:
+                text += "\n\nИсключено из патча: %d." % result.excluded_count
             QMessageBox.information(self.window, "Проект", text)
 
         return True
 
     def rollback_preview_item(self, item):
         """Удалить черновики файлов, из которых собран пункт патча."""
-        if not self.project.is_active:
-            self.show_error("Проект не активен: откат невозможен.")
-            return False
-
-        paths = [Path(path) for path in item.rollback_paths]
-        resolved_ids = [str(key) for key in item.rollback_resolved_ids]
-        removed_paths = []
-        removed_resolved = []
-        invalidate_paths = list(paths)
-
         try:
-            for path in paths:
-                if self.project.remove_draft(path):
-                    removed_paths.append(path)
-                    continue
-                if self.project.remove_asset_draft(path):
-                    removed_paths.append(path)
-            for key in resolved_ids:
-                draft = self.project.get_resolved_draft(key)
-                if draft is not None and draft.root_path is not None:
-                    invalidate_paths.append(Path(draft.root_path))
-                if self.project.remove_resolved_draft(key):
-                    removed_resolved.append(key)
-        except ProjectError as exc:
-            self.show_error("Не удалось откатить изменения:\n%s" % exc)
-            return False
-
-        if not removed_paths and not removed_resolved:
-            self.show_error(
-                "Не удалось откатить изменения: черновик уже отсутствует."
+            result = project_use_cases.rollback_preview_item(
+                self.project,
+                item,
             )
+        except ProjectError as exc:
+            self.show_error(str(exc))
             return False
 
         try:
@@ -1698,7 +1763,7 @@ class ProjectControllerMixin:
                 "Проект: не удалось обновить VFS после отката: %s" % exc
             )
         try:
-            self._invalidate_paths(invalidate_paths)
+            self._invalidate_paths(result.invalidate_paths)
         except Exception as exc:
             self.log(
                 "Проект: не удалось сбросить кэш после отката: %s" % exc

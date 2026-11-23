@@ -71,25 +71,34 @@ class ProjectSession:
         with self._lock:
             return self._require_locked()
 
-    def state(self) -> Optional[ProjectState]:
-        """Неизменяемый снимок скалярного состояния."""
+    def snapshot(
+        self,
+    ) -> Tuple[Optional[Project], Optional[ProjectState]]:
+        """Атомарно вернуть активный проект и снимок его состояния."""
         with self._lock:
             project = self._active
             if project is None:
-                return None
-            return ProjectState(
-                id=str(project.id),
-                name=str(project.name),
-                root_dir=Path(project.root_dir),
-                modules=tuple(project.modules),
-                save_mode=str(project.save_mode),
-                xml_patch_mode=str(project.xml_patch_mode),
-                module_settings=MappingProxyType(
-                    dict(project.module_settings)
-                ),
-                created_at=str(project.created_at),
-                revision=self._revision,
-            )
+                return None, None
+            return project, self._state_locked(project)
+
+    def state(self) -> Optional[ProjectState]:
+        """Неизменяемый снимок скалярного состояния."""
+        return self.snapshot()[1]
+
+    def _state_locked(self, project: Project) -> ProjectState:
+        return ProjectState(
+            id=str(project.id),
+            name=str(project.name),
+            root_dir=Path(project.root_dir),
+            modules=tuple(project.modules),
+            save_mode=str(project.save_mode),
+            xml_patch_mode=str(project.xml_patch_mode),
+            module_settings=MappingProxyType(
+                dict(project.module_settings)
+            ),
+            created_at=str(project.created_at),
+            revision=self._revision,
+        )
 
     # -------------------------------------------------- жизненный цикл
     def activate(self, project: Project) -> Project:

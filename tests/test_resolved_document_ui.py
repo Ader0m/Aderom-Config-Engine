@@ -6,7 +6,7 @@ import unittest
 from tests.support import SRC  # noqa: F401
 
 from tests.qt_support import qapp
-from app.documents import ResolvedDocument
+from app.documents import ResolvedDocumentSession
 from ui.editor import ResolvedView
 
 _app = qapp()
@@ -14,7 +14,7 @@ _app = qapp()
 
 class ResolvedDocumentViewTest(unittest.TestCase):
     def _make(self):
-        document = ResolvedDocument(
+        document = ResolvedDocumentSession(
             "base.resolved:system.ltx",
             "system.ltx",
             "[Res]system.ltx",

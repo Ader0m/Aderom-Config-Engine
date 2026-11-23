@@ -8,6 +8,7 @@
 """
 
 import ast
+import re
 import tempfile
 import threading
 import unittest
@@ -494,6 +495,35 @@ class ArchitectureBoundaryTest(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertFalse(result.get("value"))
         self.assertEqual(calls, [])
+
+
+class DocumentMutationBoundaryTest(unittest.TestCase):
+    """UI меняет документы только через ``ResolvedDocumentSession.apply``."""
+
+    MUTATORS = (
+        "apply_line_edit",
+        "apply_field_edit",
+        "rename_field",
+        "delete_field",
+        "insert_field",
+        "replace_text",
+        "reset",
+        "undo",
+        "redo",
+    )
+
+    def test_ui_does_not_call_document_mutators_directly(self):
+        pattern = re.compile(
+            r"\b(?:document|self\._document)\.(?:%s)\s*\("
+            % "|".join(self.MUTATORS)
+        )
+        offenders = []
+        for path in sorted((ROOT / "ui").rglob("*.py")):
+            text = path.read_text(encoding="utf-8-sig")
+            for match in pattern.finditer(text):
+                line = text.count("\n", 0, match.start()) + 1
+                offenders.append("%s:%d" % (_rel(path), line))
+        self.assertEqual(offenders, [])
 
 
 if __name__ == "__main__":

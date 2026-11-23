@@ -1,18 +1,23 @@
 # -*- coding: utf-8 -*-
 """Построение предпросмотра патча проекта.
 
-Вынесено из ProjectService. Использует единые входы core, когда они
-доступны, и не знает про Qt.
+Сценарий прикладного слоя: получает снимок проекта (режимы, настройки и
+копии изменённых черновиков), поднимает core-планы и возвращает
+``ProjectPatchPreview``. Не знает про Qt, UI и активный проект: это
+входные данные.
+
+Ручные ``PatchPlan`` внутри остаются до Этапа 5 (CR-5).
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
+import threading
 from collections import OrderedDict
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Mapping, Tuple
 
 from sdk.contracts import ProjectOverlay
 
@@ -28,20 +33,23 @@ from core.api.patches import (
     VerificationResult,
     merge_patch_plans,
 )
+from core.api.paths import path_key
 from core.api.vfs import game_root_from_scan_dir
 
-from .assets import ProjectAssetTypeError
-from .models import (
+from app.projects.assets import ProjectAssetTypeError
+from app.projects.models import (
     AssetChange,
     PreviewItem,
+    Project,
     ProjectDraft,
     ProjectAssetDraft,
     ProjectError,
     ProjectPatchPreview,
     ProjectResolvedDraft,
+    normalize_save_mode,
     resolved_key,
 )
-from .readers import FileReaderError
+from app.projects.readers import FileReaderError
 
 
 def _is_mod_ltx(path) -> bool:
@@ -57,72 +65,127 @@ def _is_mod_ltx(path) -> bool:
     )
 
 
-class ProjectPreviewMixin:
-    """Preview-часть ProjectService. Наследуется сервисом проекта."""
+@dataclass(frozen=True)
+class PreviewSnapshot:
+    """Вход предпросмотра: проект, режимы и копии изменённых черновиков.
 
-    def _preview_project_key(self, forest, project=None):
-        project = project or self._require_active()
-        with self._state_lock:
-            settings = tuple(
-                sorted(
-                    (str(key), repr(value))
-                    for key, value in project.module_settings.items()
-                )
+    ``project`` — сам объект проекта: UI сравнивает идентичность, чтобы
+    отбросить устаревший предпросмотр. Тексты черновиков скопированы,
+    чтобы фоновая сборка не зависела от дальнейших правок.
+    """
+
+    project: Project
+    project_id: str
+    project_name: str
+    save_mode: str
+    xml_patch_mode: str
+    module_settings: Mapping[str, object]
+    drafts: Tuple[ProjectDraft, ...]
+    resolved_drafts: Tuple[ProjectResolvedDraft, ...]
+    assets: Tuple[ProjectAssetDraft, ...]
+
+    @classmethod
+    def capture(
+        cls,
+        project: Project,
+        *,
+        save_mode,
+        xml_patch_mode,
+        module_settings,
+    ) -> "PreviewSnapshot":
+        """Снять снимок. Вызывающий держит блокировку состояния проекта."""
+        drafts = tuple(
+            ProjectDraft(
+                path=draft.path,
+                original_text=draft.original_text,
+                current_text=draft.current_text,
+                saved_text=draft.saved_text,
+                is_new=draft.is_new,
+                revision=draft.revision,
+                updated_at=draft.updated_at,
+                saved_at=draft.saved_at,
             )
-        return (
-            project.id,
-            str(getattr(forest, "cache_id", "") or ""),
-            str(getattr(forest, "scan_dir", "")),
-            len(getattr(forest, "files", ()) or ()),
-            len(getattr(forest, "xml_files", ()) or ()),
-            project.save_mode,
-            project.xml_patch_mode,
-            project.name,
-            settings,
+            for draft in sorted(
+                (
+                    item for item in project.drafts.values()
+                    if item.has_changes
+                ),
+                key=lambda item: str(item.path).lower(),
+            )
+        )
+        assets = tuple(
+            ProjectAssetDraft(
+                path=draft.path,
+                original_sha1=draft.original_sha1,
+                current_bytes=draft.current_bytes,
+                saved_bytes=draft.saved_bytes,
+                is_new=draft.is_new,
+                revision=draft.revision,
+                updated_at=draft.updated_at,
+                saved_at=draft.saved_at,
+            )
+            for draft in sorted(
+                (
+                    item for item in project.assets.values()
+                    if item.has_changes
+                ),
+                key=lambda item: str(item.path).lower(),
+            )
+        )
+        resolved_drafts = tuple(
+            ProjectResolvedDraft(
+                root_path=draft.root_path,
+                title=draft.title,
+                original_text=draft.original_text,
+                current_text=draft.current_text,
+                saved_text=draft.saved_text,
+                tab_id=draft.tab_id,
+                line_sources=draft.line_sources,
+                revision=draft.revision,
+                updated_at=draft.updated_at,
+                saved_at=draft.saved_at,
+            )
+            for draft in sorted(
+                (
+                    item
+                    for item in project.resolved_drafts.values()
+                    if item.has_changes
+                ),
+                key=lambda item: str(item.root_path).lower(),
+            )
+        )
+        return cls(
+            project=project,
+            project_id=str(project.id),
+            project_name=str(project.name),
+            save_mode=str(save_mode),
+            xml_patch_mode=str(xml_patch_mode),
+            module_settings=module_settings,
+            drafts=drafts,
+            resolved_drafts=resolved_drafts,
+            assets=assets,
         )
 
-    def _draft_preview_key(self, draft, forest, project=None):
-        return (
-            "draft",
-            self._preview_project_key(forest, project),
-            self.path_key(draft.path),
-            bool(draft.is_new),
-            int(draft.revision),
-            len(draft.original_text or ""),
-            len(draft.current_text or ""),
-        )
 
-    def _asset_preview_key(self, draft, forest, project=None):
-        return (
-            "asset",
-            self._preview_project_key(forest, project),
-            self.path_key(draft.path),
-            bool(draft.is_new),
-            int(draft.revision),
-            draft.original_sha1,
-            draft.current_sha1,
-        )
+class ProjectPreviewBuilder:
+    """Сборка предпросмотра патча по снимку проекта."""
 
-    def _resolved_preview_key(self, draft, forest, project=None):
-        return (
-            "resolved",
-            self._preview_project_key(forest, project),
-            str(draft.tab_id),
-            self.path_key(draft.root_path),
-            int(draft.revision),
-            len(draft.original_text or ""),
-            len(draft.current_text or ""),
-            len(draft.line_sources or ()),
-        )
+    PREVIEW_CACHE_SIZE = 128
+    # Кэш предпросмотра ограничен и по объёму: GeneratedPatch хранит
+    # полные тексты файлов, а не только план.
+    PREVIEW_CACHE_MAX_CHARS = 32_000_000
 
-    def invalidate_preview_cache(self):
-        """Сбросить кэш предпросмотра (например, после смены типов)."""
-        with self._preview_lock:
-            self._preview_cache.clear()
-            self._preview_cache_sizes.clear()
-            self._preview_cache_chars = 0
+    def __init__(self, asset_registry, file_readers):
+        self.asset_registry = asset_registry
+        self.file_readers = file_readers
+        self._preview_cache = OrderedDict()
+        self._preview_cache_sizes = {}
+        self._preview_cache_chars = 0
+        self._preview_lock = threading.RLock()
 
-    def _invalidate_preview_cache(self, path=None):
+    # -------------------------------------------------- кэш
+    def invalidate(self, path=None):
+        """Сбросить кэш предпросмотра целиком или для одного пути."""
         with self._preview_lock:
             if path is None:
                 self._preview_cache.clear()
@@ -130,7 +193,7 @@ class ProjectPreviewMixin:
                 self._preview_cache_chars = 0
                 return
 
-            wanted = self.path_key(path)
+            wanted = path_key(path)
             for key in list(self._preview_cache):
                 matches = (
                     len(key) > 2
@@ -149,6 +212,60 @@ class ProjectPreviewMixin:
                     )
             if self._preview_cache_chars < 0:
                 self._preview_cache_chars = 0
+
+    # -------------------------------------------------- ключи
+    def _preview_project_key(self, forest, snapshot):
+        settings = tuple(
+            sorted(
+                (str(key), repr(value))
+                for key, value in snapshot.module_settings.items()
+            )
+        )
+        return (
+            snapshot.project_id,
+            str(getattr(forest, "cache_id", "") or ""),
+            str(getattr(forest, "scan_dir", "")),
+            len(getattr(forest, "files", ()) or ()),
+            len(getattr(forest, "xml_files", ()) or ()),
+            snapshot.save_mode,
+            snapshot.xml_patch_mode,
+            snapshot.project_name,
+            settings,
+        )
+
+    def _draft_preview_key(self, draft, forest, snapshot):
+        return (
+            "draft",
+            self._preview_project_key(forest, snapshot),
+            path_key(draft.path),
+            bool(draft.is_new),
+            int(draft.revision),
+            len(draft.original_text or ""),
+            len(draft.current_text or ""),
+        )
+
+    def _asset_preview_key(self, draft, forest, snapshot):
+        return (
+            "asset",
+            self._preview_project_key(forest, snapshot),
+            path_key(draft.path),
+            bool(draft.is_new),
+            int(draft.revision),
+            draft.original_sha1,
+            draft.current_sha1,
+        )
+
+    def _resolved_preview_key(self, draft, forest, snapshot):
+        return (
+            "resolved",
+            self._preview_project_key(forest, snapshot),
+            str(draft.tab_id),
+            path_key(draft.root_path),
+            int(draft.revision),
+            len(draft.original_text or ""),
+            len(draft.current_text or ""),
+            len(draft.line_sources or ()),
+        )
 
     @staticmethod
     def _preview_items_size(items):
@@ -217,17 +334,28 @@ class ProjectPreviewMixin:
         return list(items)
 
     # -------------------------------------------------- предпросмотр патча
-    def build_preview(self, services, forest, log=None) -> ProjectPatchPreview:
-        """Собрать предпросмотр в выбранном режиме проекта."""
-        if self.is_root_mode():
+    def build(
+        self,
+        services,
+        forest,
+        snapshot,
+        log=None,
+    ) -> ProjectPatchPreview:
+        """Собрать предпросмотр по снимку в выбранном режиме проекта."""
+        mode = normalize_save_mode(snapshot.save_mode or "root")
+        if mode == "root":
             return self._build_preview_root(
                 services,
                 forest,
+                snapshot,
+                mode,
                 log=log,
             )
         return self._build_preview_per_file(
             services,
             forest,
+            snapshot,
+            mode,
             log=log,
         )
 
@@ -267,7 +395,14 @@ class ProjectPreviewMixin:
         except ProjectAssetTypeError as exc:
             raise ProjectError(str(exc))
 
-    def _asset_preview_item(self, project, forest, draft, title):
+    def _asset_preview_item(
+        self,
+        project_name,
+        forest,
+        draft,
+        title,
+        settings,
+    ):
         try:
             relative, asset_type = self._asset_relative_path(
                 forest,
@@ -289,7 +424,7 @@ class ProjectPreviewMixin:
         setting_key = getattr(asset_type, "save_mode_setting", "")
         if setting_key:
             save_mode = str(
-                project.module_setting(setting_key, "override")
+                settings.get(setting_key, "override")
                 or "override"
             ).strip().lower()
         allowed_modes = tuple(
@@ -319,7 +454,7 @@ class ProjectPreviewMixin:
                 root_path=Path(getattr(forest, "scan_dir", "")).parent,
                 reason="Двоичный ресурс проекта",
             ),
-            patch_mod="ACE Patch - %s" % project.name,
+            patch_mod="ACE Patch - %s" % project_name,
             patch_file_rel=relative,
             changes=(
                 AssetChange(
@@ -393,7 +528,7 @@ class ProjectPreviewMixin:
             rollback_paths=(Path(draft.path),),
         )
 
-    def _new_file_preview(self, project, forest, draft, title):
+    def _new_file_preview(self, project_name, forest, draft, title):
         try:
             relative_path = self._patch_relative_path(
                 forest,
@@ -443,7 +578,7 @@ class ProjectPreviewMixin:
                 root_path=None,
                 reason="Новый файл проекта",
             ),
-            patch_mod="ACE Patch - %s" % project.name,
+            patch_mod="ACE Patch - %s" % project_name,
             patch_file_rel=relative_path,
             changes=(),
             issues=(),
@@ -492,78 +627,16 @@ class ProjectPreviewMixin:
         self,
         services,
         forest,
+        snapshot,
+        mode,
         log=None,
         generate=True,
         verify_resolver=True,
     ) -> ProjectPatchPreview:
-        project = self._require_active()
-
-        # Атомарный снимок черновиков выбранного проекта: пользователь
-        # может продолжать печатать или переключить проект, пока
-        # фоновая задача готовит предпросмотр.
-        with self._state_lock:
-            raw_drafts = [
-                ProjectDraft(
-                    path=draft.path,
-                    original_text=draft.original_text,
-                    current_text=draft.current_text,
-                    saved_text=draft.saved_text,
-                    is_new=draft.is_new,
-                    revision=draft.revision,
-                    updated_at=draft.updated_at,
-                    saved_at=draft.saved_at,
-                )
-                for draft in sorted(
-                    (
-                        item for item in project.drafts.values()
-                        if item.has_changes
-                    ),
-                    key=lambda item: str(item.path).lower(),
-                )
-            ]
-
-            asset_drafts = [
-                ProjectAssetDraft(
-                    path=draft.path,
-                    original_sha1=draft.original_sha1,
-                    current_bytes=draft.current_bytes,
-                    saved_bytes=draft.saved_bytes,
-                    is_new=draft.is_new,
-                    revision=draft.revision,
-                    updated_at=draft.updated_at,
-                    saved_at=draft.saved_at,
-                )
-                for draft in sorted(
-                    (
-                        item for item in project.assets.values()
-                        if item.has_changes
-                    ),
-                    key=lambda item: str(item.path).lower(),
-                )
-            ]
-
-            resolved_drafts = [
-                ProjectResolvedDraft(
-                    root_path=draft.root_path,
-                    title=draft.title,
-                    original_text=draft.original_text,
-                    current_text=draft.current_text,
-                    saved_text=draft.saved_text,
-                    tab_id=draft.tab_id,
-                    line_sources=draft.line_sources,
-                    revision=draft.revision,
-                    updated_at=draft.updated_at,
-                    saved_at=draft.saved_at,
-                )
-                for draft in sorted(
-                    (
-                        item
-                        for item in project.resolved_drafts.values()
-                        if item.has_changes
-                    ),
-                    key=lambda item: str(item.root_path).lower(),
-                )
-            ]
+        project = snapshot.project
+        raw_drafts = list(snapshot.drafts)
+        asset_drafts = list(snapshot.assets)
+        resolved_drafts = list(snapshot.resolved_drafts)
 
         # Снимок для XML-целей патча: индекс include должен строиться
         # по тем же черновикам, что и сами патчи, а не по диску.
@@ -619,7 +692,7 @@ class ProjectPreviewMixin:
             if draft is not None and draft.is_new:
                 output.append(
                     self._new_file_preview(
-                        project,
+                        snapshot.project_name,
                         forest,
                         draft,
                         title,
@@ -650,7 +723,7 @@ class ProjectPreviewMixin:
                 return
 
             is_xml = suffix_low == ".xml"
-            override_mode = self.patch_mode() == "override"
+            override_mode = mode == "override"
             notes: Tuple[str, ...] = ()
             resolved_analysis = None
             if (
@@ -720,12 +793,12 @@ class ProjectPreviewMixin:
                 ).hexdigest()[:6]
 
             options = PatchOptions(
-                patch_mod="ACE Patch - %s" % project.name,
+                patch_mod="ACE Patch - %s" % snapshot.project_name,
                 suffix=suffix,
-                project_tag=project.name,
+                project_tag=snapshot.project_name,
                 allow_delete_section=True,
                 allow_delete_xml_element=True,
-                xml_patch_mode=project.xml_patch_mode,
+                xml_patch_mode=snapshot.xml_patch_mode,
             )
 
             if kind == "file" and not is_xml and _is_mod_ltx(source_path):
@@ -788,7 +861,7 @@ class ProjectPreviewMixin:
                     else ()
                 )
                 if is_xml:
-                    xml_setting = project.xml_patch_mode.lower()
+                    xml_setting = snapshot.xml_patch_mode.lower()
                     if xml_setting == "xml_override":
                         xml_mode = "full_copy"
                     elif xml_setting == "xml":
@@ -809,7 +882,7 @@ class ProjectPreviewMixin:
                         line_sources=line_sources,
                         forest=forest,
                         options=options,
-                        project_mode=self.patch_mode(),
+                        project_mode=mode,
                         overlay=overlay,
                     )
                 else:
@@ -817,7 +890,7 @@ class ProjectPreviewMixin:
                         source_path,
                         original_text,
                         current_text,
-                        mode=self.patch_mode(),
+                        mode=mode,
                         line_sources=line_sources,
                         forest=forest,
                         options=options,
@@ -849,7 +922,7 @@ class ProjectPreviewMixin:
 
                 if (
                     not is_xml
-                    and self.patch_mode() == "on_file"
+                    and mode == "on_file"
                     and plan.target.root_path is not None
                 ):
                     notes = notes + (
@@ -925,7 +998,7 @@ class ProjectPreviewMixin:
         index = 0
         for draft in raw_drafts:
             index += 1
-            key = self._draft_preview_key(draft, forest, project)
+            key = self._draft_preview_key(draft, forest, snapshot)
             items.extend(
                 self._cached_preview_items(
                     key,
@@ -944,16 +1017,17 @@ class ProjectPreviewMixin:
 
         for draft in asset_drafts:
             index += 1
-            key = self._asset_preview_key(draft, forest, project)
+            key = self._asset_preview_key(draft, forest, snapshot)
             items.extend(
                 self._cached_preview_items(
                     key,
                     lambda draft=draft: (
                         self._asset_preview_item(
-                            project,
+                            snapshot.project_name,
                             forest,
                             draft,
                             draft.path.name,
+                            snapshot.module_settings,
                         ),
                     ),
                 )
@@ -961,7 +1035,7 @@ class ProjectPreviewMixin:
 
         for draft in resolved_drafts:
             index += 1
-            key = self._resolved_preview_key(draft, forest, project)
+            key = self._resolved_preview_key(draft, forest, snapshot)
             title = draft.title or (
                 "%s (resolved)" % draft.root_path.name
             )
@@ -987,7 +1061,7 @@ class ProjectPreviewMixin:
         seen_scripts = set()
         for item in items:
             if item.kind == "script":
-                key = (self.path_key(item.source_path), item.text)
+                key = (path_key(item.source_path), item.text)
                 if key in seen_scripts:
                     continue
                 seen_scripts.add(key)
@@ -995,11 +1069,20 @@ class ProjectPreviewMixin:
 
         return ProjectPatchPreview(project=project, items=tuple(deduped))
 
-    def _build_preview_root(self, services, forest, log=None):
+    def _build_preview_root(
+        self,
+        services,
+        forest,
+        snapshot,
+        mode,
+        log=None,
+    ):
         """Один патч на корень загрузки; XML — один пакет на проект."""
         base = self._build_preview_per_file(
             services,
             forest,
+            snapshot,
+            mode,
             log=log,
             generate=False,
             # Поштучные DLTX-патчи в Root-режиме не записываются:

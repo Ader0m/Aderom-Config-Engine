@@ -71,3 +71,6 @@
 
 - [ADR-16](ADR-16-project-schema-migration.md) — схема проекта,
   `ProjectRepository` и one-time migration.
+- [ADR-17](ADR-17-explicit-serialized-commands.md) — явные
+  сериализованные команды как single-writer на Этапе 3; очередь
+  команд — Этап 6.

@@ -60,7 +60,7 @@
    `project.json` репозиторию. Публичное поведение и сигнатуры
    `ProjectService` не меняются.
 6. `DraftStore`, single-writer, `ProjectSession`, вынос use cases из
-   UI, `DocumentSession` и асинхронное автосохранение — следующие шаги
+   UI, `ResolvedDocumentSession` и асинхронное автосохранение — следующие шаги
    Этапа 3. Этот ADR их не вводит и не отменяет.
 
 ## Альтернативы

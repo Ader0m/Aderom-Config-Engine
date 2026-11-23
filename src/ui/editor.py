@@ -33,11 +33,13 @@ from PyQt5.QtWidgets import (
     QWidget,
     QAbstractItemView,
     QSplitter,
-    QFrame, 
+    QFrame,
     QStyledItemDelegate,
     QListView,
-    
+
 )
+
+from app.documents import ReplaceTextIntent
 
 from PyQt5.Qsci import QsciScintilla
 
@@ -1310,10 +1312,12 @@ class ResolvedView(QWidget):
                 return False
 
             self.content_changed.emit(text)
-            self._document.replace_text(
-                text,
-                origin=self,
-                focus_line=self.cursor_line(),
+            self._document.apply(
+                ReplaceTextIntent(
+                    text,
+                    origin=self,
+                    focus_line=self.cursor_line(),
+                )
             )
             if len(self._line_sources) != self._document.line_count:
                 self._line_sources = list(self._document.line_sources)
