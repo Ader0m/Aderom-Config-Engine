@@ -1197,5 +1197,38 @@ class ProjectAutosaveTest(unittest.TestCase):
             self.assertFalse(api._autosave_pending)
 
 
+class DocumentTextReaderTest(unittest.TestCase):
+    def test_document_text_uses_services_instead_of_core_import(self):
+        with tempfile.TemporaryDirectory() as d:
+            calls = []
+
+            class Services:
+                def read_text(self, path):
+                    calls.append(("text", Path(path)))
+                    return "TEXT"
+
+                def read_xml_text(self, path):
+                    calls.append(("xml", Path(path)))
+                    return "XML"
+
+            api = PlatformApi(
+                FakeEvents(),
+                FakeCommands(),
+                None,
+                Services(),
+                SimpleNamespace(
+                    projects_dir=Path(d) / "projects",
+                    app_dir=Path(d),
+                ),
+            )
+
+            self.assertEqual(api.document_text(Path("a.ltx")), "TEXT")
+            self.assertEqual(api.document_text(Path("a.xml")), "XML")
+            self.assertEqual(
+                calls,
+                [("text", Path("a.ltx")), ("xml", Path("a.xml"))],
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

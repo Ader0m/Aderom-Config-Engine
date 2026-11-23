@@ -338,7 +338,8 @@ class ResolverService:
         return key
 
     def _cache_call(self, kind, root_path, forest, config_dir,
-                    compute, log=None, overlay=None):
+                    compute, log=None, overlay=None,
+                    namespace="resolve.text"):
         """Кэш + дедупликация одновременного резолва одного файла.
 
         Пользователь может открыть файл, который уже резолвится фоновой
@@ -352,9 +353,16 @@ class ResolverService:
             config_dir,
             overlay=overlay,
         )
-        return self._cache_call_key(key, root_path, compute, log=log)
+        return self._cache_call_key(
+            key,
+            root_path,
+            compute,
+            log=log,
+            namespace=namespace,
+        )
 
-    def _cache_call_key(self, key, root_path, compute, log=None):
+    def _cache_call_key(self, key, root_path, compute, log=None,
+                        namespace="resolve.text"):
         """То же, но ключ уже посчитан (предсборка не делает stat дважды)."""
         identity = None
         previous = None
@@ -363,6 +371,12 @@ class ResolverService:
             with self._inflight_lock:
                 previous = self._last_keys.get(identity)
                 self._last_keys[identity] = key
+
+        if self._cache_service is None and namespace != "resolve.text":
+            # Семантическая модель ссылается на объекты Resolver4 и не
+            # сериализуется в дисковый кэш. Без CacheService не создаём
+            # второй кэш: считаем результат напрямую.
+            return compute()
 
         if self._cache_service is not None:
             snapshot_id = str(key[2] or "") if len(key) > 2 else ""
@@ -400,7 +414,7 @@ class ResolverService:
                 return value
 
             return self._cache_service.get_or_compute(
-                "resolve.text",
+                namespace,
                 key,
                 compute_with_log,
                 deps=(root_path,),
@@ -664,6 +678,111 @@ class ResolverService:
             compute,
             log=log,
             overlay=overlay,
+        )
+
+    def semantic_key(self, root_path, forest, config_dir, overlay=None):
+        """Ключ семантической модели: снимок, корень, overlay."""
+        return self._resolved_key(
+            "semantic",
+            root_path,
+            forest,
+            config_dir,
+            overlay=overlay,
+        )
+
+    def assemble_semantic(self, root_path, forest, config_dir, log=None,
+                          key=None, overlay=None, snapshot_id=None):
+        """Собрать ``ResolvedRoot`` и закэшировать его в памяти.
+
+        Тяжёлая операция: вызывающий слой обязан выполнять её вне UI-потока
+        (через платформенный task API).
+        """
+        adapter = self._ensure_adapter(forest, config_dir)
+        if adapter is None:
+            raise RuntimeError("Resolver4.py не найден")
+
+        overlay = self.overlay_for_root(forest, root_path, overlay)
+        supports_overlay = overlay is not None and _accepts_overlay(
+            adapter.assemble_semantic
+        )
+
+        if key is None:
+            key = self.semantic_key(
+                root_path,
+                forest,
+                config_dir,
+                overlay=overlay,
+            )
+
+        if snapshot_id is None:
+            snapshot_id = (
+                str(key[2] or "")
+                if isinstance(key, tuple) and len(key) > 2
+                else str(getattr(forest, "cache_id", "") or "")
+            )
+        snapshot_id = str(snapshot_id or "")
+
+        def compute():
+            sm, abs_map = self.source_maps(forest)
+            kwargs = {}
+            if supports_overlay:
+                kwargs["overlay"] = overlay
+                kwargs["log"] = log
+
+            cached_text = None
+            resolved_key = None
+            if self._cache_service is not None:
+                # Ключ текста отличается от ключа модели только kind.
+                # Не считаем подпись поддерева второй раз.
+                if isinstance(key, tuple) and len(key) >= 3:
+                    resolved_key = (key[0], "resolved") + tuple(key[2:])
+                else:
+                    resolved_key = self._resolved_key(
+                        "resolved",
+                        root_path,
+                        forest,
+                        config_dir,
+                        overlay=overlay,
+                    )
+                cached_text = self._cache_service.get(
+                    "resolve.text",
+                    resolved_key,
+                    snapshot_id=snapshot_id,
+                )
+
+            if cached_text is not None:
+                text, _cached_sources = cached_text
+            else:
+                text = None
+
+            root = adapter.assemble_semantic(
+                root_path,
+                sm,
+                abs_map,
+                snapshot_id=snapshot_id,
+                text=text,
+                **kwargs,
+            )
+
+            if cached_text is None and self._cache_service is not None:
+                # Один текст на корень: следующий открытый редактор берёт
+                # его из resolve.text, а не создаёт вторую копию.
+                self.store_resolved(
+                    root_path,
+                    forest,
+                    config_dir,
+                    (root.text, list(root.line_sources)),
+                    key=resolved_key,
+                    overlay=overlay,
+                )
+            return root
+
+        return self._cache_call_key(
+            key,
+            root_path,
+            compute,
+            log=log,
+            namespace="resolve.semantic",
         )
 
     def assemble_to_file(self, root_path, forest, out_dir, config_dir=None):

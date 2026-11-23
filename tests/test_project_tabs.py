@@ -25,6 +25,16 @@ class _Services:
     def invalidate_resolver_cache(self):
         pass
 
+    def read_text(self, path):
+        from core.tools.fs import read_text_safe
+
+        return read_text_safe(path)
+
+    def read_xml_text(self, path):
+        from core.tools.fs import read_xml_text
+
+        return read_xml_text(path)
+
 
 class _Window(QMainWindow):
     def __init__(self, events):

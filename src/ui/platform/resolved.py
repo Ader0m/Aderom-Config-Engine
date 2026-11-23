@@ -31,6 +31,7 @@ class ResolvedDocumentMixin:
         # Любая смена проекта (создание, загрузка, удаление) делает
         # старые живые документы недействительными. Иначе вкладка могла
         # продолжать писать в проект, который уже закрыт.
+        self.close_section_cards()
         self._cancel_resolved_edits()
         for document in list(self._resolved_documents.values()):
             if self.window is not None:
@@ -60,6 +61,7 @@ class ResolvedDocumentMixin:
                         pass
 
     def _on_tab_closed(self, tab_id):
+        self.close_section_cards(tab_id)
         document = self._resolved_documents.get(str(tab_id))
         if document is None:
             return
@@ -1037,6 +1039,7 @@ class ResolvedDocumentMixin:
                         document.root_path,
                     )
                     existing_widget.set_dirty_state(False)
+            self._wire_section_card(existing_widget, tab_id)
             self.window.editor.open_tab(
                 tab_id,
                 title,
@@ -1101,6 +1104,7 @@ class ResolvedDocumentMixin:
                 v.cursor_line(),
             )
         )
+        self._wire_section_card(view, tab_id)
 
         started = time.perf_counter()
         self.window.editor.open_tab(
@@ -1128,6 +1132,17 @@ class ResolvedDocumentMixin:
                 line_number=int(line_number or 0),
             ),
         )
+
+    def _wire_section_card(self, view, tab_id):
+        if getattr(view, "_section_card_wired", False):
+            return
+        signal = getattr(view, "section_card_requested", None)
+        if signal is None:
+            return
+        signal.connect(
+            lambda section, tid=tab_id: self.open_section_card(tid, section)
+        )
+        view._section_card_wired = True
 
     def open_resolved_document(self, tab_id, line_number=None):
         """Открыть или сфокусировать resolved-документ по id вкладки."""

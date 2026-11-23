@@ -86,6 +86,7 @@ class MainWindow(QMainWindow):
             can_edit=self.api.can_edit_documents,
             file_actions=lambda: self.api.file_actions,
             hint_attach=self.api.attach_text_hints,
+            text_reader=self.api.document_text,
         )
         self.api.router.set_default(TextEditorHandler(self.editor))
 

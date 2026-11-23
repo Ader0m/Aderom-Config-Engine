@@ -289,10 +289,13 @@ class CodeEditor(QWidget):
     dirty_changed = pyqtSignal(bool)
     lexer_status = pyqtSignal(str)
 
-    def __init__(self, parent=None, hint_attach=None):
+    def __init__(self, parent=None, hint_attach=None, text_reader=None):
         super().__init__(parent)
 
         self.current_file = None
+        # Чтение файла — обязанность платформы: редактор не знает правил
+        # кодировок и не импортирует core напрямую.
+        self._text_reader = text_reader
         # QScintilla не забирает владение Python-объектом лексера,
         # поэтому сильную ссылку нужно держать здесь.
         self._lexer = None
@@ -486,15 +489,6 @@ class CodeEditor(QWidget):
         self.editor.redo()
 
     # -------------------------------------------------- содержимое
-    @staticmethod
-    def _read_text(path: Path) -> str:
-        # Правила кодировок живут в core, а не в UI.
-        from core import read_text_safe, read_xml_text
-
-        if path.suffix.lower() == ".xml":
-            return read_xml_text(path)
-        return read_text_safe(path)
-
     def _show_content(self, text, label, source_path=None, readonly=False,
                       syntax=True, notice=None):
         """Единая точка отображения содержимого в редакторе.
@@ -556,7 +550,9 @@ class CodeEditor(QWidget):
         if text is None:
             if not path.is_file():
                 return False
-            text = self._read_text(path)
+            if self._text_reader is None:
+                return False
+            text = self._text_reader(path)
 
         self._show_content(
             text,
@@ -942,6 +938,7 @@ class ResolvedView(QWidget):
     diagnostic = pyqtSignal(str)
     content_changed = pyqtSignal(str)
     item_requested = pyqtSignal(str)  # секция под курсором
+    section_card_requested = pyqtSignal(str)
     save_requested = pyqtSignal()
     dirty_changed = pyqtSignal(bool)
     lexer_status = pyqtSignal(str)
@@ -1346,8 +1343,12 @@ class ResolvedView(QWidget):
         paste_action.setEnabled(self._editable)
         menu.addSeparator()
 
+        section = self.section_at_cursor()
+        is_xml = bool(self._document is not None and self._document.is_xml)
         item_action = menu.addAction("Открыть карточку предмета")
-        item_action.setEnabled(self.section_at_cursor() is not None)
+        item_action.setEnabled(section is not None)
+        section_action = menu.addAction("Открыть карточку секции")
+        section_action.setEnabled(section is not None and not is_xml)
 
         chosen = menu.exec_(self.editor.mapToGlobal(position))
         if chosen is undo_action:
@@ -1364,6 +1365,8 @@ class ResolvedView(QWidget):
             self.editor.selectAll()
         elif chosen is item_action:
             self.open_item_under_cursor()
+        elif chosen is section_action:
+            self.section_card_requested.emit(section)
 
     def apply_line_edit(self, action, line_number, text=""):
         """Точечная правка строки без замены всего текста.

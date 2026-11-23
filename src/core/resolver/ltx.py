@@ -7,6 +7,7 @@ from pathlib import Path
 from core.models import LineSource
 from core.patching.ltx.multiline import analyze_multiline_edit
 from core.resolver.attribution import pretty_source
+from core.tools.cache import resolver_signature
 from core.tools.text import safe_filename_component
 from core.tools.fs import (
     find_resolver_script,
@@ -46,6 +47,7 @@ class LtxResolverAdapter:
 
         self._mod = load_resolver_module(self.resolver_script)
         self._resolved_change_cache = {}
+        self._semantic_cls = None
 
         cls = getattr(self._mod, "LtxResolver", None)
         if cls is None:
@@ -55,7 +57,19 @@ class LtxResolverAdapter:
 
         self._cls = cls
 
-    def _make(self, root_path):
+    def _semantic_class(self):
+        """Подкласс движка, который записывает происхождение значений."""
+        if self._semantic_cls is None:
+            from core.semantic.provenance import SemanticProvenanceMixin
+
+            self._semantic_cls = type(
+                "_AceSemanticLtxResolver",
+                (SemanticProvenanceMixin, self._cls),
+                {},
+            )
+        return self._semantic_cls
+
+    def _make(self, root_path, semantic=False):
         """
         Создаёт экземпляр внешнего резолвера.
 
@@ -63,21 +77,23 @@ class LtxResolverAdapter:
             LtxResolver(path, use_cache=False, verbose=False)
             LtxResolver(path, verbose=False)
         """
+        cls = self._semantic_class() if semantic else self._cls
         try:
-            return self._cls(
+            return cls(
                 str(root_path),
                 use_cache=False,
                 verbose=False,
             )
         except TypeError:
-            return self._cls(
+            return cls(
                 str(root_path),
                 verbose=False,
             )
 
-    def _make_with_overlay(self, root_path, overlay=None, log=None):
+    def _make_with_overlay(self, root_path, overlay=None, log=None,
+                           semantic=False):
         """Создать резолвер и наложить виртуальные файлы проекта."""
-        resolver = self._make(root_path)
+        resolver = self._make(root_path, semantic=semantic)
 
         source_files = getattr(overlay, "source_files", None)
         if source_files is None:
@@ -436,6 +452,30 @@ class LtxResolverAdapter:
 
         return "\n".join(lines)
 
+    def _render_resolved(self, root_path, resolver, source_map=None,
+                         abs_map=None):
+        """Текст и построчные источники как проекция итоговых секций."""
+        from core.semantic.provenance import render_sections
+
+        return render_sections(
+            root_path,
+            str(self.resolver_script),
+            ((name, sect.data) for name, sect in resolver.data),
+            source_map=source_map,
+            abs_map=abs_map,
+        )
+
+    def _can_semantic(self):
+        """Поддерживает ли загруженный резолвер инструментирование.
+
+        Для настоящего ``Resolver4`` — да. Для минимальных тестовых
+        резолверов остаётся прежний путь без модели.
+        """
+        return all(
+            hasattr(self._cls, name)
+            for name in ("_sort_and_filter_section", "_evaluate_section")
+        )
+
     def assemble_resolved(self, root_path, source_map=None, abs_map=None,
                           overlay=None, log=None):
         """Чистый резолв + карта владельцев построчно.
@@ -454,101 +494,82 @@ class LtxResolverAdapter:
             getattr(overlay, "resolved_edits", None),
             log=log,
         )
+        return self._render_resolved(
+            root_path,
+            r,
+            source_map=source_map,
+            abs_map=abs_map,
+        )
 
-        sm = source_map or {}
-        abs_map = abs_map or {}
+    def assemble_semantic(self, root_path, source_map=None, abs_map=None,
+                          overlay=None, log=None, snapshot_id="", text=None):
+        """Чистый резолв + семантическая модель происхождения.
 
-        # Resolver4 хранит в Item.filename stem без расширения в lower-case —
-        # ключ для source_map и abs_map совпадает с ним.
-        root_basename_no_ext = Path(root_path).stem.lower()
+        Текст и ``line_sources`` — проекция ``SectionIndex``. Если готовый
+        текст уже есть в ``resolve.text``, он переиспользуется, а источники
+        всё равно строятся из модели.
+        """
+        if not self._can_semantic():
+            raise RuntimeError(
+                "Семантическая модель требует инструментируемый Resolver4"
+            )
 
-        # Один и тот же источник встречается в тысячах строк (system.ltx —
-        # больше миллиона). Держим по одному LineSource на filename: это
-        # резко уменьшает память и позволяет pickle сохранять ссылки, а не
-        # миллион одинаковых объектов (иначе чтение кэша занимает секунды).
-        src_cache = {}
+        from core.semantic.models import (
+            SEMANTIC_MODEL_VERSION,
+            EngineVersions,
+            ResolvedRoot,
+            RootRef,
+        )
+        from core.semantic.provenance import ProvenanceStore, SectionIndex
 
-        def src_of(fn):
-            if not fn:
-                return None
+        r = self._make_with_overlay(
+            root_path,
+            overlay,
+            log=log,
+            semantic=True,
+        )
+        r.load()
+        self._apply_resolved_overrides(
+            r,
+            getattr(overlay, "resolved_edits", None),
+            log=log,
+        )
 
-            cached = src_cache.get(fn)
-            if cached is not None:
-                return cached
+        root_ref = RootRef(
+            path=Path(root_path),
+            snapshot_id=str(snapshot_id or ""),
+        )
+        store = ProvenanceStore(
+            r,
+            root_ref,
+            source_map=source_map,
+            abs_map=abs_map,
+        )
+        index = SectionIndex(store)
+        model_text, line_sources = index.render(
+            root_path,
+            str(self.resolver_script),
+            source_map=source_map,
+            abs_map=abs_map,
+            include_text=text is None,
+        )
+        if text is None:
+            text = model_text
 
-            if fn == root_basename_no_ext:
-                source = LineSource(
-                    kind="original",
-                    display="",
-                    path=Path(root_path),
-                    open_raw=False,
-                )
-            else:
-                pretty = pretty_source(fn, sm)
-                full = abs_map.get(fn)
-                source = LineSource(
-                    kind="file",
-                    display=pretty,
-                    path=Path(full) if full is not None else None,
-                    open_raw=False,
-                )
-
-            src_cache[fn] = source
-            return source
-
-        lines = []
-        line_sources = []
-
-        for h in (
-            "; Assembled root: %s" % root_path,
-            "; Resolver module: %s" % self.resolver_script,
-            "",
-        ):
-            lines.append(h)
-            line_sources.append(None)
-
-        for sec_name, sect in r.data:
-            sec_src = None
-            for it in sect.data:
-                fn = getattr(it, "filename", "")
-                if fn:
-                    sec_src = src_of(fn)
-                    break
-
-            lines.append("[%s]" % sec_name)
-            line_sources.append(sec_src)
-
-            for it in sect.data:
-                key = str(getattr(it, "first", "") or "")
-                val = getattr(it, "second", "")
-
-                if val is None:
-                    val_s = ""
-                elif hasattr(val, "name") and type(val).__name__ == "DLTXToken":
-                    val_s = "<%s>" % val.name
-                else:
-                    val_s = str(val)
-
-                src = src_of(getattr(it, "filename", ""))
-
-                if "\n" in val_s or "\r" in val_s:
-                    sub_lines = val_s.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-                    lines.append("%s = %s" % (key, sub_lines[0]))
-                    line_sources.append(src)
-                    for sub in sub_lines[1:]:
-                        lines.append(sub)
-                        line_sources.append(None)
-                elif val_s == "":
-                    lines.append("%s =" % key)
-                    line_sources.append(src)
-                else:
-                    lines.append("%s = %s" % (key, val_s))
-                    line_sources.append(src)
-
-            lines.append("")
-            line_sources.append(None)
-
-        return "\n".join(lines), line_sources
+        engine = EngineVersions(
+            resolver=str(self.resolver_script),
+            resolver_signature=resolver_signature(self.resolver_script),
+            model=SEMANTIC_MODEL_VERSION,
+        )
+        return ResolvedRoot(
+            snapshot_id=root_ref.snapshot_id,
+            root=root_ref,
+            text=text,
+            line_sources=line_sources,
+            sections=index,
+            diagnostics=store.diagnostics,
+            engine=engine,
+        )
 
     def resolve_with_virtual_patch(
         self,

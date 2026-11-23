@@ -375,6 +375,13 @@ class TreeBuilder:
             include_children={k: set(v) for k, v in raw_children.items()},
             include_parents={k: set(v) for k, v in raw_parents.items()},
             dltx_attachments={k: set(v) for k, v in dltx_children.items()},
+            missing_includes=sorted(
+                (
+                    (str(parent), str(include))
+                    for parent, include in missing
+                ),
+                key=lambda item: (item[0].lower(), item[1].lower()),
+            ),
             xml_files=xml_files,
             total_xml_files=len(xml_files),
             **identity,

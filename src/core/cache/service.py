@@ -55,6 +55,9 @@ class CacheService:
         self._resolved = resolved_cache or ResolvedCache(
             format_version=self._format_version,
         )
+        # Семантическая модель ссылается на объекты Resolver4 и не
+        # сериализуется. Держим только несколько корней в памяти.
+        self._semantic = ObjectCache(max_entries=4)
         self._backends = {}
         self._meta = OrderedDict()
         self._snapshot_keys = defaultdict(set)
@@ -81,7 +84,9 @@ class CacheService:
             backend = self._backends.get(namespace)
         if backend is not None:
             return backend
-        if namespace in ("resolve.text", "resolve.semantic", "xml"):
+        if namespace == "resolve.semantic":
+            return self._semantic
+        if namespace in ("resolve.text", "xml"):
             return self._resolved
         return self._memory
 
@@ -89,6 +94,7 @@ class CacheService:
         return {
             "memory": self._memory.stats(),
             "resolved": self._resolved.stats(),
+            "semantic": self._semantic.stats(),
         }
 
     # -------------------------------------------------- публичный API
@@ -265,6 +271,7 @@ class CacheService:
             self._inflight.clear()
         self._memory.clear()
         self._resolved.clear()
+        self._semantic.clear()
 
     def clear_disk(self):
         self._resolved.clear_disk()

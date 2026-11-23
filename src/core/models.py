@@ -60,6 +60,10 @@ class LtxForest:
     dltx_attachments: Dict[object, Set[object]] = field(default_factory=dict)
     real_paths: Dict[object, str] = field(default_factory=dict)
 
+    # Include-директивы, которые не разрешились при построении дерева.
+    # Список `(файл-родитель, текст include)`, отсортирован для дампа.
+    missing_includes: list = field(default_factory=list)
+
     # XML-файлы VFS. Они есть в дереве для просмотра, но не участвуют
     # в include-связях, DLTX-патчах и проходе резолвера.
     xml_files: list = field(default_factory=list)

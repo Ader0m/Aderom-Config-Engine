@@ -247,13 +247,11 @@ CORE_PUBLIC_NAMES = frozenset({
     'validate_patch_mod_root',
 })
 
-# UI -> core: legacy-исключения UI-1..UI-5 из docs/Миграционные исключения.md.
+# UI -> core: legacy-исключения UI-2..UI-4 из docs/Миграционные исключения.md.
 UI_CORE_IMPORT_ALLOWLIST = frozenset({
-    "ui/editor.py",
     "ui/hints/context.py",
     "ui/hints/service.py",
     "ui/lexers.py",
-    "ui/platform/project_controller.py",
 })
 
 # app -> sdk: только контрактные модули. Адаптеры и внутренности

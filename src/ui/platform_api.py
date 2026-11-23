@@ -36,6 +36,7 @@ from .module_windows import ModuleWindowManager
 from .platform.project_controller import ProjectControllerMixin
 from .platform.registration import RegistrationHub
 from .platform.resolved import ResolvedDocumentMixin
+from .platform.section_card import SectionCardMixin
 
 
 def _coerce_paths(paths):
@@ -68,7 +69,11 @@ def _coerce_paths(paths):
     )
 
 
-class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
+class PlatformApi(
+    ProjectControllerMixin,
+    ResolvedDocumentMixin,
+    SectionCardMixin,
+):
     def __init__(
         self,
         events,
@@ -134,6 +139,10 @@ class PlatformApi(ProjectControllerMixin, ResolvedDocumentMixin):
 
         # Живые resolved-документы: один владелец текста на tab_id.
         self._resolved_documents = {}
+        # Открытые read-only карточки секций: один экземпляр на
+        # (вкладка, секция). Повторный запрос поднимает существующую.
+        self._section_cards = {}
+        self._section_card_contexts = {}
 
         # Очереди фоновых правок resolved-документов по tab_id.
         self._resolved_edit_queues = {}

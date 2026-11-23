@@ -14,7 +14,6 @@ from pathlib import Path
 from PyQt5.QtCore import QThread
 from PyQt5.QtWidgets import QApplication, QFileDialog, QMessageBox
 
-from core import read_text_safe, read_xml_text
 from sdk.contracts.events import Events
 from sdk.features.projects import AssetDraftInfo, ProjectChanged, SavedDraft
 
@@ -704,14 +703,8 @@ class ProjectControllerMixin:
                 return text
         try:
             if path.suffix.lower() == ".xml":
-                reader = getattr(self.services, "read_xml_text", None)
-            else:
-                reader = getattr(self.services, "read_text", None)
-            if callable(reader):
-                return reader(path)
-            if path.suffix.lower() == ".xml":
-                return read_xml_text(path)
-            return read_text_safe(path)
+                return self.services.read_xml_text(path)
+            return self.services.read_text(path)
         except OSError:
             return ""
 
@@ -943,6 +936,7 @@ class ProjectControllerMixin:
 
     def _reset_editor_tabs(self):
         """Закрыть вкладки прошлого проекта перед восстановлением новых."""
+        self.close_section_cards()
         editor = self._editor_widget()
         closer = getattr(editor, "close_all_tabs", None)
         if not callable(closer):

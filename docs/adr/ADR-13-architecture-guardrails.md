@@ -70,3 +70,11 @@
 Обновление Этапа 1: конкретные пути SDK и allowlist `app → sdk`
 пересмотрены в ADR-14 (`sdk.contracts`, `sdk.kernel`, `sdk.ui`,
 `sdk.features.*`).
+
+Обновление при закрытии Этапа 3: UI-1 (`ui/editor.py`) и UI-5
+(`ui/platform/project_controller.py`) закрыты; чтение текста вынесено в
+платформенный reader. В `UI_CORE_IMPORT_ALLOWLIST` остаются только
+UI-2..UI-4 (`ui/lexers.py`, `ui/hints/context.py`, `ui/hints/service.py`)
+до Этапа 6. После Этапа 6 `UI_CORE_IMPORT_ALLOWLIST` должен стать пустым;
+остальные allowlist закрываются по срокам своих этапов, полностью — на
+Этапе 9.

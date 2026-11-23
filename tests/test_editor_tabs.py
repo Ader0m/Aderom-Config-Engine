@@ -1,4 +1,5 @@
 ﻿# -*- coding: utf-8 -*-
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -35,6 +36,33 @@ class CodeEditorDebounceTest(unittest.TestCase):
         self.assertEqual(seen, [])
         editor.flush_pending()
         self.assertEqual(seen[-1], "[a]\nx = 2\n")
+
+    def test_open_file_reads_text_through_platform_reader(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "a.ltx"
+            path.write_text("[original]\n", encoding="utf-8")
+            seen = []
+
+            def reader(source):
+                seen.append(Path(source))
+                return "[from-reader]\nx = 1\n"
+
+            tabs = EditorTabs(text_reader=reader)
+            self.addCleanup(tabs.deleteLater)
+            editor = tabs.ensure_default_tab()
+            self.assertTrue(editor.open_file(path))
+            self.assertEqual(seen, [path])
+            self.assertIn("x = 1", editor.text())
+            self.assertNotIn("[original]", editor.text())
+
+    def test_open_file_without_reader_does_not_read_core(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "a.ltx"
+            path.write_text("[a]\n", encoding="utf-8")
+            tabs = EditorTabs()
+            self.addCleanup(tabs.deleteLater)
+            editor = tabs.ensure_default_tab()
+            self.assertFalse(editor.open_file(path))
 
 
 class EditorTabsTest(unittest.TestCase):

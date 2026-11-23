@@ -38,6 +38,7 @@ from core.catalogs import (
 from core.tree.query import search_nodes, sort_nodes
 from core.xml.service import XmlResolveService
 from core.resolver.prebuild import PrebuildService
+from core.semantic.query import SectionQueryService
 from core.patching.models import VerificationResult
 from core.patching.planner import PatchPlanner
 from core.patching.ltx.generator import DltxGenerator
@@ -65,6 +66,7 @@ class CoreServices:
     # через ``__new__`` не обязаны вызывать ``__init__``.
     cache_service = None
     snapshot_service = None
+    semantic_query = None
 
     def __init__(
         self,
@@ -102,6 +104,9 @@ class CoreServices:
         self.generated_dir = Path(generated_dir)
         self.xml = xml_resolve_service or XmlResolveService()
         self.prebuild = PrebuildService(resolver_service, self.xml)
+        # Семантические запросы идут через тот же ResolverService и его
+        # кэш снимка; отдельного источника истины нет.
+        self.semantic_query = SectionQueryService(resolver_service)
 
         # Параметры последней сборки: нужны, чтобы после инвалидации
         # кеша перезапустить именно её, а не резолвить корни по одному.
