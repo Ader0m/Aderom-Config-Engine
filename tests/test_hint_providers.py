@@ -11,12 +11,13 @@ from core.catalogs.includes import IncludeEntry, IncludeSet
 from core.catalogs.localization import EMPTY_LOCALIZATION, LocalizationSet
 from core.catalogs.sections import SectionInfo, SectionSet
 from sdk.ui.hints import HintContext, HintTargetInfo
-from ui.hints.providers import (
+from ui.platform.hints.providers import (
     ColorTagProvider,
     DirectiveProvider,
     IncludePathProvider,
     KeyProvider,
     LocalizationKeyProvider,
+    ParentNameProvider,
     ParentProvider,
     SectionProvider,
 )
@@ -232,9 +233,43 @@ class LocalizationProviderTest(unittest.TestCase):
         self.assertEqual(result.items[0].description, "Имя")
 
 
+class ParentNameProviderTest(unittest.TestCase):
+    def test_matches_only_item_parent_role(self):
+        first = SectionInfo("wpn_ak74")
+        second = SectionInfo("wpn_ak74_base")
+        section_set = SectionSet(
+            names=("wpn_ak74", "wpn_ak74_base"),
+            by_name={
+                "wpn_ak74": first,
+                "wpn_ak74_base": second,
+            },
+            unique_keys=(),
+        )
+        provider = ParentNameProvider(catalogs(sections=section_set))
+
+        target = HintTargetInfo(
+            surface="plain",
+            language="plain",
+            role="item.parent",
+        )
+        result = provider.matches(context(target=target, prefix="wpn_ak"))
+        self.assertEqual(
+            [item.insert_text for item in result.items],
+            ["wpn_ak74", "wpn_ak74_base"],
+        )
+        self.assertEqual(result.replace_before, 6)
+
+        other = HintTargetInfo(
+            surface="plain",
+            language="plain",
+            role="other",
+        )
+        self.assertIsNone(provider.matches(context(target=other, prefix="w")))
+
+
 class SurfaceRulesTest(unittest.TestCase):
     def test_include_and_directive_only_in_raw(self):
-        from ui.hints.ranking import provider_applies
+        from ui.platform.hints.ranking import provider_applies
 
         raw = context(target=HintTargetInfo(surface="raw", language="ltx"))
         resolved = context(
@@ -242,8 +277,7 @@ class SurfaceRulesTest(unittest.TestCase):
         )
         include = IncludePathProvider(catalogs())
         directive = DirectiveProvider()
-        # Проверяем правила поверхностей независимо от временного
-        # выключателя LTX-подсказок.
+        # Проверяем правила поверхностей независимо от флага LTX.
         include.enabled = True
         directive.enabled = True
         self.assertTrue(provider_applies(include, raw))
@@ -252,9 +286,10 @@ class SurfaceRulesTest(unittest.TestCase):
         self.assertFalse(provider_applies(directive, resolved))
 
     def test_ltx_hint_switch_does_not_touch_colors(self):
-        from ui.hints.providers.flags import LTX_HINTS_ENABLED
-        from ui.hints.ranking import provider_applies
+        from ui.platform.hints.providers.flags import LTX_HINTS_ENABLED
+        from ui.platform.hints.ranking import provider_applies
 
+        self.assertTrue(LTX_HINTS_ENABLED)
         raw = context(target=HintTargetInfo(surface="raw", language="ltx"))
         ltx_providers = (
             IncludePathProvider(catalogs()),

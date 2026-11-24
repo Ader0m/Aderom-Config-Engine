@@ -97,9 +97,12 @@ class _Tasks:
     def __init__(self):
         self.jobs = []
 
-    def run(self, work, on_done=None, on_log=None):
+    def run(self, work, on_done=None, on_log=None, **kwargs):
         self.jobs.append((work, on_done))
         return None
+
+    def operation_active(self, operation_key):
+        return False
 
     def flush(self):
         jobs, self.jobs = self.jobs, []

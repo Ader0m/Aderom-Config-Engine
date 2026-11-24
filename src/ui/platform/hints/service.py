@@ -10,7 +10,7 @@ from pathlib import Path
 
 from PyQt5.QtCore import QTimer
 
-from core.catalogs import (
+from app.hints import (
     EMPTY_COLORS,
     EMPTY_INCLUDES,
     EMPTY_LOCALIZATION,
@@ -18,9 +18,7 @@ from core.catalogs import (
 )
 from sdk.contracts.events import Events
 from sdk.ui.hints import NullHintsHandle
-from ui.hints.adapters import create_adapter
-from ui.hints.controller import HintController
-from ui.hints.registry import HintRegistry
+from ui.platform.hints.registry import HintRegistry
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +47,8 @@ class HintCatalogs:
         self.includes = EMPTY_INCLUDES
         self.localization = EMPTY_LOCALIZATION
         self._pending = set()
+        self._handles = {}
+        self._closed = False
 
     # -------------------------------------------------- состояние
     def _state(self):
@@ -59,13 +59,28 @@ class HintCatalogs:
         return forest, overlay
 
     def reset(self):
+        self._cancel_pending()
         self.colors = EMPTY_COLORS
         self.sections = EMPTY_SECTIONS
         self.includes = EMPTY_INCLUDES
         self.localization = EMPTY_LOCALIZATION
+
+    def _cancel_pending(self):
+        handles, self._handles = self._handles, {}
         self._pending.clear()
+        for handle in handles.values():
+            try:
+                handle.cancel()
+            except Exception:
+                log.exception("Не удалось отменить сборку каталога подсказок")
+
+    def close(self):
+        self._closed = True
+        self._cancel_pending()
 
     def _notify_changed(self):
+        if self._closed:
+            return
         callback = self._on_changed
         if callable(callback):
             try:
@@ -74,27 +89,58 @@ class HintCatalogs:
                 log.exception("Ошибка обновления после сборки каталога")
 
     # -------------------------------------------------- сборка
-    def refresh_colors(self):
+    def refresh_colors(self, background=True):
         forest, overlay = self._state()
         if forest is None or self._services is None:
             self.colors = EMPTY_COLORS
             return
-        try:
-            self.colors = self._services.color_set(forest, overlay=overlay)
-        except Exception:
-            log.exception("Не удалось собрать каталог цветов")
-            self.colors = EMPTY_COLORS
+        generation = str(getattr(forest, "cache_id", "") or "")
 
-    def refresh_includes(self):
+        def build():
+            return self._services.color_set(forest, overlay=overlay)
+
+        def apply(value, error):
+            self._pending.discard("colors")
+            self._handles.pop("colors", None)
+            if error is not None:
+                log.error("Не удалось собрать каталог цветов: %s", error)
+                return
+            current = self._forest_getter() if callable(self._forest_getter) else None
+            if str(getattr(current, "cache_id", "") or "") != generation:
+                return
+            if value is not None:
+                self.colors = value
+                self._notify_changed()
+
+        self._run("colors", build, apply, background)
+
+    def refresh_includes(self, background=True):
         forest, overlay = self._state()
         if forest is None or self._services is None:
             self.includes = EMPTY_INCLUDES
             return
-        try:
-            self.includes = self._services.include_set(forest, overlay=overlay)
-        except Exception:
-            log.exception("Не удалось собрать каталог include-путей")
-            self.includes = EMPTY_INCLUDES
+        generation = str(getattr(forest, "cache_id", "") or "")
+
+        def build():
+            return self._services.include_set(forest, overlay=overlay)
+
+        def apply(value, error):
+            self._pending.discard("includes")
+            self._handles.pop("includes", None)
+            if error is not None:
+                log.error(
+                    "Не удалось собрать каталог include-путей: %s",
+                    error,
+                )
+                return
+            current = self._forest_getter() if callable(self._forest_getter) else None
+            if str(getattr(current, "cache_id", "") or "") != generation:
+                return
+            if value is not None:
+                self.includes = value
+                self._notify_changed()
+
+        self._run("includes", build, apply, background)
 
     def refresh_localization(self, background=True):
         forest, overlay = self._state()
@@ -111,6 +157,7 @@ class HintCatalogs:
 
         def apply(value, error):
             self._pending.discard("localization")
+            self._handles.pop("localization", None)
             if error is not None:
                 log.error("Не удалось собрать индекс локализации: %s", error)
                 return
@@ -139,6 +186,7 @@ class HintCatalogs:
 
         def apply(value, error):
             self._pending.discard("sections")
+            self._handles.pop("sections", None)
             if error is not None:
                 log.error("Не удалось собрать каталог секций: %s", error)
                 return
@@ -152,18 +200,20 @@ class HintCatalogs:
         self._run("sections", build, apply, background)
 
     def refresh_all(self, background=True):
-        self.refresh_colors()
-        self.refresh_includes()
+        self.refresh_colors(background=background)
+        self.refresh_includes(background=background)
         self.refresh_localization(background=background)
         self.refresh_sections(background=background)
 
     def _run(self, key, build, apply, background):
-        if key in self._pending:
+        if self._closed or key in self._pending:
             return
         self._pending.add(key)
         if background and self._tasks is not None:
             try:
-                self._tasks.run(build, on_done=apply)
+                handle = self._tasks.run(build, on_done=apply)
+                if handle is not None:
+                    self._handles[key] = handle
                 return
             except Exception:
                 log.exception("Не удалось запустить фоновую сборку %s", key)
@@ -186,10 +236,12 @@ class HintService:
         forest_getter=None,
         overlay_getter=None,
         log_fn=None,
+        controller_factory=None,
     ):
         self.registry = HintRegistry()
         self._tasks = tasks
         self._log = log_fn or (lambda message: None)
+        self._controller_factory = controller_factory
         self.catalogs = HintCatalogs(
             services,
             forest_getter,
@@ -225,20 +277,25 @@ class HintService:
         providers=None,
         enabled=True,
     ):
-        adapter = create_adapter(widget)
-        if adapter is None:
+        factory = self._controller_factory
+        if not callable(factory):
+            self.log(
+                "Подсказки: controller_factory не подключён"
+            )
+            return NullHintsHandle()
+        controller = factory(
+            self,
+            widget,
+            target=target,
+            providers=providers,
+            enabled=enabled,
+        )
+        if controller is None:
             self.log(
                 "Подсказки: неподдерживаемый виджет %s"
                 % type(widget).__name__
             )
             return NullHintsHandle()
-        controller = HintController(
-            self,
-            adapter,
-            target=target,
-            providers=providers,
-            enabled=enabled,
-        )
         self._controllers.add(controller)
         return controller
 
@@ -295,6 +352,7 @@ class HintService:
             pass
 
     def close(self):
+        self.catalogs.close()
         for subscription in self._subs:
             try:
                 subscription.unsubscribe()

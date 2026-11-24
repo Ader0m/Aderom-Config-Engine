@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """Редактор кода на QScintilla + поиск внутри файла.
 
-Все цвета и шрифты берутся из ui.theme.PALETTE — единственного источника
+Все цвета и шрифты берутся из ThemeService — единственного источника
 темы. QSS не управляет стилями лексера Scintilla, поэтому палитра
 применяется программно: setFont/setColor/setPaper на ВСЕ стили лексера
-(иначе просвечивают штатные дефолты QsciLexerProperties: бирюза #007F7F
-у Comment, светлая полоса #E0F0F0 у Section, Comic Sans MS у Comment),
+(иначе просвечивают штатные дефолты QsciLexerProperties: бирюзовый
+Comment, светлая полоса Section, Comic Sans MS у Comment),
 плюс точечные акценты syn_* по стилям.
 """
 
@@ -53,13 +53,17 @@ from sdk.ui.hints import (
 )
 
 try:  # запуск с корня проекта (src в sys.path)
-    from ui.theme import PALETTE
+    from ui.platform.theme import theme_service
     from ui.lexers import create_lexer
     from ui.debounce import Debounce
 except ImportError:  # запуск как пакета
-    from .theme import PALETTE
+    from .platform.theme import theme_service
     from .lexers import create_lexer
     from .debounce import Debounce
+
+
+def _palette():
+    return theme_service().palette
 
 
 def _language_for_path(path):
@@ -351,6 +355,12 @@ class CodeEditor(QWidget):
             except Exception:
                 pass
 
+    def refresh_theme(self):
+        self._restore_editor_colors()
+        if self.current_file:
+            self._set_lexer(create_lexer(self.current_file))
+        self.update()
+
     def _init_ui(self):
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
@@ -360,7 +370,7 @@ class CodeEditor(QWidget):
         # Цвета — из палитры, без hex-литералов в UI-коде.
         self.file_label.setStyleSheet(
             "padding: 4px; background-color: {bg}; color: {fg};".format(
-                bg=PALETTE.bg_titlebar, fg=PALETTE.text
+                bg=_palette().bg_titlebar, fg=_palette().text
             )
         )
         layout.addWidget(self.file_label)
@@ -369,7 +379,7 @@ class CodeEditor(QWidget):
         self.notice_label.setWordWrap(True)
         self.notice_label.setStyleSheet(
             "padding: 6px 8px; background-color: {bg}; color: {fg};".format(
-                bg=PALETTE.bg_panel, fg=PALETTE.syn_comment
+                bg=_palette().bg_panel, fg=_palette().syn_comment
             )
         )
         self.notice_label.hide()
@@ -423,7 +433,7 @@ class CodeEditor(QWidget):
         который Scintilla превращает в микроскопический текст
         (SCI_STYLESETSIZEFRACTIONAL).
         """
-        return QFont(PALETTE.editor_font_family, PALETTE.editor_font_size_pt)
+        return QFont(_palette().editor_font_family, _palette().editor_font_size_pt)
 
     def _setup_editor(self):
         font = self._editor_font()
@@ -432,14 +442,14 @@ class CodeEditor(QWidget):
         self.editor.setMarginType(0, QsciScintilla.NumberMargin)
         self.editor.setMarginWidth(0, "00000")
         self.editor.setMarginsFont(font)
-        self.editor.setMarginsBackgroundColor(QColor(PALETTE.ed_margin_bg))
-        self.editor.setMarginsForegroundColor(QColor(PALETTE.ed_margin_fg))
+        self.editor.setMarginsBackgroundColor(QColor(_palette().ed_margin_bg))
+        self.editor.setMarginsForegroundColor(QColor(_palette().ed_margin_fg))
 
-        self.editor.setColor(QColor(PALETTE.syn_default))
-        self.editor.setPaper(QColor(PALETTE.bg_main))
+        self.editor.setColor(QColor(_palette().syn_default))
+        self.editor.setPaper(QColor(_palette().bg_main))
 
-        self.editor.setCaretForegroundColor(QColor(PALETTE.ed_caret))
-        self.editor.setCaretLineBackgroundColor(QColor(PALETTE.ed_caret_line))
+        self.editor.setCaretForegroundColor(QColor(_palette().ed_caret))
+        self.editor.setCaretLineBackgroundColor(QColor(_palette().ed_caret_line))
         self.editor.setCaretLineVisible(True)
 
         self.editor.setIndentationWidth(4)
@@ -471,12 +481,12 @@ class CodeEditor(QWidget):
         """Вернуть цвета полей/фона после смены лексера."""
         font = self._editor_font()
         self.editor.setMarginsFont(font)
-        self.editor.setMarginsBackgroundColor(QColor(PALETTE.ed_margin_bg))
-        self.editor.setMarginsForegroundColor(QColor(PALETTE.ed_margin_fg))
-        self.editor.setColor(QColor(PALETTE.syn_default))
-        self.editor.setPaper(QColor(PALETTE.bg_main))
-        self.editor.setCaretForegroundColor(QColor(PALETTE.ed_caret))
-        self.editor.setCaretLineBackgroundColor(QColor(PALETTE.ed_caret_line))
+        self.editor.setMarginsBackgroundColor(QColor(_palette().ed_margin_bg))
+        self.editor.setMarginsForegroundColor(QColor(_palette().ed_margin_fg))
+        self.editor.setColor(QColor(_palette().syn_default))
+        self.editor.setPaper(QColor(_palette().bg_main))
+        self.editor.setCaretForegroundColor(QColor(_palette().ed_caret))
+        self.editor.setCaretLineBackgroundColor(QColor(_palette().ed_caret_line))
 
     # -------------------------------------------------- публичные действия
     def show_find(self):
@@ -574,6 +584,19 @@ class CodeEditor(QWidget):
     @property
     def is_editable(self):
         return self._editable and not self._readonly_content
+
+    @property
+    def mode(self):
+        """Режим содержимого: ``raw`` или ``draft``.
+
+        ``raw`` — файл показан без права записи (нет проекта).
+        ``draft`` — правка разрешена и сохраняется в проект, а не в
+        оригинал. Режим выводится из состояния редактора и не является
+        вторым источником текста.
+        """
+        if self._editable and not self._readonly_content:
+            return "draft"
+        return "raw"
 
     @property
     def is_dirty(self):
@@ -1004,6 +1027,21 @@ class ResolvedView(QWidget):
             except Exception:
                 pass
 
+    def refresh_theme(self):
+        self._restore_editor_colors()
+        self._set_lexer(create_lexer(self.root_path))
+        self.file_label.setStyleSheet(
+            "padding: 4px; background-color: {bg}; color: {fg};".format(
+                bg=_palette().bg_titlebar, fg=_palette().text
+            )
+        )
+        self.source_header.setStyleSheet(
+            "padding: 4px; background-color: {bg}; color: {fg};".format(
+                bg=_palette().bg_titlebar, fg=_palette().text
+            )
+        )
+        self.update()
+
     # -------------------------------------------------- UI
     def _init_ui(self):
         main_layout = QVBoxLayout()
@@ -1019,7 +1057,7 @@ class ResolvedView(QWidget):
         self.file_label = QLabel("Резолв не загружен")
         self.file_label.setStyleSheet(
             "padding: 4px; background-color: {bg}; color: {fg};".format(
-                bg=PALETTE.bg_titlebar, fg=PALETTE.text
+                bg=_palette().bg_titlebar, fg=_palette().text
             )
         )
         top_layout.addWidget(self.file_label, 1)
@@ -1031,7 +1069,7 @@ class ResolvedView(QWidget):
         self.source_header.setAlignment(Qt.AlignCenter)
         self.source_header.setStyleSheet(
             "padding: 4px; background-color: {bg}; color: {fg};".format(
-                bg=PALETTE.bg_titlebar, fg=PALETTE.text
+                bg=_palette().bg_titlebar, fg=_palette().text
             )
         )
         top_layout.addWidget(self.source_header, 0)
@@ -1056,7 +1094,7 @@ class ResolvedView(QWidget):
         self.source_list.setMaximumWidth(600)
 
         # Шрифт и высота строки списка — 1:1 с редактором.
-        font = QFont(PALETTE.editor_font_family, PALETTE.editor_font_size_pt)
+        font = QFont(_palette().editor_font_family, _palette().editor_font_size_pt)
         self.source_list.setFont(font)
         line_height = self.editor.SendScintilla(QsciScintilla.SCI_TEXTHEIGHT, 0)
         self._source_delegate = SourceItemDelegate(line_height)
@@ -1115,20 +1153,20 @@ class ResolvedView(QWidget):
         )
 
     def _setup_editor(self):
-        font = QFont(PALETTE.editor_font_family, PALETTE.editor_font_size_pt)
+        font = QFont(_palette().editor_font_family, _palette().editor_font_size_pt)
         self.editor.setFont(font)
 
         self.editor.setMarginType(0, QsciScintilla.NumberMargin)
         self.editor.setMarginWidth(0, "00000")
         self.editor.setMarginsFont(font)
-        self.editor.setMarginsBackgroundColor(QColor(PALETTE.ed_margin_bg))
-        self.editor.setMarginsForegroundColor(QColor(PALETTE.ed_margin_fg))
+        self.editor.setMarginsBackgroundColor(QColor(_palette().ed_margin_bg))
+        self.editor.setMarginsForegroundColor(QColor(_palette().ed_margin_fg))
 
-        self.editor.setColor(QColor(PALETTE.syn_default))
-        self.editor.setPaper(QColor(PALETTE.bg_main))
+        self.editor.setColor(QColor(_palette().syn_default))
+        self.editor.setPaper(QColor(_palette().bg_main))
 
-        self.editor.setCaretForegroundColor(QColor(PALETTE.ed_caret))
-        self.editor.setCaretLineBackgroundColor(QColor(PALETTE.ed_caret_line))
+        self.editor.setCaretForegroundColor(QColor(_palette().ed_caret))
+        self.editor.setCaretLineBackgroundColor(QColor(_palette().ed_caret_line))
         self.editor.setCaretLineVisible(True)
 
         self.editor.setIndentationWidth(4)
@@ -1151,14 +1189,14 @@ class ResolvedView(QWidget):
         self._restore_editor_colors()
 
     def _restore_editor_colors(self):
-        font = QFont(PALETTE.editor_font_family, PALETTE.editor_font_size_pt)
+        font = QFont(_palette().editor_font_family, _palette().editor_font_size_pt)
         self.editor.setMarginsFont(font)
-        self.editor.setMarginsBackgroundColor(QColor(PALETTE.ed_margin_bg))
-        self.editor.setMarginsForegroundColor(QColor(PALETTE.ed_margin_fg))
-        self.editor.setColor(QColor(PALETTE.syn_default))
-        self.editor.setPaper(QColor(PALETTE.bg_main))
-        self.editor.setCaretForegroundColor(QColor(PALETTE.ed_caret))
-        self.editor.setCaretLineBackgroundColor(QColor(PALETTE.ed_caret_line))
+        self.editor.setMarginsBackgroundColor(QColor(_palette().ed_margin_bg))
+        self.editor.setMarginsForegroundColor(QColor(_palette().ed_margin_fg))
+        self.editor.setColor(QColor(_palette().syn_default))
+        self.editor.setPaper(QColor(_palette().bg_main))
+        self.editor.setCaretForegroundColor(QColor(_palette().ed_caret))
+        self.editor.setCaretLineBackgroundColor(QColor(_palette().ed_caret_line))
 
     def _apply_lexer(self, path):
         """Совместимость: применить лексер сразу (без отложенного запуска)."""
@@ -1227,6 +1265,11 @@ class ResolvedView(QWidget):
         if self._document is not None:
             return self._document.is_dirty
         return self._dirty
+
+    @property
+    def mode(self):
+        """Режим итогового текста: ``resolved``."""
+        return "resolved"
 
     def text(self):
         return self.editor.text()

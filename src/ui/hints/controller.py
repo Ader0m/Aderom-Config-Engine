@@ -8,9 +8,10 @@ import logging
 from PyQt5.QtCore import QEvent, QObject, QPoint, QRect, QTimer, Qt
 from PyQt5.QtWidgets import QApplication
 
+from ui.hints.adapters import create_adapter
 from ui.hints.context import build_context
 from ui.hints.popup import HintPopup
-from ui.hints.ranking import (
+from ui.platform.hints.ranking import (
     MAX_ITEMS,
     dedupe_items,
     provider_applies,
@@ -554,3 +555,22 @@ class HintController(QObject):
         if app is not None:
             app.removeEventFilter(self)
         self._window_filter = False
+
+
+def create_controller(service, widget, target=None, providers=None,
+                      enabled=True):
+    """Создать UI-контроллер подсказок для виджета.
+
+    Платформенный ``HintService`` не импортирует UI: composition root
+    передаёт эту фабрику явно.
+    """
+    adapter = create_adapter(widget)
+    if adapter is None:
+        return None
+    return HintController(
+        service,
+        adapter,
+        target=target,
+        providers=providers,
+        enabled=enabled,
+    )

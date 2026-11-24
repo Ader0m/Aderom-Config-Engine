@@ -50,7 +50,11 @@ class BaseModule(ModuleBase):
             self.session,
             open_raw=self._ltx_opener.open_raw,
         )
-        self._item_viewer = ItemViewerFeature(ctx, self.session)
+        self._item_viewer = ItemViewerFeature(
+            ctx,
+            self.session,
+            attach_hints=ctx.ui.attach_text_hints,
+        )
         self._tree_actions = TreeActions(
             ctx,
             self.session,
@@ -68,6 +72,22 @@ class BaseModule(ModuleBase):
             Events.APP_STARTED,
             lambda payload: self._clean_run.run(),
         )
+        self._theme_sub = ctx.events.subscribe(
+            Events.UI_THEME_CHANGED,
+            lambda payload: self._on_theme_changed(),
+        )
+
+    def _on_theme_changed(self):
+        for name, refresh in (
+            ("связи секции", self._section_graph.refresh_theme),
+            ("просмотр предметов", self._item_viewer.refresh_theme),
+        ):
+            try:
+                refresh()
+            except Exception:
+                self.ctx.log(
+                    "base: не удалось обновить тему (%s)" % name
+                )
 
     def register(self, ctx):
         self._register_menus(ctx)
@@ -83,6 +103,10 @@ class BaseModule(ModuleBase):
         if sub is not None and hasattr(sub, "unsubscribe"):
             sub.unsubscribe()
         self._app_started_sub = None
+        theme_sub = getattr(self, "_theme_sub", None)
+        if theme_sub is not None and hasattr(theme_sub, "unsubscribe"):
+            theme_sub.unsubscribe()
+        self._theme_sub = None
         self._section_graph.close()
         self._item_viewer.close()
         ctx.log("Базовый модуль деактивирован.")

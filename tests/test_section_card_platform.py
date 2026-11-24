@@ -40,7 +40,7 @@ class _InlineTasks:
         self.calls = []
         self.owners = []
 
-    def run(self, fn, on_done=None, on_log=None, owner=None):
+    def run(self, fn, on_done=None, on_log=None, owner=None, **kwargs):
         self.calls.append(fn)
         self.owners.append(owner)
         result = fn(None)
@@ -52,7 +52,7 @@ class _DeferredTasks:
     def __init__(self):
         self.pending = None
 
-    def run(self, fn, on_done=None, on_log=None, owner=None):
+    def run(self, fn, on_done=None, on_log=None, owner=None, **kwargs):
         self.pending = (fn, on_done)
 
     def complete(self):
@@ -62,7 +62,7 @@ class _DeferredTasks:
 
 
 class _FailingTasks:
-    def run(self, fn, on_done=None, on_log=None, owner=None):
+    def run(self, fn, on_done=None, on_log=None, owner=None, **kwargs):
         raise RuntimeError("запуск невозможен")
 
 

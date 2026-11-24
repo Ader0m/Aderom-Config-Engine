@@ -6,11 +6,11 @@ from unittest.mock import patch
 
 from tests.support import SRC  # noqa: F401
 
-from PyQt5.QtWidgets import QMenu, QWidget
+from PyQt5.QtWidgets import QMenu, QMessageBox, QWidget
 
-from sdk.contracts.events import Events as BusEvents
+from sdk.contracts.events import Events as BusEvents, PLATFORM_OWNER
 from tests.qt_support import qapp
-from ui.editor_tabs import EditorTabs
+from ui.editor_tabs import DEFAULT_TAB_ID, EditorTabs
 
 _app = qapp()
 
@@ -99,9 +99,9 @@ class EditorTabsTest(unittest.TestCase):
 
     def test_close_owner_tabs_closes_only_module_tabs(self):
         tabs = self._make()
-        tabs.open_tab("a.tab", "A2", QWidget())
-        tabs.open_tab("b.tab", "B2", QWidget())
-        tabs.open_tab("c.tab", "C2", QWidget())
+        tabs.open_tab("a.tab", "A2", QWidget(), owner="a")
+        tabs.open_tab("b.tab", "B2", QWidget(), owner="b")
+        tabs.open_tab("c.tab", "C2", QWidget(), owner="c")
 
         self.assertEqual(tabs.close_owner_tabs("a"), 1)
         self.assertFalse(tabs.has_tab("a.tab"))
@@ -112,6 +112,136 @@ class EditorTabsTest(unittest.TestCase):
         self.assertEqual(tabs.close_owner_tabs("b"), 1)
         self.assertFalse(tabs.has_tab("b.tab"))
         self.assertEqual(tabs.close_owner_tabs("absent"), 0)
+
+    def test_module_cannot_close_foreign_tab(self):
+        tabs = EditorTabs()
+        self.addCleanup(tabs.deleteLater)
+        tabs.open_tab(
+            "mod.tab",
+            "Module",
+            QWidget(),
+            owner="mod_a",
+        )
+
+        self.assertFalse(tabs.close_tab("mod.tab", owner="mod_b"))
+        self.assertTrue(tabs.has_tab("mod.tab"))
+        self.assertTrue(tabs.close_tab("mod.tab", owner="mod_a"))
+        self.assertFalse(tabs.has_tab("mod.tab"))
+
+    def test_owner_is_explicit_not_derived_from_tab_id(self):
+        tabs = EditorTabs()
+        self.addCleanup(tabs.deleteLater)
+        tabs.open_tab(
+            "mod_a.fake",
+            "Fake",
+            QWidget(),
+            owner="mod_b",
+        )
+
+        self.assertEqual(tabs.close_owner_tabs("mod_a"), 0)
+        self.assertTrue(tabs.has_tab("mod_a.fake"))
+        self.assertEqual(tabs.close_owner_tabs("mod_b"), 1)
+        self.assertFalse(tabs.has_tab("mod_a.fake"))
+
+    def test_module_cannot_change_foreign_tab_state(self):
+        tabs = EditorTabs()
+        self.addCleanup(tabs.deleteLater)
+        tabs.open_tab(
+            "mod.tab",
+            "Module",
+            QWidget(),
+            owner="mod_a",
+        )
+
+        self.assertFalse(
+            tabs.set_tab_dirty("mod.tab", True, owner="mod_b")
+        )
+        self.assertFalse(
+            tabs.set_tab_busy("mod.tab", True, owner="mod_b")
+        )
+        self.assertTrue(
+            tabs.set_tab_dirty("mod.tab", True, owner="mod_a")
+        )
+        self.assertTrue(
+            tabs.set_tab_busy(
+                "mod.tab",
+                True,
+                owner=PLATFORM_OWNER,
+            )
+        )
+        self.assertTrue(
+            tabs.close_tab("mod.tab", owner=PLATFORM_OWNER)
+        )
+
+    def test_reserved_default_tab_id_returns_false(self):
+        tabs = EditorTabs()
+        self.addCleanup(tabs.deleteLater)
+
+        self.assertFalse(
+            tabs.open_tab(
+                DEFAULT_TAB_ID,
+                "Reserved",
+                QWidget(),
+                owner="mod_a",
+            )
+        )
+        self.assertIsNone(tabs.get_tab(DEFAULT_TAB_ID))
+
+    def test_module_cannot_write_default_platform_tab(self):
+        tabs = EditorTabs()
+        self.addCleanup(tabs.deleteLater)
+        editor = tabs.ensure_default_tab()
+        editor.show_text("platform\n", "Platform")
+        self.assertFalse(
+            tabs.show_text(
+                "[foreign]\n",
+                "Foreign",
+                owner="mod_x",
+            )
+        )
+        self.assertEqual(editor.text(), "platform\n")
+        self.assertFalse(
+            tabs.show_text(
+                "[foreign]\n",
+                "Foreign",
+                tab_id="ui.editor",
+                owner="mod_x",
+            )
+        )
+        self.assertEqual(editor.text(), "platform\n")
+        self.assertTrue(
+            tabs.show_text("[platform]\n", "Platform", owner=None)
+        )
+        self.assertEqual(editor.text(), "[platform]\n")
+
+    def test_ask_if_dirty_close_policy(self):
+        tabs = EditorTabs()
+        self.addCleanup(tabs.deleteLater)
+        tabs.open_tab(
+            "dirty.tab",
+            "Dirty",
+            QWidget(),
+            owner="demo",
+        )
+        tabs.set_tab_dirty("dirty.tab", True)
+        tabs.set_tab_close_policy("dirty.tab", "ask_if_dirty")
+        index = tabs.indexOf(tabs.get_tab("dirty.tab"))
+
+        with patch.object(
+            QMessageBox,
+            "question",
+            return_value=QMessageBox.No,
+        ):
+            tabs._on_close_requested(index)
+        self.assertTrue(tabs.has_tab("dirty.tab"))
+
+        with patch.object(
+            QMessageBox,
+            "question",
+            return_value=QMessageBox.Yes,
+        ):
+            tabs._on_close_requested(index)
+        self.assertFalse(tabs.has_tab("dirty.tab"))
 
     def test_close_tabs_right(self):
         tabs = self._make()

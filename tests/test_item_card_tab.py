@@ -21,8 +21,8 @@ class _Ui:
         self.document = document
         self.errors = []
 
-    def open_editor_tab(self, tab_id, title, widget):
-        self.tabs.open_tab(tab_id, title, widget)
+    def open_tab(self, spec, widget):
+        self.tabs.open_tab(spec.id, spec.title, widget)
 
     def retain_resolved_document(self, tab_id):
         if tab_id != self.document.tab_id:

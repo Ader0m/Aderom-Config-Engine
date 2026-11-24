@@ -73,8 +73,7 @@
 
 Обновление при закрытии Этапа 3: UI-1 (`ui/editor.py`) и UI-5
 (`ui/platform/project_controller.py`) закрыты; чтение текста вынесено в
-платформенный reader. В `UI_CORE_IMPORT_ALLOWLIST` остаются только
-UI-2..UI-4 (`ui/lexers.py`, `ui/hints/context.py`, `ui/hints/service.py`)
-до Этапа 6. После Этапа 6 `UI_CORE_IMPORT_ALLOWLIST` должен стать пустым;
+платформенный reader. UI-2 (`ui/lexers.py`) закрыт на шаге 6.7 через
+`app.lexing`; `UI_CORE_IMPORT_ALLOWLIST` пуст.
 остальные allowlist закрываются по срокам своих этапов, полностью — на
 Этапе 9.

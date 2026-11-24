@@ -8,13 +8,13 @@
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import replace
 from pathlib import Path
 
-from PyQt5.QtCore import QThread
 from PyQt5.QtWidgets import QApplication, QFileDialog, QMessageBox
 
-from sdk.contracts.events import Events
+from sdk.contracts.events import Events, PLATFORM_OWNER
 from sdk.features.projects import AssetDraftInfo, ProjectChanged, SavedDraft
 
 from app.documents import ResetIntent
@@ -25,6 +25,7 @@ from app.projects import (
 )
 from app.patching.commit import write_preview as write_preview_use_case
 from app.projects import use_cases as project_use_cases
+from ..tasks import current_task
 from ..project_dialogs import (
     ProjectCreateDialog,
     ProjectLoadDialog,
@@ -39,6 +40,12 @@ logger = logging.getLogger(__name__)
 
 class ProjectControllerMixin:
     """Жизненный цикл проекта, сохранение и предпросмотр патча."""
+
+    @staticmethod
+    def _task_cancelled():
+        """Отменена ли задача, выполняемая в текущем рабочем потоке."""
+        handle = current_task()
+        return bool(handle is not None and handle.is_cancelled)
 
     def is_project_active(self):
         return self.project.is_active
@@ -616,21 +623,27 @@ class ProjectControllerMixin:
             for draft in self.project.active.assets.values()
         )
 
-    def set_editor_tab_dirty(self, tab_id, dirty):
+    def set_editor_tab_dirty(self, tab_id, dirty, owner=None):
         if self.window is None:
-            return
+            return False
         editor = getattr(self.window, "editor", None)
         setter = getattr(editor, "set_tab_dirty", None)
         if callable(setter):
-            setter(tab_id, bool(dirty))
+            if owner is None:
+                return bool(setter(tab_id, bool(dirty)))
+            return bool(setter(tab_id, bool(dirty), owner=owner))
+        return False
 
-    def set_editor_tab_busy(self, tab_id, busy):
+    def set_editor_tab_busy(self, tab_id, busy, owner=None):
         if self.window is None:
-            return
+            return False
         editor = getattr(self.window, "editor", None)
         setter = getattr(editor, "set_tab_busy", None)
         if callable(setter):
-            setter(str(tab_id or ""), bool(busy))
+            if owner is None:
+                return bool(setter(str(tab_id or ""), bool(busy)))
+            return bool(setter(str(tab_id or ""), bool(busy), owner=owner))
+        return False
 
     def _flush_editor_pending(self):
         """Перенести отложенный текст вкладок в проектные черновики."""
@@ -985,6 +998,7 @@ class ProjectControllerMixin:
                 self._open_missing_owner_tab(
                     tab_id,
                     record.get("title") or tab_id,
+                    record.get("owner"),
                 )
 
             if record.get("active"):
@@ -1012,6 +1026,11 @@ class ProjectControllerMixin:
         source_path = record.get("source_path")
         tab_id = str(record.get("tab_id") or "")
         title = str(record.get("title") or "")
+        owner = record.get("owner") or None
+        if tab_id == "ui.editor":
+            # Старые проекты писали сюда owner "ui"; default-вкладка
+            # всегда принадлежит платформе.
+            owner = None
         state = record.get("state")
         if not isinstance(state, dict):
             state = {}
@@ -1028,6 +1047,7 @@ class ProjectControllerMixin:
                     source_path=source_path,
                     notice=state.get("notice") or None,
                     tab_id=tab_id or None,
+                    owner=owner,
                 )
             else:
                 opener = getattr(editor, "open_file", None)
@@ -1046,12 +1066,13 @@ class ProjectControllerMixin:
     def _restore_resolved_tab(self, record):
         editor = self._editor_widget()
         tab_id = str(record.get("tab_id") or "")
+        owner = record.get("owner") or None
 
         if self.project.is_active:
             draft = self.project.get_resolved_draft(tab_id)
             if draft is not None:
                 opener = getattr(self, "open_resolved_document", None)
-                if callable(opener) and opener(tab_id):
+                if callable(opener) and opener(tab_id, owner=owner):
                     self._restore_tab_title(editor, record)
                     return True
 
@@ -1077,7 +1098,11 @@ class ProjectControllerMixin:
             self._restore_tab_title(editor, record)
             return
 
-        self._open_missing_owner_tab(tab_id, title)
+        self._open_missing_owner_tab(
+            tab_id,
+            title,
+            record.get("owner"),
+        )
 
     def _restore_tab_title(self, editor, record):
         setter = getattr(editor, "set_tab_title", None)
@@ -1085,11 +1110,11 @@ class ProjectControllerMixin:
         if callable(setter) and title:
             setter(record.get("tab_id"), str(title))
 
-    def _open_missing_owner_tab(self, tab_id, title):
+    def _open_missing_owner_tab(self, tab_id, title, owner=None):
         editor = self._editor_widget()
         opener = getattr(editor, "open_missing_owner_tab", None)
         if callable(opener):
-            opener(tab_id, title)
+            opener(tab_id, title, owner=owner)
 
     def _activate_project_state(self, project, message):
         """Привести VFS и вкладки к состоянию активированного проекта.
@@ -1134,15 +1159,45 @@ class ProjectControllerMixin:
         """
         if self.has_forest():
             return True
-        self.show_error(
-            "Дерево не построено: дождитесь окончания сборки."
-        )
+        if self.operations.is_active("vfs.rebuild"):
+            self.show_error(
+                "Дерево строится: дождитесь окончания сборки VFS."
+            )
+        else:
+            self.show_error(
+                "Дерево не построено: дождитесь окончания сборки."
+            )
         return False
+
+    def _project_tree_dependency(self):
+        """Зависимость проектной операции от построения VFS.
+
+        Активная пересборка важна даже при наличии старого forest: он
+        может быть снимком до изменений проекта/модов. ``None`` — дерева
+        нет и сборка не идёт; ``()`` — дерево готово и не пересобирается;
+        иначе — ключ операции, после которой можно продолжать.
+        """
+        if self.operations.is_active("vfs.rebuild"):
+            return ("vfs.rebuild",)
+        if self.has_forest():
+            return ()
+        return None
+
+    def _project_tree_dependency_provider(self):
+        """Callable для атомарной проверки зависимости в TaskService."""
+        return lambda: self._project_tree_dependency() or ()
 
     def create_project(self):
         if self.window is None:
             return
-        if not self._require_project_tree():
+        if self.operations.is_active("project.create"):
+            self.set_status("Создание проекта уже выполняется", 5000)
+            self.log("Проект: создание уже выполняется")
+            return
+
+        dependency = self._project_tree_dependency()
+        if dependency is None:
+            self._require_project_tree()
             return
 
         setting_definitions = self.project_setting_registry.settings()
@@ -1162,39 +1217,161 @@ class ProjectControllerMixin:
 
         name = dialog.project_name()
         project_dir = dialog.project_directory() or None
+        save_mode = dialog.save_mode()
+        xml_patch_mode = dialog.xml_patch_mode()
+        module_settings = dict(dialog.module_setting_values())
+
+        dependency = self._project_tree_dependency()
+        if dependency is None:
+            self._require_project_tree()
+            return
 
         self._save_open_tabs()
-        self._begin_project_activation()
-        try:
-            try:
-                project = self.project.create(
-                    name,
-                    [],
-                    dialog.save_mode(),
-                    xml_patch_mode=dialog.xml_patch_mode(),
-                    project_dir=project_dir,
+        activation_started = [False]
+        activation_ready = threading.Event()
+
+        def on_log(message):
+            if not activation_started[0]:
+                activation_started[0] = True
+                try:
+                    self._begin_project_activation()
+                finally:
+                    activation_ready.set()
+            self.log(message)
+
+        def work(log):
+            log("Создание проекта: подготовка")
+            if not activation_ready.wait(5):
+                raise RuntimeError(
+                    "UI не подтвердил начало активации проекта"
                 )
-            except ProjectError as exc:
-                self.show_error(str(exc))
-                return
-
-            for key, value in dialog.module_setting_values().items():
-                self.set_project_setting(key, value)
-
-            self._activate_project_state(
-                project,
-                "Проект создан: %s" % project.name,
+            return self.project.create(
+                name,
+                [],
+                save_mode,
+                xml_patch_mode=xml_patch_mode,
+                project_dir=project_dir,
             )
-        finally:
-            self._end_project_activation()
+
+        def done(project, error):
+            try:
+                if error is not None:
+                    if not getattr(self, "_closing", False):
+                        self.set_status("Ошибка создания проекта")
+                        self.log("Проект: ошибка создания: %s" % error)
+                        self.show_error(str(error))
+                    return
+                if getattr(self, "_closing", False):
+                    # Окно уже закрывается: не собираем UI нового
+                    # проекта, но созданный проект останется на диске и
+                    # будет сохранён при повторном close.
+                    return
+                for key, value in module_settings.items():
+                    self.set_project_setting(key, value)
+                self._activate_project_state(
+                    project,
+                    "Проект создан: %s" % project.name,
+                )
+            finally:
+                if activation_started[0]:
+                    self._end_project_activation()
+                if getattr(self, "_closing", False):
+                    close = getattr(self.window, "close", None)
+                    if callable(close):
+                        close()
+
+        if dependency:
+            self.set_status("Создание проекта: ожидание сборки VFS…")
+
+        try:
+            self.tasks.run(
+                work,
+                on_done=done,
+                on_log=on_log,
+                operation_key="project.create",
+                title="Создание проекта",
+                depends_on=self._project_tree_dependency_provider(),
+                owner=PLATFORM_OWNER,
+            )
+        except Exception as exc:
+            if activation_started[0]:
+                self._end_project_activation()
+            self.show_error(
+                "Не удалось запустить создание проекта: %s" % exc
+            )
 
     def load_project(self):
+        """Загрузить проект в фоне.
+
+        Поиск сохранённых проектов и сама загрузка идут через
+        `TaskService`: UI-поток не сканирует каталоги и не читает
+        `project.json`. `operation_key='project.load'` защищает от
+        параллельных загрузок, `project.list` — от параллельного поиска.
+        """
+        if getattr(self, "_closing", False):
+            return
         if self.window is None:
             return
-        if not self._require_project_tree():
+        if self.operations.is_active("project.load"):
+            self.set_status("Загрузка проекта уже выполняется", 5000)
+            self.log("Проект: загрузка уже выполняется")
+            return
+        if self.operations.is_active("project.list"):
+            self.set_status("Поиск проектов уже выполняется", 5000)
+            self.log("Проект: поиск уже выполняется")
             return
 
-        projects = self.project.list_projects()
+        dependency = self._project_tree_dependency()
+        if dependency is None:
+            self._require_project_tree()
+            return
+
+        canceled = [False]
+
+        def work(_log):
+            projects = self.project.list_projects(
+                should_stop=self._task_cancelled,
+            )
+            if self._task_cancelled():
+                canceled[0] = True
+            return projects
+
+        def done(projects, error):
+            if canceled[0] or getattr(self, "_closing", False):
+                return
+            if error is not None:
+                self.set_status("Ошибка поиска проектов")
+                self.log("Проект: ошибка поиска: %s" % error)
+                self.show_error(
+                    "Не удалось получить список проектов: %s" % error
+                )
+                return
+            self._open_project_load_dialog(projects)
+
+        run = getattr(self.tasks, "run", None)
+        if not callable(run):
+            # Встраиваемый контекст без TaskService: сохраняем прежний
+            # синхронный путь, в штатном приложении он не используется.
+            self._open_project_load_dialog(self.project.list_projects())
+            return
+
+        self.set_status("Поиск проектов…")
+        try:
+            run(
+                work,
+                on_done=done,
+                owner=PLATFORM_OWNER,
+                operation_key="project.list",
+                title="Поиск проектов",
+            )
+        except Exception as exc:
+            self.set_status("Ошибка поиска проектов")
+            self.log("Проект: не удалось запустить поиск: %s" % exc)
+            self.show_error(
+                "Не удалось запустить поиск проектов: %s" % exc
+            )
+
+    def _open_project_load_dialog(self, projects):
         if not projects:
             QMessageBox.information(
                 self.window,
@@ -1211,48 +1388,155 @@ class ProjectControllerMixin:
         if not project_id:
             return
 
+        dependency = self._project_tree_dependency()
+        if dependency is None:
+            self._require_project_tree()
+            return
+
+        current = self.project.active
+        owner = (
+            current.id if current is not None else PLATFORM_OWNER
+        )
         self._save_open_tabs()
         self._begin_project_activation()
-        try:
-            try:
-                project = self.project.load(project_id)
-            except ProjectError as exc:
-                self.show_error(str(exc))
-                return
-
-            self._activate_project_state(
-                project,
-                "Проект загружен: %s" % project.name,
+        if dependency:
+            self.set_status(
+                "Загрузка проекта: ожидание сборки VFS…",
             )
-        finally:
+
+        def work(log):
+            return self.project.load(project_id)
+
+        def done(project, error):
+            try:
+                if getattr(self, "_closing", False):
+                    # Окно уже закрывается: не показываем ошибку и не
+                    # перестраиваем UI под новый проект. Сам проект уже
+                    # активирован ProjectService.load; закрытие сохранит
+                    # его.
+                    return
+                if error is not None:
+                    self.set_status("Ошибка загрузки проекта")
+                    self.log(
+                        "Проект: ошибка загрузки: %s" % error
+                    )
+                    self.show_error(str(error))
+                    return
+                if not self.has_forest():
+                    self.show_error(
+                        "Дерево не построено: проект не активирован."
+                    )
+                    return
+                self._activate_project_state(
+                    project,
+                    "Проект загружен: %s" % project.name,
+                )
+            finally:
+                self._end_project_activation()
+                if getattr(self, "_closing", False):
+                    close = getattr(self.window, "close", None)
+                    if callable(close):
+                        close()
+
+        try:
+            self.tasks.run(
+                work,
+                on_done=done,
+                on_log=self.log,
+                operation_key="project.load",
+                title="Загрузка проекта",
+                depends_on=self._project_tree_dependency_provider(),
+                owner=owner,
+            )
+        except Exception as exc:
             self._end_project_activation()
+            self.show_error(
+                "Не удалось запустить загрузку проекта: %s" % exc
+            )
 
     def _delete_project(self):
-        self._begin_project_activation()
-        try:
-            try:
-                self.project.delete_active_project()
-            except ProjectError as exc:
-                self.show_error(str(exc))
-                return False
-
-            self._restore_project_virtual_files()
-            self._invalidate_resolver_cache()
-            self._update_project_status()
-            self.events.publish(
-                Events.PROJECT_CHANGED,
-                ProjectChanged(active=False),
-            )
-            self._reset_editor_tabs()
-            editor = self._editor_widget()
-            ensure = getattr(editor, "ensure_default_tab", None)
-            if callable(ensure):
-                ensure()
-            self.log("Проект удалён")
-            self.set_status("Проект удалён", 5000)
+        project = self.project.active
+        if project is None:
+            return False
+        operation_key = "project.delete:%s" % project.id
+        if self.operations.is_active(operation_key):
+            self.set_status("Удаление проекта уже выполняется", 5000)
+            self.log("Проект: удаление уже выполняется")
             return True
-        finally:
+
+        self._begin_project_activation()
+
+        def work(_log):
+            return self.project.delete_active_project(
+                expected_project=project,
+            )
+
+        def done(_result, error):
+            try:
+                if error is not None:
+                    self.set_status("Ошибка удаления проекта")
+                    self.log(
+                        "Проект: ошибка удаления: %s" % error
+                    )
+                    self.show_error(str(error))
+                    return
+                self._after_project_deleted()
+            finally:
+                self._end_project_activation()
+                if getattr(self, "_closing", False):
+                    close = getattr(self.window, "close", None)
+                    if callable(close):
+                        close()
+
+        run = getattr(self.tasks, "run", None)
+        if not callable(run):
+            # Встраиваемый контекст без TaskService: прежний синхронный
+            # путь. В штатном приложении удаление идёт задачей.
+            try:
+                try:
+                    self.project.delete_active_project(
+                        expected_project=project,
+                    )
+                except ProjectError as exc:
+                    self.show_error(str(exc))
+                    return False
+                self._after_project_deleted()
+                return True
+            finally:
+                self._end_project_activation()
+
+        try:
+            run(
+                work,
+                on_done=done,
+                owner=project.id,
+                operation_key=operation_key,
+                title="Удаление проекта",
+            )
+        except Exception as exc:
             self._end_project_activation()
+            self.show_error(
+                "Не удалось запустить удаление проекта: %s" % exc
+            )
+            return False
+        self.set_status("Удаление проекта…")
+        return True
+
+    def _after_project_deleted(self):
+        self._restore_project_virtual_files()
+        self._invalidate_resolver_cache()
+        self._update_project_status()
+        self.events.publish(
+            Events.PROJECT_CHANGED,
+            ProjectChanged(active=False),
+        )
+        self._reset_editor_tabs()
+        editor = self._editor_widget()
+        ensure = getattr(editor, "ensure_default_tab", None)
+        if callable(ensure):
+            ensure()
+        self.log("Проект удалён")
+        self.set_status("Проект удалён", 5000)
 
     def project_settings(self):
         if self.window is None:
@@ -1439,10 +1723,7 @@ class ProjectControllerMixin:
         def work(_log):
             return self.project.autosave(
                 expected_project=project,
-                should_stop=(
-                    lambda: QThread.currentThread()
-                    .isInterruptionRequested()
-                ),
+                should_stop=self._task_cancelled,
             )
 
         try:
@@ -1556,8 +1837,29 @@ class ProjectControllerMixin:
         )
 
     def on_app_close(self):
+        self._closing = True
+        if self.operations.is_active("project.create"):
+            self.tasks.cancel_operation("project.create")
+            self.set_status("Создание проекта: ожидание завершения…")
+            return False
         if not self.project.is_active:
+            # Активного проекта нет, но отложенные удаления могли
+            # остаться от прошлого проекта. Закрытие — последняя точка,
+            # где их можно разобрать без следующего load/create.
+            try:
+                self.project.flush()
+            except Exception as exc:
+                self.log(
+                    "Проект: не удалось разобрать отложенные удаления "
+                    "при закрытии: %s" % exc
+                )
             return True
+        active = self.project.active
+        if self.operations.is_active(
+            "project.delete:%s" % active.id
+        ):
+            self.set_status("Удаление проекта…")
+            return False
         if getattr(self, "_patch_write_running", False):
             # Не блокируем UI и не разбираем окно: отменяем запись и
             # повторим закрытие из _on_patch_write_done.
@@ -1570,11 +1872,25 @@ class ProjectControllerMixin:
                     pass
             self.set_status("Отмена записи патч-мода…")
             return False
-
-        self._flush_editor_pending()
-        self._save_open_tabs()
+        if getattr(self, "_close_flush_running", False):
+            # Первое закрытие уже ждёт фонового сохранения.
+            return False
 
         project = self.project.active
+        self._flush_editor_pending()
+
+        # Сохранение уже завершилось. Если пользователь ничего не менял
+        # после него, окно можно закрывать без повторной синхронной
+        # записи. Ошибку flush не повторяем: старый контракт закрытия
+        # всё равно завершал приложение после одной попытки.
+        if getattr(self, "_close_flush_project", None) is project:
+            failed = bool(getattr(self, "_close_flush_failed", False))
+            self._close_flush_project = None
+            self._close_flush_failed = False
+            if failed or not self.project.has_dirty():
+                return True
+
+        tabs = self._collect_open_tabs()
         if project is not None:
             try:
                 self.tasks.cancel_owner(project.id)
@@ -1584,11 +1900,86 @@ class ProjectControllerMixin:
         self._autosave_pending_project = None
         # Старый фоновый проход не должен записать снимок после flush().
         self.project.invalidate_autosave()
+
+        def work(_log):
+            if self.project.active is not project:
+                # Пока задача ждала, пользователь сменил проект: старый
+                # уже сохранён через ProjectService.close().
+                return []
+            saved = self.project.flush()
+            if tabs is not None and self.project.active is project:
+                try:
+                    self.project.save_tabs(tabs)
+                except Exception as exc:
+                    self.log(
+                        "Проект: не удалось сохранить вкладки при "
+                        "закрытии: %s" % exc
+                    )
+            return saved
+
+        def done(_saved, error):
+            self._close_flush_running = False
+            self._close_flush_project = project
+            self._close_flush_failed = error is not None
+            if error is not None:
+                self.log(
+                    "Проект: ошибка сохранения при закрытии: %s" % error
+                )
+            close = getattr(self.window, "close", None)
+            if callable(close):
+                close()
+
+        run = getattr(self.tasks, "run", None)
+        if not callable(run):
+            # Тестовый/встраиваемый контекст без TaskService: сохраняем
+            # синхронно, иначе закроем приложение с потерей данных.
+            self._save_open_tabs()
+            try:
+                self.project.flush()
+            except Exception as exc:
+                self.log(
+                    "Проект: ошибка сохранения при закрытии: %s" % exc
+                )
+            return True
+
+        self._close_flush_running = True
         try:
-            self.project.flush()
+            run(
+                work,
+                on_done=done,
+                owner=project.id,
+                operation_key="project.close:%s" % project.id,
+                title="Сохранение перед закрытием",
+            )
         except Exception as exc:
-            self.log("Проект: ошибка сохранения при закрытии: %s" % exc)
-        return True
+            self._close_flush_running = False
+            self.log(
+                "Проект: не удалось запустить сохранение при закрытии: %s"
+                % exc
+            )
+            self._save_open_tabs()
+            try:
+                self.project.flush()
+            except Exception as flush_exc:
+                self.log(
+                    "Проект: ошибка сохранения при закрытии: %s"
+                    % flush_exc
+                )
+            return True
+        self.set_status("Сохранение проекта перед закрытием…")
+        return False
+
+    def _collect_open_tabs(self):
+        """Собрать записи вкладок в UI-потоке для фоновой записи."""
+        editor = self._editor_widget()
+        collector = getattr(editor, "session_tabs", None)
+        if not callable(collector):
+            return None
+        try:
+            return collector()
+        except Exception:
+            logger.exception("Не удалось собрать список вкладок")
+            return None
 
     def build_patch_preview(self):
         if self.window is None:
@@ -1611,6 +2002,15 @@ class ProjectControllerMixin:
                 "Проект",
                 "В проекте нет изменённых файлов.",
             )
+            return
+
+        preview_key = "project.patch_preview:%s:%s" % (
+            project.id,
+            getattr(self._forest, "cache_id", "") or "",
+        )
+        if self.operations.is_active(preview_key):
+            self.set_status("Предпросмотр патча уже выполняется", 5000)
+            self.log("Проект: предпросмотр патча уже выполняется")
             return
 
         self.autosave_project()
@@ -1636,6 +2036,9 @@ class ProjectControllerMixin:
                 forest=forest,
             ),
             on_log=self.log,
+            operation_key=preview_key,
+            title="Предпросмотр патча: %s" % project.name,
+            owner=project.id,
         )
 
     def _on_preview_ready(self, preview, err, project=None, forest=None):
@@ -1816,14 +2219,9 @@ class ProjectControllerMixin:
         owner = project.id
         self._patch_write_running = True
         self.set_status("Запись патч-мода…")
-        worker_holder = {}
 
         def cancelled():
-            worker = worker_holder.get("worker")
-            return bool(
-                worker is not None
-                and worker.isInterruptionRequested()
-            )
+            return self._task_cancelled()
 
         def work(log):
             return write_preview_use_case(
@@ -1841,11 +2239,13 @@ class ProjectControllerMixin:
             )
 
         try:
-            worker_holder["worker"] = self.tasks.run(
+            self.tasks.run(
                 work,
                 on_done=self._on_patch_write_done,
                 on_log=self.log,
                 owner=owner,
+                operation_key="project.patch_write:%s" % project.id,
+                title="Запись патча: %s" % project.name,
             )
         except Exception as exc:
             self._patch_write_running = False
@@ -2051,7 +2451,7 @@ class ProjectControllerMixin:
         self._override_theme_enabled = enabled
 
         try:
-            from ..theme import apply_override_theme, apply_window_caption
+            from .theme import apply_override_theme, apply_window_caption
 
             apply_override_theme(QApplication.instance(), enabled)
             apply_window_caption(self.window, enabled)

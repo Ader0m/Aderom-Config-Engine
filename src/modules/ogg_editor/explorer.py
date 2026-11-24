@@ -38,7 +38,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from sdk import DEFAULT_SEARCH_DELAY_MS
+from sdk import DEFAULT_SEARCH_DELAY_MS, FileOpenHandler
 from sdk.features.items import ITEM_SECTION_MIME, decode_item_section
 
 from .ogg import (
@@ -51,8 +51,6 @@ from .sections import extract_sound_paths, make_section_resolver
 from .sound_types import sound_type_short, sound_type_tooltip
 from .sound_types_ui import SoundTypeField, SoundTypePicker
 
-CHANGED_COLOR = "#6A9955"
-NEW_COLOR = "#4FC1FF"
 MISSING_STATE = "нет файла"
 
 _NODE_ROLE = Qt.UserRole + 2
@@ -368,11 +366,11 @@ class SoundFieldDelegate(QStyledItemDelegate):
     def _style_editor(self, editor):
         try:
             ui = self.window.ctx.ui
-            background = ui.theme_color("bg_main", "#1E1F22")
-            foreground = ui.theme_color("text", "#DCDCDC")
-            border = ui.theme_color("border", "#3C3F41")
-            selection = ui.theme_color("selection", "#2E436E")
-            bright = ui.theme_color("text_bright", "#FFFFFF")
+            background = ui.theme_color("bg_main")
+            foreground = ui.theme_color("text")
+            border = ui.theme_color("border")
+            selection = ui.theme_color("selection")
+            bright = ui.theme_color("text_bright")
         except Exception:
             return
 
@@ -503,15 +501,24 @@ class OggExplorerWindow(QWidget):
 
     def _apply_window_background(self):
         """Залить фон окна цветом основной темы, а не прозрачностью."""
-        background = self.ctx.ui.theme_color("bg_main", "#2B2B2B")
+        background = self.ctx.ui.theme_color("bg_main")
         self.setObjectName("oggExplorerWindow")
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet(
             "#oggExplorerWindow { background-color: %s; }" % background
         )
 
+    def refresh_theme(self):
+        self._apply_window_background()
+        self._apply_tree_theme()
+        muted = self.ctx.ui.theme_color("text_muted", "")
+        self.selection_label.setStyleSheet("color: %s;" % muted)
+        self.status.setStyleSheet("color: %s;" % muted)
+        self.update()
+
     # ------------------------------------------------------------ UI
     def _build_ui(self):
+        muted = self.ctx.ui.theme_color("text_muted", "")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
@@ -549,7 +556,7 @@ class OggExplorerWindow(QWidget):
 
         selection_row = QHBoxLayout()
         self.selection_label = QLabel("")
-        self.selection_label.setStyleSheet("color: palette(mid);")
+        self.selection_label.setStyleSheet("color: %s;" % muted)
         selection_row.addWidget(self.selection_label, 1)
         self.edit_selected_button = QPushButton(
             "Редактировать выбранное (0)"
@@ -585,7 +592,7 @@ class OggExplorerWindow(QWidget):
         self.tree.itemExpanded.connect(self._on_expanded)
 
         self.status = QLabel("")
-        self.status.setStyleSheet("color: palette(mid);")
+        self.status.setStyleSheet("color: %s;" % muted)
 
         top_panel = QWidget()
         top_layout = QVBoxLayout(top_panel)
@@ -667,9 +674,9 @@ class OggExplorerWindow(QWidget):
         self._update_project_state()
 
     def _apply_tree_theme(self):
-        selection = self.ctx.ui.theme_color("selection", "#2E436E")
-        bright = self.ctx.ui.theme_color("text_bright", "#FFFFFF")
-        hover = self.ctx.ui.theme_color("hover", "#3A3D41")
+        selection = self.ctx.ui.theme_color("selection")
+        bright = self.ctx.ui.theme_color("text_bright")
+        hover = self.ctx.ui.theme_color("hover")
 
         stylesheet = (
             "QTreeWidget::item:selected,"
@@ -806,7 +813,6 @@ class OggExplorerWindow(QWidget):
                         QColor(
                             self.ctx.ui.theme_color(
                                 "accent_red",
-                                "#F14C4C",
                             )
                         )
                     ),
@@ -1456,7 +1462,17 @@ class OggExplorerWindow(QWidget):
                 item.setForeground(
                     NAME_COLUMN,
                     QBrush(
-                        QColor(NEW_COLOR if entry.is_new else CHANGED_COLOR)
+                        QColor(
+                            self.ctx.ui.theme_color(
+                                "accent_teal"
+                                if entry.is_new
+                                else "syn_comment"
+                            )
+                            or self.ctx.ui.theme_color(
+                                "text_muted",
+                                "",
+                            )
+                        )
                     ),
                 )
 
@@ -1742,7 +1758,15 @@ class OggExplorerWindow(QWidget):
                 current.setText(STATE_COLUMN, "изменён")
                 current.setForeground(
                     NAME_COLUMN,
-                    QBrush(QColor(CHANGED_COLOR)),
+                    QBrush(
+                        QColor(
+                            self.ctx.ui.theme_color("syn_comment")
+                            or self.ctx.ui.theme_color(
+                                "text_muted",
+                                "",
+                            )
+                        )
+                    ),
                 )
 
         self.status.setText("Параметры обновлены: %s" % node.name)
@@ -1793,7 +1817,7 @@ class OggExplorerWindow(QWidget):
 
     def _selection_brushes(self):
         selection = QColor(
-            self.ctx.ui.theme_color("selection", "#2E436E")
+            self.ctx.ui.theme_color("selection")
         )
         partial = QColor(selection)
         partial.setAlpha(110)
@@ -1893,7 +1917,7 @@ class OggExplorerWindow(QWidget):
             button.setStyleSheet("")
             return
 
-        accent = self.ctx.ui.theme_color("accent_red", "#F14C4C")
+        accent = self.ctx.ui.theme_color("accent_red")
         button.setStyleSheet(
             "QPushButton {"
             " color: %s;"
@@ -1985,7 +2009,7 @@ class OggExplorerWindow(QWidget):
             button.setStyleSheet("")
             return
 
-        accent = self.ctx.ui.theme_color("accent_amber", "#CCA700")
+        accent = self.ctx.ui.theme_color("accent_amber")
         button.setStyleSheet(
             "QPushButton {"
             " color: %s;"
@@ -2099,10 +2123,11 @@ class OggExplorerWindow(QWidget):
         self._on_add()
 
 
-class SoundOpenHandler:
+class SoundOpenHandler(FileOpenHandler):
     """Открывать .ogg во вкладке модуля из общего маршрутизатора."""
 
     priority = 80
+    contexts = ("view", "preview")
 
     def __init__(self, module):
         self.module = module

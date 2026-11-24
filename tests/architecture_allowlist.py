@@ -14,6 +14,7 @@ SDK_PUBLIC_NAMES = frozenset({
     'CommandApi',
     'CoreApi',
     'DEFAULT_SEARCH_DELAY_MS',
+    'DockSpec',
     'EventApi',
     'Events',
     'FileOpenFailed',
@@ -63,10 +64,12 @@ SDK_PUBLIC_NAMES = frozenset({
     'SectionGraphContribution',
     'SectionGraphRequest',
     'SnapshotChanged',
+    'TabSpec',
     'TaskApi',
     'TreeReady',
     'TreeSummary',
     'UiApi',
+    'WindowSpec',
     'api_level',
     'is_compatible',
     'is_stable',
@@ -245,12 +248,9 @@ CORE_PUBLIC_NAMES = frozenset({
     'validate_patch_mod_root',
 })
 
-# UI -> core: legacy-исключения UI-2..UI-4 из docs/Миграционные исключения.md.
-UI_CORE_IMPORT_ALLOWLIST = frozenset({
-    "ui/hints/context.py",
-    "ui/hints/service.py",
-    "ui/lexers.py",
-})
+# UI -> core: legacy-исключения закрыты. UI получает данные через
+# app-порты, а не через core.
+UI_CORE_IMPORT_ALLOWLIST = frozenset()
 
 # app -> sdk: только контрактные модули. Адаптеры и внутренности
 # запрещены; список должен уменьшаться по мере Этапа 1.

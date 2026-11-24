@@ -21,6 +21,7 @@ import shutil
 import threading
 import time
 import traceback
+from functools import wraps
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
@@ -64,6 +65,16 @@ log = logging.getLogger(__name__)
 _MISSING_SETTING = object()
 
 
+def _serialized_lifecycle(method):
+    """Сериализовать создание/загрузку/закрытие/удаление проекта."""
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lifecycle_lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class ProjectService:
     """Хранилище проектов и черновиков."""
 
@@ -86,7 +97,9 @@ class ProjectService:
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.repository = ProjectRepository()
         self.session = ProjectSession()
+        self._roots_lock = threading.RLock()
         self._project_roots = self._load_project_roots()
+        self._lifecycle_lock = threading.RLock()
         # Нельзя использовать ``or``: пустой реестр — валидный объект,
         # а ``ProjectAssetRegistry`` определяет ``__len__`` и поэтому
         # ложен, пока в нём нет типов.
@@ -111,6 +124,10 @@ class ProjectService:
         # Эпоха автосохранения: close/flush/смена проекта запрещают
         # старым фоновым проходам писать после этой точки.
         self._autosave_epoch = 0
+        # Файлы удалённых черновиков, которые не удалось убрать сразу:
+        # _write_lock занят фоновой записью. Очередь разбирается следующим
+        # autosave/flush/load в фоновом потоке, UI не ждёт запись.
+        self._pending_deletes = {}
         self.overlay_builder = OverlayBuilder(self._state_lock)
         # Путь фактического JSON-файла resolved-черновика. Нужен для
         # миграции старых имён файлов: при сохранении перезаписываем
@@ -174,30 +191,59 @@ class ProjectService:
         return roots
 
     def _save_project_roots(self):
-        data = [
-            str(root)
-            for root in self._project_roots
-            if root != self.base_dir
-        ]
-        try:
-            (self.base_dir / self.ROOTS_NAME).write_text(
-                json.dumps(data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except OSError:
-            pass
+        with self._roots_lock:
+            data = [
+                str(root)
+                for root in self._project_roots
+                if root != self.base_dir
+            ]
+            try:
+                write_json_atomic(
+                    self.base_dir / self.ROOTS_NAME,
+                    data,
+                )
+            except OSError:
+                pass
 
-    def _register_project_root(self, root) -> None:
+    def _register_project_root(self, root) -> bool:
         try:
             root = Path(root).expanduser().resolve()
         except (OSError, TypeError, ValueError):
-            return
-        if root not in self._project_roots:
+            return False
+        with self._roots_lock:
+            if root in self._project_roots:
+                return False
             self._project_roots.append(root)
             self._save_project_roots()
+            return True
+
+    def _unregister_empty_root(self, root) -> bool:
+        """Убрать root из реестра, если в нём не осталось проектов."""
+        try:
+            root = Path(root).expanduser().resolve()
+        except (OSError, TypeError, ValueError):
+            return False
+        with self._roots_lock:
+            if root == self.base_dir or root not in self._project_roots:
+                return False
+            try:
+                has_projects = any(
+                    (child / self.META_NAME).is_file()
+                    for child in root.iterdir()
+                    if child.is_dir()
+                )
+            except OSError:
+                has_projects = True
+            if has_projects:
+                return False
+            self._project_roots.remove(root)
+            self._save_project_roots()
+            return True
 
     def _project_dir(self, project_id: str) -> Path:
-        for root in self._project_roots:
+        with self._roots_lock:
+            roots = tuple(self._project_roots)
+        for root in roots:
             candidate = root / project_id
             if (candidate / self.META_NAME).is_file():
                 return candidate
@@ -207,7 +253,25 @@ class ProjectService:
         """Предложить каталог нового проекта по его названию."""
         return self.base_dir / self._make_project_id(name)
 
+    def _cleanup_failed_create(self, root_dir, created_dir):
+        """Убрать следы неудачного создания нового проекта."""
+        for name in (self.DRAFTS_DIR, self.RESOLVED_DIR, self.ASSETS_DIR):
+            try:
+                shutil.rmtree(root_dir / name)
+            except OSError:
+                pass
+        try:
+            (root_dir / self.META_NAME).unlink()
+        except OSError:
+            pass
+        if created_dir:
+            try:
+                shutil.rmtree(root_dir)
+            except OSError:
+                pass
+
     # -------------------------------------------------- создание / загрузка
+    @_serialized_lifecycle
     def create(
         self,
         name: str,
@@ -227,12 +291,6 @@ class ProjectService:
                 "Неизвестный режим XML-патча: %s" % xml_patch_mode
             )
 
-        if self.active is not None:
-            self.close()
-
-        self.invalidate_preview_cache()
-        self._resolved_draft_files.clear()
-        self._clear_overlay_cache()
         if project_dir:
             root_dir = Path(project_dir).expanduser()
             if not root_dir.is_absolute():
@@ -256,41 +314,87 @@ class ProjectService:
                         "Каталог проекта уже существует и не пуст: %s"
                         % root_dir
                     )
-            else:
+            project_id = root_dir.name
+            create_dir = not root_dir.exists()
+        else:
+            project_id = self._make_project_id(name)
+            root_dir = self._project_dir(project_id)
+            if root_dir.exists():
+                raise ProjectError(
+                    "Каталог проекта уже существует: %s" % root_dir
+                )
+            create_dir = True
+
+        previous = self.active
+        # Инициализированы до try: ошибка mkdir/register не должна
+        # маскироваться UnboundLocalError в обработчике.
+        prepared = False
+        root_added = False
+        try:
+            if create_dir:
                 try:
-                    root_dir.mkdir(parents=True, exist_ok=True)
+                    root_dir.mkdir(
+                        parents=True,
+                        exist_ok=bool(project_dir),
+                    )
                 except OSError as exc:
                     raise ProjectError(
                         "Не удалось создать каталог проекта: %s" % exc
                     )
-            project_id = root_dir.name
-        else:
-            project_id = self._make_project_id(name)
-            root_dir = self._project_dir(project_id)
-            root_dir.mkdir(parents=True, exist_ok=False)
 
-        self._register_project_root(root_dir.parent)
-        (root_dir / self.DRAFTS_DIR).mkdir(parents=True, exist_ok=True)
-        (root_dir / self.RESOLVED_DIR).mkdir(parents=True, exist_ok=True)
-        (root_dir / self.ASSETS_DIR).mkdir(parents=True, exist_ok=True)
+            prepared = True
+            root_added = self._register_project_root(root_dir.parent)
+            (root_dir / self.DRAFTS_DIR).mkdir(parents=True, exist_ok=True)
+            (root_dir / self.RESOLVED_DIR).mkdir(parents=True, exist_ok=True)
+            (root_dir / self.ASSETS_DIR).mkdir(parents=True, exist_ok=True)
 
-        project = Project(
-            id=project_id,
-            name=name,
-            root_dir=root_dir,
-            modules=list(modules or []),
-            save_mode=save_mode,
-            xml_patch_mode=xml_patch_mode,
-            created_at=self._timestamp(),
-            drafts={},
-        )
-        # Сначала фиксируем проект на диске: при ошибке записи активным
-        # он не становится.
-        self.repository.write_meta(project)
-        self.session.activate(project)
-        return project
+            project = Project(
+                id=project_id,
+                name=name,
+                root_dir=root_dir,
+                modules=list(modules or []),
+                save_mode=save_mode,
+                xml_patch_mode=xml_patch_mode,
+                created_at=self._timestamp(),
+                drafts={},
+            )
+            # Сначала фиксируем новый проект на диске. Старый активный
+            # проект не закрываем, пока новый не готов: ошибка записи
+            # оставляет пользователя в прежнем проекте.
+            self.repository.write_meta(project)
 
+            if previous is not None:
+                self.close()
+
+            self.invalidate_preview_cache()
+            self._resolved_draft_files.clear()
+            self._clear_overlay_cache()
+            try:
+                self.session.activate(project)
+            except Exception:
+                if previous is not None:
+                    try:
+                        self.load(previous.id)
+                    except Exception:
+                        log.exception(
+                            "Проект: не удалось восстановить %s после "
+                            "ошибки активации нового проекта",
+                            previous.id,
+                        )
+                raise
+            return project
+        except Exception:
+            if prepared:
+                self._cleanup_failed_create(root_dir, create_dir)
+            if root_added:
+                self._unregister_empty_root(root_dir.parent)
+            raise
+
+    @_serialized_lifecycle
     def load(self, project_id: str) -> Project:
+        # Отложенные удаления могли остаться от прошлого проекта: до
+        # чтения черновиков убираем их, чтобы не воскресить старый файл.
+        self._drain_pending_deletes()
         root_dir = self._project_dir(project_id)
         meta = self.repository.read_meta(root_dir)
         self.repository.validate_meta(meta)
@@ -359,27 +463,42 @@ class ProjectService:
         self.session.activate(project)
         return project
 
-    def list_projects(self) -> List[ProjectInfo]:
+    @_serialized_lifecycle
+    def list_projects(self, should_stop=None) -> List[ProjectInfo]:
+        """Список проектов; сканирование не пересекается с create/load/delete."""
         result: List[ProjectInfo] = []
         seen = set()
-
         entries = []
-        for root in self._project_roots:
-            if not root.is_dir():
-                continue
-            for entry in root.iterdir():
-                if not entry.is_dir():
+
+        def stopped():
+            return bool(should_stop is not None and should_stop())
+
+        with self._roots_lock:
+            # Снимок корней и обход каталогов — под одним lock. Чтение
+            # project.json идёт после него: список не держит roots-lock
+            # на время тяжёлого чтения.
+            for root in tuple(self._project_roots):
+                if stopped():
+                    return []
+                if not root.is_dir():
                     continue
-                try:
-                    key = entry.resolve()
-                except OSError:
-                    key = entry
-                if key in seen:
-                    continue
-                seen.add(key)
-                entries.append(entry)
+                for entry in root.iterdir():
+                    if stopped():
+                        return []
+                    if not entry.is_dir():
+                        continue
+                    try:
+                        key = entry.resolve()
+                    except OSError:
+                        key = entry
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    entries.append(entry)
 
         for entry in sorted(entries, key=lambda item: str(item).lower()):
+            if stopped():
+                return []
             try:
                 meta = self.repository.read_meta(entry)
             except ProjectError:
@@ -426,8 +545,10 @@ class ProjectService:
 
         return result
 
+    @_serialized_lifecycle
     def close(self) -> None:
         if self.active is None:
+            self._drain_pending_deletes()
             self.invalidate_preview_cache()
             self._clear_overlay_cache()
             return
@@ -615,19 +736,30 @@ class ProjectService:
                 result.append(normalized)
         return result
 
-    def delete_active_project(self) -> bool:
+    @_serialized_lifecycle
+    def delete_active_project(self, expected_project=None) -> bool:
         """Удалить активный проект со всеми черновиками.
 
         Это разрушительная операция: проект не сохраняется и не переносится
         в корзину. Каталог удаляется только если он находится внутри
-        хранилища проектов.
+        хранилища проектов. ``expected_project`` не даёт фоновой задаче
+        удалить уже сменившийся проект.
         """
         project = self._require_active()
+        if (
+            expected_project is not None
+            and project is not expected_project
+        ):
+            raise ProjectError(
+                "Активный проект изменился: удаление отменено"
+            )
         root = Path(project.root_dir)
         target = root.resolve()
 
         inside = False
-        for allowed in self._project_roots:
+        with self._roots_lock:
+            roots = tuple(self._project_roots)
+        for allowed in roots:
             allowed_path = allowed.resolve()
             if target == allowed_path:
                 continue
@@ -653,18 +785,24 @@ class ProjectService:
         self._clear_overlay_cache()
         self.invalidate_autosave()
 
-        if not target.exists():
+        # Удаление каталога не должно пересечься с фоновой записью
+        # черновика. autosave проверяет эпоху под этим же lock, поэтому
+        # после invalidation старый снимок уже не запишется.
+        with self._write_lock:
+            if not target.exists():
+                self.session.deactivate()
+                self._resolved_draft_files.clear()
+                return True
+
+            try:
+                shutil.rmtree(str(target))
+            except OSError as exc:
+                raise ProjectError(
+                    "Не удалось удалить проект: %s" % exc
+                )
+
             self.session.deactivate()
             self._resolved_draft_files.clear()
-            return True
-
-        try:
-            shutil.rmtree(str(target))
-        except OSError as exc:
-            raise ProjectError("Не удалось удалить проект: %s" % exc)
-
-        self.session.deactivate()
-        self._resolved_draft_files.clear()
         return True
 
     # -------------------------------------------------- черновики
@@ -698,6 +836,9 @@ class ProjectService:
         new_text = str(text or "")
 
         if draft is None:
+            self._cancel_deferred_delete_locked(
+                self.draft_store.text_target(project.root_dir, path)
+            )
             if original_text is not None:
                 original = str(original_text)
             elif path.is_file():
@@ -791,10 +932,9 @@ class ProjectService:
         with self._write_lock:
             with self._state_lock:
                 draft = self.get_draft(path)
-                if (
-                    draft is not None
-                    and int(draft.revision) != int(revision)
-                ):
+                # Черновик удалён или изменён после подготовки снимка:
+                # не воскрешаем его старым текстом.
+                if draft is None or int(draft.revision) != int(revision):
                     return False
                 self.draft_store.write_payload(target, payload)
                 return True
@@ -815,6 +955,9 @@ class ProjectService:
         """Вернуть снимок черновика (откат транзакции)."""
         project = self._require_active()
         with self._state_lock:
+            self._cancel_deferred_delete_locked(
+                self.draft_store.text_target(project.root_dir, draft.path)
+            )
             project.drafts[self.path_key(draft.path)] = draft
             self._clear_overlay_cache()
         self._invalidate_preview_cache(draft.path)
@@ -837,7 +980,28 @@ class ProjectService:
         защищает от записи старого снимка после close/flush или смены
         проекта. ``should_stop`` — кооперативная отмена.
         """
+        try:
+            return self._autosave_pass(
+                expected_project=expected_project,
+                should_stop=should_stop,
+            )
+        finally:
+            # Удаления, отложенные из UI, разбираются здесь: write-lock
+            # уже свободен или освободится сразу после прохода.
+            try:
+                self._drain_pending_deletes()
+            except Exception:
+                log.exception(
+                    "Проект: не удалось убрать отложенные файлы черновиков"
+                )
+
+    def _autosave_pass(
+        self,
+        expected_project=None,
+        should_stop=None,
+    ) -> List[SavedDraft]:
         saved: List[SavedDraft] = []
+        self._drain_pending_deletes()
 
         # Снимок списков — под state-lock. Сама запись идёт под
         # write-lock, чтобы не держать блокировку состояния на время
@@ -999,8 +1163,63 @@ class ProjectService:
             and self.active is project
         )
 
+    def _queue_deferred_delete(self, target) -> None:
+        key = self.path_key(target)
+        with self._state_lock:
+            self._pending_deletes[key] = Path(target)
+
+    def _cancel_deferred_delete_locked(self, target) -> None:
+        # Вызывается под state-lock: новый черновик по тому же пути
+        # отменяет отложенное удаление старого файла.
+        self._pending_deletes.pop(self.path_key(target), None)
+
+    def _remove_or_defer(self, mutate) -> bool:
+        """Удалить черновик сейчас или атомарно отложить удаление.
+
+        ``mutate`` вызывается под ``state-lock``: он убирает черновик из
+        проекта и возвращает target либо ``None``. Если write-lock занят,
+        target попадает в очередь до отпускания state-lock. Поэтому
+        параллельный ``update_draft`` либо видит очередь и отменяет её,
+        либо выполняется до remove и сам становится объектом удаления —
+        окна, где новый черновик остаётся без защиты, нет.
+        """
+        if self._write_lock.acquire(blocking=False):
+            try:
+                with self._state_lock:
+                    target = mutate()
+                if target is None:
+                    return False
+                self.draft_store.delete_target(target)
+                return True
+            finally:
+                self._write_lock.release()
+
+        with self._state_lock:
+            target = mutate()
+            if target is None:
+                return False
+            self._pending_deletes[self.path_key(target)] = Path(target)
+        return True
+
+    def _drain_pending_deletes(self) -> None:
+        """Убрать отложенные файлы под write-lock (фоновый поток)."""
+        while True:
+            with self._write_lock:
+                with self._state_lock:
+                    if not self._pending_deletes:
+                        return
+                    targets = list(self._pending_deletes.values())
+                    self._pending_deletes.clear()
+                for target in targets:
+                    self.draft_store.delete_target(target)
+
+    def has_pending_cleanup(self) -> bool:
+        with self._state_lock:
+            return bool(self._pending_deletes)
+
     def flush(self) -> List[SavedDraft]:
         if self.active is None:
+            self._drain_pending_deletes()
             return []
         return self.autosave()
 
@@ -1020,16 +1239,19 @@ class ProjectService:
     def remove_draft(self, path) -> bool:
         project = self._require_active()
         key = self.path_key(path)
-        with self._write_lock:
-            with self._state_lock:
-                if self.active is not project:
-                    return False
-                draft = project.drafts.pop(key, None)
-                if draft is None:
-                    return False
-                self.invalidate_autosave()
-                self._clear_overlay_cache()
-            self.draft_store.delete_text(project.root_dir, path)
+
+        def mutate():
+            if self.active is not project:
+                return None
+            draft = project.drafts.pop(key, None)
+            if draft is None:
+                return None
+            self.invalidate_autosave()
+            self._clear_overlay_cache()
+            return self.draft_store.text_target(project.root_dir, path)
+
+        if not self._remove_or_defer(mutate):
+            return False
         self._invalidate_preview_cache(path)
         return True
 
@@ -1081,6 +1303,9 @@ class ProjectService:
         payload = bytes(data or b"")
 
         if draft is None:
+            self._cancel_deferred_delete_locked(
+                self.draft_store.asset_target(project.root_dir, path)
+            )
             if path.is_file():
                 try:
                     original = path.read_bytes()
@@ -1160,15 +1385,18 @@ class ProjectService:
     def remove_asset_draft(self, path) -> bool:
         project = self._require_active()
         key = self.path_key(path)
-        with self._write_lock:
-            with self._state_lock:
-                if self.active is not project:
-                    return False
-                draft = project.assets.pop(key, None)
-                if draft is None:
-                    return False
-                self.invalidate_autosave()
-            self.draft_store.delete_asset(project.root_dir, path)
+
+        def mutate():
+            if self.active is not project:
+                return None
+            draft = project.assets.pop(key, None)
+            if draft is None:
+                return None
+            self.invalidate_autosave()
+            return self.draft_store.asset_target(project.root_dir, path)
+
+        if not self._remove_or_defer(mutate):
+            return False
         self._invalidate_preview_cache(path)
         return True
 
@@ -1236,6 +1464,13 @@ class ProjectService:
                     revision=1,
                     updated_at=time.time(),
                 )
+                self._cancel_deferred_delete_locked(
+                    self.draft_store.resolved_target(
+                        project.root_dir,
+                        draft,
+                        existing=self._resolved_draft_files.get(key),
+                    )
+                )
                 project.resolved_drafts[key] = draft
             else:
                 draft.current_text = current_text
@@ -1300,23 +1535,24 @@ class ProjectService:
     def remove_resolved_draft(self, tab_id) -> bool:
         project = self._require_active()
         key = str(tab_id)
-        with self._write_lock:
-            with self._state_lock:
-                if self.active is not project:
-                    return False
-                draft = project.resolved_drafts.pop(key, None)
-                if draft is None:
-                    return False
-                self.invalidate_autosave()
-                self._clear_overlay_cache()
-                target = self._resolved_draft_files.pop(key, None)
+
+        def mutate():
+            if self.active is not project:
+                return None
+            draft = project.resolved_drafts.pop(key, None)
+            if draft is None:
+                return None
+            self.invalidate_autosave()
+            self._clear_overlay_cache()
+            target = self._resolved_draft_files.pop(key, None)
             if target is None:
                 target = self.draft_store.resolved_target(
                     project.root_dir,
                     draft,
                 )
-            self.draft_store.delete_resolved(target)
-        return True
+            return target
+
+        return self._remove_or_defer(mutate)
 
     def changed_resolved_drafts(self) -> List[ProjectResolvedDraft]:
         with self._state_lock:

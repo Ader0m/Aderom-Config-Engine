@@ -3,6 +3,7 @@
 
 from .api import UiApi
 from .files import FileOpenHandler, FileReader
+from .windows import DockSpec, TabSpec, WindowSpec
 from .hints import (
     KIND_COLOR,
     KIND_DIRECTIVE,
@@ -34,6 +35,9 @@ from .hints import (
 
 __all__ = [
     "UiApi",
+    "WindowSpec",
+    "DockSpec",
+    "TabSpec",
     "FileOpenHandler",
     "FileReader",
     "HintContext",

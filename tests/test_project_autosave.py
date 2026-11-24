@@ -185,38 +185,188 @@ class AutosaveProjectBindingTest(unittest.TestCase):
         self.assertFalse(second_target.is_file())
         self.assertIsNone(self.service.get_draft(second))
 
-    def test_remove_does_not_touch_closed_project(self):
-        import threading
-
+    def test_remove_does_not_touch_other_project(self):
         old = self.service.create("Old")
         source = self._dirty(old.root_dir, "a.ltx")
-        ready = threading.Event()
         original_key = self.service.path_key
+        switched = [False]
 
         def key(path):
-            ready.set()
+            if not switched[0]:
+                # Смена проекта между _require_active() и state-lock.
+                switched[0] = True
+                self.service.create("New")
             return original_key(path)
 
         self.service.path_key = key
         self.addCleanup(delattr, self.service, "path_key")
-        result = {}
 
-        def worker():
-            result["removed"] = self.service.remove_draft(source)
+        self.assertFalse(self.service.remove_draft(source))
+        self.assertIsNotNone(old.draft(source))
 
-        # Держим write-lock, пока worker ждёт его, и меняем проект.
+    def _remove_while_write_lock_held(self, callback):
+        import threading
+
         self.service._write_lock.acquire()
         try:
+            result = {}
+
+            def worker():
+                result["removed"] = callback()
+
             thread = threading.Thread(target=worker)
             thread.start()
-            self.assertTrue(ready.wait(timeout=5))
-            self.service.create("New")
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+            self.assertTrue(result["removed"])
         finally:
             self.service._write_lock.release()
 
-        thread.join(timeout=10)
-        self.assertFalse(result["removed"])
-        self.assertIsNotNone(old.draft(source))
+    def test_remove_drafts_does_not_wait_for_write_lock(self):
+        project = self.service.create("NoWait")
+        source = self._dirty(project.root_dir, "a.ltx")
+        asset = project.root_dir / "sounds" / "b.ogg"
+        asset.parent.mkdir(parents=True)
+        self.service.update_asset_draft(asset, b"OGG")
+        root = project.root_dir / "configs"
+        root.mkdir(parents=True, exist_ok=True)
+        self.service.update_resolved_draft(
+            "tab",
+            root,
+            "ROOT",
+            "[a]\nx = 1\n",
+            "[a]\nx = 2\n",
+        )
+        self.service.autosave()
+
+        text_target = self.service.draft_store.text_target(
+            project.root_dir,
+            source,
+        )
+        asset_target = self.service.draft_store.asset_target(
+            project.root_dir,
+            asset,
+        )
+        resolved_target = self.service.draft_store.resolved_target(
+            project.root_dir,
+            self.service.get_resolved_draft("tab"),
+        )
+        for target in (text_target, asset_target, resolved_target):
+            self.assertTrue(target.is_file())
+
+        for callback in (
+            lambda: self.service.remove_draft(source),
+            lambda: self.service.remove_asset_draft(asset),
+            lambda: self.service.remove_resolved_draft("tab"),
+        ):
+            with self.subTest(callback=callback):
+                self._remove_while_write_lock_held(callback)
+
+        # Удаления отложены, а не потеряны: flush разбирает очередь.
+        self.service.flush()
+        for target in (text_target, asset_target, resolved_target):
+            self.assertFalse(target.is_file())
+
+    def test_staged_write_does_not_resurrect_removed_draft(self):
+        project = self.service.create("Staged")
+        source = project.root_dir / "configs" / "a.ltx"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("[a]\nx = 0\n", encoding="cp1251")
+        target, payload, revision, _saved_at = (
+            self.service.stage_text_draft(source, "[a]\nx = 1\n")
+        )
+
+        self.assertTrue(self.service.remove_draft(source))
+        self.assertFalse(
+            self.service.write_staged_draft(
+                source,
+                target,
+                payload,
+                revision,
+            )
+        )
+        self.assertFalse(target.is_file())
+
+    def test_concurrent_update_after_remove_keeps_fresh_draft(self):
+        import threading
+        import time
+
+        project = self.service.create("Concurrent")
+        source = self._dirty(project.root_dir, "a.ltx")
+        self.service.autosave()
+        target = self.service.draft_store.text_target(
+            project.root_dir,
+            source,
+        )
+        self.assertTrue(target.is_file())
+
+        removed = {}
+        self.service._write_lock.acquire()
+        try:
+            def remove_worker():
+                removed["value"] = self.service.remove_draft(source)
+
+            remove_thread = threading.Thread(target=remove_worker)
+            remove_thread.start()
+            deadline = time.monotonic() + 2
+            while (
+                not self.service.has_pending_cleanup()
+                and remove_thread.is_alive()
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.01)
+            self.assertTrue(self.service.has_pending_cleanup())
+
+            def update_worker():
+                self.service.update_draft(source, "[a]\nx = 2\n")
+
+            update_thread = threading.Thread(target=update_worker)
+            update_thread.start()
+            update_thread.join(2)
+            self.assertFalse(update_thread.is_alive())
+            self.assertFalse(self.service.has_pending_cleanup())
+        finally:
+            self.service._write_lock.release()
+
+        remove_thread.join(2)
+        self.assertFalse(remove_thread.is_alive())
+        self.assertTrue(removed["value"])
+        self.service.autosave()
+        self.assertTrue(target.is_file())
+        self.assertEqual(self.service.get_text(source), "[a]\nx = 2\n")
+
+    def test_close_without_active_project_drains_pending_deletes(self):
+        target = self.root / "stale-draft.json"
+        target.write_text("{}", encoding="utf-8")
+        self.service._queue_deferred_delete(target)
+        self.service.session.deactivate()
+
+        self.service.close()
+
+        self.assertFalse(target.is_file())
+        self.assertFalse(self.service.has_pending_cleanup())
+
+    def test_recreated_draft_cancels_deferred_delete(self):
+        project = self.service.create("Recreated")
+        source = self._dirty(project.root_dir, "a.ltx")
+        self.service.autosave()
+        target = self.service.draft_store.text_target(
+            project.root_dir,
+            source,
+        )
+        self.assertTrue(target.is_file())
+
+        self._remove_while_write_lock_held(
+            lambda: self.service.remove_draft(source)
+        )
+        self.assertTrue(self.service.has_pending_cleanup())
+
+        # Тот же путь снова стал черновиком: отложенное удаление старого
+        # файла больше не должно выполняться.
+        self.service.update_draft(source, "[a]\nx = 2\n")
+        self.assertFalse(self.service.has_pending_cleanup())
+        self.service._drain_pending_deletes()
+        self.assertTrue(target.is_file())
 
 
 if __name__ == "__main__":

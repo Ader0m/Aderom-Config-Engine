@@ -143,6 +143,37 @@ class OggEditorTab(QWidget):
             return format_editor_text(self._comments)
         return self._load_error
 
+    def _theme(self, token) -> str:
+        return self.ctx.ui.theme_color(token, "")
+
+    def refresh_theme(self):
+        muted = self._theme("text_muted")
+        self.path_label.setStyleSheet(
+            "padding: 4px; background-color: %s;"
+            % self._theme("bg_panel")
+        )
+        self.summary_label.setStyleSheet("color: %s;" % muted)
+        self.play_button.setStyleSheet(
+            "QPushButton {"
+            " background-color: %s;"
+            " color: %s;"
+            " font-weight: 600;"
+            " padding: 5px 14px;"
+            " border: none;"
+            " border-radius: 4px;"
+            "}"
+            "QPushButton:disabled { background-color: %s; }"
+            % (
+                self._theme("accent_green"),
+                self._theme("text_bright"),
+                muted,
+            )
+        )
+        self.hint_label.setStyleSheet("color: %s;" % muted)
+        self.status_label.setStyleSheet("color: %s;" % muted)
+        # Только перекраска: не перечитываем поток при смене темы.
+        self._apply_metadata_theme()
+
     # ------------------------------------------------------------ UI
     def _build_ui(self):
         layout = QVBoxLayout(self)
@@ -152,12 +183,15 @@ class OggEditorTab(QWidget):
         self.path_label = QLabel(str(self.path))
         self.path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.path_label.setStyleSheet(
-            "padding: 4px; background-color: palette(window);"
+            "padding: 4px; background-color: %s;"
+            % self._theme("bg_panel")
         )
         layout.addWidget(self.path_label)
 
         self.summary_label = QLabel("")
-        self.summary_label.setStyleSheet("color: palette(mid);")
+        self.summary_label.setStyleSheet(
+            "color: %s;" % self._theme("text_muted")
+        )
         layout.addWidget(self.summary_label)
 
         self.metadata_label = QLabel("")
@@ -178,22 +212,22 @@ class OggEditorTab(QWidget):
         controls = QHBoxLayout()
         controls.setSpacing(6)
 
-        # Собственный акцент модуля: платформа не обязана знать
-        # OGG-специфичные токены.
-        green = "#3FA34D"
+        # Цвет успешного действия берётся из общего токена темы.
+        green = self._theme("accent_green")
+        bright = self._theme("text_bright")
         self.play_button = QPushButton("▶  Слушать")
         self.play_button.setToolTip("Воспроизвести звук с начала")
         self.play_button.setStyleSheet(
             "QPushButton {"
             " background-color: %s;"
-            " color: white;"
+            " color: %s;"
             " font-weight: 600;"
             " padding: 5px 14px;"
             " border: none;"
             " border-radius: 4px;"
             "}"
-            "QPushButton:disabled { background-color: palette(mid); }"
-            % green
+            "QPushButton:disabled { background-color: %s; }"
+            % (green, bright, self._theme("text_muted"))
         )
         self.play_button.clicked.connect(self._play)
         controls.addWidget(self.play_button)
@@ -240,8 +274,9 @@ class OggEditorTab(QWidget):
             "Аудиоданные не перекодируются."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: palette(mid);")
+        hint.setStyleSheet("color: %s;" % self._theme("text_muted"))
         layout.addWidget(hint)
+        self.hint_label = hint
 
         self.editor = QPlainTextEdit()
         fixed = QFontDatabase.systemFont(QFontDatabase.FixedFont)
@@ -262,7 +297,9 @@ class OggEditorTab(QWidget):
         bottom.addWidget(self.save_button)
         bottom.addStretch(1)
         self.status_label = QLabel("")
-        self.status_label.setStyleSheet("color: palette(mid);")
+        self.status_label.setStyleSheet(
+            "color: %s;" % self._theme("text_muted")
+        )
         bottom.addWidget(self.status_label)
         layout.addLayout(bottom)
 
@@ -604,12 +641,19 @@ class OggEditorTab(QWidget):
         self.metadata_label.setToolTip(
             "CRC: %s" % ("OK" if info.crc_ok else self._crc_error)
         )
-        if not info.crc_ok:
+        self._apply_metadata_theme()
+
+    def _apply_metadata_theme(self):
+        info = self._stream_info
+        if info is not None and not info.crc_ok:
             self.metadata_label.setStyleSheet(
-                "color: #F14C4C; font-weight: 600;"
+                "color: %s; font-weight: 600;"
+                % self._theme("accent_red")
             )
         else:
-            self.metadata_label.setStyleSheet("color: palette(mid);")
+            self.metadata_label.setStyleSheet(
+                "color: %s;" % self._theme("text_muted")
+            )
 
     def _sync_game_type_from_text(self):
         if self._syncing_type or not hasattr(self, "sound_type_combo"):

@@ -1,16 +1,19 @@
 # -*- coding: utf-8 -*-
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from tests.support import SRC  # noqa: F401
 
 from sdk.contracts import FileOpened, FileOpenFailed, TreeReady
-from sdk import ForestRef
+from sdk import FileOpenHandler, ForestRef
 from sdk.features.projects import ProjectSetting, ProjectSettingChoice
 from sdk.contracts.events import Events
 from ui.bus import EventBus
+from ui.operations import DONE
 from ui.platform_api import PlatformApi
 from app.projects import PreviewItem, ProjectService
 
@@ -67,7 +70,13 @@ class FakeEditor:
     def get_tab(self, tab_id):
         return self.tabs.get(tab_id)
 
-    def set_tab_dirty(self, tab_id, dirty):
+    def owner_of(self, tab_id):
+        return ""
+
+    def can_manage_tab(self, tab_id, owner=None):
+        return True
+
+    def set_tab_dirty(self, tab_id, dirty, owner=None):
         self.dirty[tab_id] = bool(dirty)
 
     def mark_tab_clean(self, tab_id):
@@ -93,7 +102,7 @@ class FakeEditor:
         self.busy = bool(busy)
         self.calls.append(("busy", bool(busy)))
 
-    def set_tab_busy(self, tab_id, busy):
+    def set_tab_busy(self, tab_id, busy, owner=None):
         if busy:
             self.tab_busy.add(str(tab_id))
         else:
@@ -152,7 +161,49 @@ class SilentHandler:
         return True
 
 
+class RecordingHandler(FileOpenHandler):
+    """Запоминает вызовы и умеет открывать только в своих контекстах."""
+
+    def __init__(self, contexts=("view",)):
+        self.contexts = tuple(contexts)
+        self.calls = []
+
+    def can_open(self, path):
+        return True
+
+    def open(self, path, api):
+        self.calls.append(Path(path))
+        return True
+
+
 class PlatformApiTest(unittest.TestCase):
+    def test_request_open_file_passes_context_to_router(self):
+        events = FakeEvents()
+        commands = FakeCommands()
+        api = PlatformApi(events, commands, None, None, None)
+        view = RecordingHandler(contexts=("view",))
+        default = RecordingHandler()
+        api.router.register(view, owner="mod_a")
+        api.router.set_default(default)
+
+        self.assertTrue(
+            api.request_open_file(Path("a.ltx"), context="view")
+        )
+        self.assertEqual(view.calls, [Path("a.ltx")])
+        self.assertEqual(default.calls, [])
+
+        self.assertTrue(
+            api.request_open_file(Path("a.ltx"), context="edit")
+        )
+        self.assertEqual(view.calls, [Path("a.ltx")])
+        self.assertEqual(default.calls, [Path("a.ltx")])
+
+    def test_request_open_file_rejects_unknown_context(self):
+        api = PlatformApi(FakeEvents(), FakeCommands(), None, None, None)
+        self.assertFalse(
+            api.request_open_file(Path("a.ltx"), context="unknown")
+        )
+
     def test_file_opened_uses_tab_id_not_current_widget(self):
         events = FakeEvents()
         commands = FakeCommands()
@@ -186,6 +237,70 @@ class PlatformApiTest(unittest.TestCase):
 
         self.assertEqual(api.window.editor.widget.lines, [42])
         self.assertEqual(api._pending_file_actions, {})
+
+    def test_sync_prebuild_operation_updates_registry(self):
+        status = {
+            "state": "running",
+            "done": 1,
+            "total": 4,
+            "error": None,
+        }
+        stopped = []
+        services = SimpleNamespace(
+            prebuild_status=lambda: status,
+            stop_prebuild=lambda: stopped.append(True),
+        )
+        api = PlatformApi(
+            FakeEvents(),
+            FakeCommands(),
+            None,
+            services,
+            None,
+        )
+
+        api.sync_prebuild_operation()
+        snapshot = api.operation_snapshot("vfs.prebuild")
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot.state, "running")
+        self.assertEqual((snapshot.done, snapshot.total), (1, 4))
+
+        self.assertTrue(api.cancel_operation("vfs.prebuild"))
+        self.assertEqual(stopped, [True])
+
+        status.update(state="done", done=4)
+        api.sync_prebuild_operation()
+        self.assertEqual(
+            api.operation_snapshot("vfs.prebuild").state,
+            "done",
+        )
+
+    def test_rejected_show_text_does_not_claim_request_id(self):
+        events = FakeEvents()
+        commands = FakeCommands()
+        api = PlatformApi(events, commands, None, None, None)
+        api.window = FakeWindow()
+        api.window.editor.can_manage_tab = (
+            lambda tab_id, owner=None: owner != "mod_x"
+        )
+        path = Path("a.ltx")
+        api._queue_file_action(path, "line", 7)
+
+        with patch.object(
+            api,
+            "_resolve_file_request_id",
+            wraps=api._resolve_file_request_id,
+        ) as resolver:
+            self.assertFalse(
+                api.show_text(
+                    "[foreign]\n",
+                    "Foreign",
+                    source_path=path,
+                    owner="mod_x",
+                )
+            )
+            resolver.assert_not_called()
+
+        self.assertEqual(len(api._pending_file_actions), 1)
 
     def test_open_raw_at_line_bypasses_module_handlers(self):
         events = FakeEvents()
@@ -1018,7 +1133,7 @@ class _InlineTasks:
     def __init__(self):
         self.count = 0
 
-    def run(self, fn, on_done=None, on_log=None, owner=None):
+    def run(self, fn, on_done=None, on_log=None, owner=None, **kwargs):
         self.count += 1
         try:
             result = fn(lambda _message: None)
@@ -1035,14 +1150,21 @@ class _DeferredTasks:
     def __init__(self):
         self.calls = []
         self.cancelled = []
+        self.cancelled_operations = []
+        self.last_kwargs = {}
 
-    def run(self, fn, on_done=None, on_log=None, owner=None):
+    def run(self, fn, on_done=None, on_log=None, owner=None, **kwargs):
         self.calls.append((fn, on_done))
+        self.last_kwargs = dict(kwargs)
         return object()
 
     def cancel_owner(self, owner):
         self.cancelled.append(str(owner))
         return 1
+
+    def cancel_operation(self, key):
+        self.cancelled_operations.append(str(key))
+        return True
 
     def wait_owner(self, owner, timeout_ms=5000):
         return True
@@ -1053,6 +1175,142 @@ class ProjectAutosaveTest(unittest.TestCase):
         api = PlatformApi(FakeEvents(), FakeCommands(), tasks, None, None)
         api.window = FakeWindow()
         return api
+
+    def test_create_project_waits_for_vfs_rebuild(self):
+        with tempfile.TemporaryDirectory() as d:
+            tasks = _DeferredTasks()
+            api = self._api(tasks)
+            # Старый forest уже есть, но идёт пересборка: dependency
+            # всё равно обязательна.
+            api._forest = object()
+            api.operations.upsert_external(
+                "vfs.rebuild",
+                owner="<platform>",
+                title="VFS",
+                state="running",
+            )
+
+            class _Dialog:
+                def __init__(self, *_args, **_kwargs):
+                    pass
+
+                def exec_(self):
+                    return True
+
+                def project_name(self):
+                    return "new_project"
+
+                def project_directory(self):
+                    return ""
+
+                def save_mode(self):
+                    return "root"
+
+                def xml_patch_mode(self):
+                    return "xml"
+
+                def module_setting_values(self):
+                    return {}
+
+            with patch(
+                "ui.platform.project_controller.ProjectCreateDialog",
+                _Dialog,
+            ):
+                api.create_project()
+
+            self.assertEqual(len(tasks.calls), 1)
+            depends_on = tasks.last_kwargs.get("depends_on")
+            if callable(depends_on):
+                depends_on = depends_on()
+            self.assertEqual(depends_on, ("vfs.rebuild",))
+            self.assertEqual(
+                tasks.last_kwargs.get("operation_key"),
+                "project.create",
+            )
+            self.assertNotIn(("busy", True), api.window.editor.calls)
+
+    def test_load_project_uses_dependency_provider(self):
+        with tempfile.TemporaryDirectory() as d:
+            tasks = _DeferredTasks()
+            api = self._api(tasks)
+            project = api.project.create("existing")
+            api._forest = object()
+            api.operations.upsert_external(
+                "vfs.rebuild",
+                owner="<platform>",
+                title="VFS",
+                state="running",
+            )
+
+            class _Dialog:
+                def __init__(self, *_args, **_kwargs):
+                    pass
+
+                def exec_(self):
+                    return True
+
+                def selected_id(self):
+                    return project.id
+
+            with patch(
+                "ui.platform.project_controller.ProjectLoadDialog",
+                _Dialog,
+            ):
+                api.load_project()
+                self.assertEqual(
+                    tasks.last_kwargs.get("operation_key"),
+                    "project.list",
+                )
+                work, on_done = tasks.calls[-1]
+                projects = work(lambda _message: None)
+                on_done(projects, None)
+
+            self.assertEqual(len(tasks.calls), 2)
+            depends_on = tasks.last_kwargs.get("depends_on")
+            self.assertTrue(callable(depends_on))
+            self.assertEqual(depends_on(), ("vfs.rebuild",))
+            self.assertEqual(
+                tasks.last_kwargs.get("operation_key"),
+                "project.load",
+            )
+
+    def test_load_project_scans_off_ui_thread(self):
+        with tempfile.TemporaryDirectory() as d:
+            tasks = _DeferredTasks()
+            api = self._api(tasks)
+            api._forest = object()
+            calls = []
+
+            def list_projects(should_stop=None):
+                calls.append("list")
+                return []
+
+            api.project.list_projects = list_projects
+            api.load_project()
+
+            self.assertEqual(calls, [])
+            work, on_done = tasks.calls[-1]
+            work(lambda _message: None)
+            self.assertEqual(calls, ["list"])
+
+    def test_create_project_single_flight(self):
+        with tempfile.TemporaryDirectory() as d:
+            tasks = _DeferredTasks()
+            api = self._api(tasks)
+            api.operations.upsert_external(
+                "project.create",
+                owner="<platform>",
+                title="Create",
+                state="running",
+            )
+
+            with patch(
+                "ui.platform.project_controller.ProjectCreateDialog",
+            ) as dialog_type:
+                api.create_project()
+
+            dialog_type.assert_not_called()
+            self.assertEqual(tasks.calls, [])
 
     def _dirty_project(self, api, root):
         api.project.create("Auto")
@@ -1190,11 +1448,161 @@ class ProjectAutosaveTest(unittest.TestCase):
 
             api.autosave_project()
             before = api.project._autosave_epoch
-            api.on_app_close()
+            self.assertFalse(api.on_app_close())
 
             self.assertGreater(api.project._autosave_epoch, before)
             self.assertFalse(api._autosave_pending)
+            # Сохранение выполняется в задаче, а не в UI-потоке.
+            self.assertTrue(api.project.get_draft(source).is_dirty)
+
+            work, on_done = tasks.calls[-1]
+            work(lambda _message: None)
+            on_done([], None)
             self.assertFalse(api.project.get_draft(source).is_dirty)
+
+    def test_app_close_does_not_flush_in_ui_thread(self):
+        with tempfile.TemporaryDirectory() as d:
+            tasks = _DeferredTasks()
+            api = self._api(tasks)
+            source = self._dirty_project(api, d)
+
+            self.assertFalse(api.on_app_close())
+            self.assertTrue(api.project.get_draft(source).is_dirty)
+            self.assertTrue(api._close_flush_running)
+            self.assertEqual(
+                tasks.last_kwargs.get("operation_key"),
+                "project.close:%s" % api.project.active.id,
+            )
+
+            work, on_done = tasks.calls[-1]
+            work(lambda _message: None)
+            on_done([], None)
+
+            self.assertFalse(api._close_flush_running)
+            self.assertFalse(api.project.get_draft(source).is_dirty)
+            self.assertTrue(api.on_app_close())
+
+    def test_app_close_drains_cleanup_without_active_project(self):
+        with tempfile.TemporaryDirectory() as d:
+            tasks = _DeferredTasks()
+            api = self._api(tasks)
+            target = Path(d) / "stale-draft.json"
+            target.write_text("{}", encoding="utf-8")
+            api.project._queue_deferred_delete(target)
+
+            self.assertTrue(api.on_app_close())
+            self.assertFalse(target.exists())
+            self.assertFalse(api.project.has_pending_cleanup())
+
+    def test_app_close_waits_for_platform_project_create(self):
+        with tempfile.TemporaryDirectory() as d:
+            tasks = _DeferredTasks()
+            api = self._api(tasks)
+            project = api.project.create("Active")
+            snapshot = api.operations.upsert_external(
+                "project.create",
+                owner="<platform>",
+                title="Создание",
+                state="running",
+            )
+
+            self.assertFalse(api.on_app_close())
+            self.assertTrue(api._closing)
+            self.assertEqual(tasks.calls, [])
+            self.assertEqual(
+                tasks.cancelled_operations,
+                ["project.create"],
+            )
+
+            api.operations.finish(
+                replace(snapshot, state=DONE),
+                notify=False,
+            )
+            self.assertFalse(api.on_app_close())
+            self.assertEqual(
+                tasks.last_kwargs.get("operation_key"),
+                "project.close:%s" % project.id,
+            )
+
+    def test_app_close_suppresses_load_done_ui(self):
+        with tempfile.TemporaryDirectory() as d:
+            tasks = _DeferredTasks()
+            api = self._api(tasks)
+            api._forest = object()
+            first = api.project.create("first")
+            api.project.create("second")
+
+            class _Dialog:
+                def __init__(self, *_args, **_kwargs):
+                    pass
+
+                def exec_(self):
+                    return True
+
+                def selected_id(self):
+                    return first.id
+
+            activated = []
+            errors = []
+            api._activate_project_state = lambda *_args: activated.append(
+                _args
+            )
+            api.show_error = errors.append
+
+            with patch(
+                "ui.platform.project_controller.ProjectLoadDialog",
+                _Dialog,
+            ):
+                api.load_project()
+                list_work, list_done = tasks.calls[-1]
+                projects = list_work(lambda _message: None)
+                list_done(projects, None)
+
+                load_work, load_done = tasks.calls[-1]
+                loaded = load_work(lambda _message: None)
+                api._closing = True
+                load_done(loaded, None)
+
+            self.assertEqual(activated, [])
+            self.assertEqual(errors, [])
+
+    def test_app_close_does_not_retry_failed_flush_forever(self):
+        with tempfile.TemporaryDirectory() as d:
+            tasks = _DeferredTasks()
+            api = self._api(tasks)
+            self._dirty_project(api, d)
+
+            self.assertFalse(api.on_app_close())
+            _work, on_done = tasks.calls[-1]
+            on_done(None, RuntimeError("disk full"))
+
+            # Ошибка сохранения не зацикливает закрытие: одна попытка,
+            # затем окно закрывается (как и до шага 6.9).
+            self.assertTrue(api.on_app_close())
+
+    def test_delete_project_runs_in_task(self):
+        with tempfile.TemporaryDirectory() as d:
+            tasks = _DeferredTasks()
+            api = self._api(tasks)
+            project = api.project.create("Delete")
+            root = project.root_dir
+            actions = []
+            api._after_project_deleted = lambda: actions.append("after")
+
+            self.assertTrue(api._delete_project())
+            self.assertTrue(root.is_dir())
+            self.assertEqual(
+                tasks.last_kwargs.get("operation_key"),
+                "project.delete:%s" % project.id,
+            )
+
+            work, on_done = tasks.calls[-1]
+            self.assertTrue(work(lambda _message: None))
+            on_done(True, None)
+
+            self.assertFalse(root.exists())
+            self.assertFalse(api.project.is_active)
+            self.assertEqual(actions, ["after"])
 
     def test_project_activation_cancels_autosave_owner(self):
         with tempfile.TemporaryDirectory() as d:

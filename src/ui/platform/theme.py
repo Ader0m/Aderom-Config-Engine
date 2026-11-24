@@ -1,29 +1,31 @@
 # -*- coding: utf-8 -*-
 """Тема оформления Aderom Config Engine (макет V2.1, JetBrains Darcula).
 
-ЕДИНСТВЕННЫЙ источник всех цветов и шрифтов приложения — палитра Palette.
-Из неё создаются:
+ЕДИНСТВЕННЫЙ источник всех цветов и шрифтов приложения — ThemeService.
+Из текущей палитры создаются:
   1) QSS (DARK_THEME) для обычных Qt-виджетов;
-  2) программные цвета QScintilla: ui/editor.py берёт значения из PALETTE
-     напрямую, т.к. QSS не управляет стилями лексера Scintilla;
+  2) программные цвета QScintilla: ui/editor.py берёт значения из текущей
+     палитры ThemeService напрямую, т.к. QSS не управляет стилями
+     лексера Scintilla;
   3) растровые стрелки ветвей дерева (ensure_branch_icons), т.к. QSS
      image: url() умеет ссылаться только на реальные файлы.
 
 Правила слоя темы:
-  - Никаких hex-литералов вне Palette (иконки рисуются цветом p.text).
+  - Никаких hex-литералов вне ui/platform/theme.py.
   - Размеры шрифтов в QSS указываются ТОЛЬКО в pt. Пиксельные размеры
     (font-size: 13px) дают QFont с pointSize() == -1; QScintilla передаёт
     pointSizeF() в Scintilla (SCI_STYLESETSIZEFRACTIONAL), и отрицательный
     размер превращает текст редактора в микроскопический (баг коммита 61fc3af).
   - Светлые «полосы» и бирюза в редакторе — штатные per-style дефолты
-    QsciLexerProperties (#E0F0F0 у Section, #007F7F у Comment); они
-    перебиваются только setFont/setColor/setPaper по всем стилям в editor.py.
+    QsciLexerProperties (Section/Comment); они перебиваются только
+    setFont/setColor/setPaper по всем стилям в editor.py.
 
 Совместимость: модуль по-прежнему экспортирует DARK_THEME (строку QSS с
 уже подставленными url иконок) и apply_theme(app); ensure_branch_icons()
 возвращает (closed, opened) как раньше.
 """
 
+import logging
 import os
 import tempfile
 from dataclasses import asdict, dataclass, replace
@@ -32,6 +34,8 @@ from typing import Optional
 
 from PyQt5.QtCore import QPoint, Qt
 from PyQt5.QtGui import QColor, QImage, QPainter, QPolygon, QPen
+
+log = logging.getLogger(__name__)
 
 
 # ======================================================================
@@ -63,6 +67,7 @@ class Palette:
     accent_teal: str = "#4EC9B0"    # INFO, активная вкладка нижней панели
     accent_amber: str = "#CCA700"   # WARN
     accent_red: str = "#F14C4C"     # ERROR
+    accent_green: str = "#3FA34D"   # успешные/новые изменения
 
     # ============ Выделение / hover ============
     selection: str = "#2E436E"
@@ -116,6 +121,13 @@ class Palette:
     ed_caret: str = "#BCBFBC"
     ed_caret_line: str = "#2A2D2E"
 
+    # ============ Служебные токены ============
+    tree_highlight: str = "#4F4F00"
+    override_tab_bg: str = "#C05A7A"
+    override_tab_bg_selected: str = "#D66B8B"
+    override_tab_text: str = "#FFE3EC"
+    override_tab_text_selected: str = "#FFFFFF"
+
     # ============ Шрифты (только pt!) ============
     ui_font_family: str = '"Segoe UI", "Inter", sans-serif'
     ui_font_size_pt: int = 10            # ~13px @ 96 DPI
@@ -125,7 +137,7 @@ class Palette:
     editor_font_size_pt: int = 10
 
 
-PALETTE = Palette()
+DEFAULT_PALETTE = Palette()
 
 
 # ======================================================================
@@ -180,7 +192,7 @@ def ensure_branch_icons(palette: Optional[Palette] = None):
     нет, поэтому стрелки генерируются рантаймом цветом основного текста
     палитры. Контракт сохранён: возвращает (closed, opened).
     """
-    p = palette if palette is not None else PALETTE
+    p = palette if palette is not None else DEFAULT_PALETTE
     os.makedirs(_BRANCH_DIR, exist_ok=True)
     closed = _draw_triangle(
         os.path.join(_BRANCH_DIR, "branch_closed.png"),
@@ -196,7 +208,7 @@ def ensure_branch_icons(palette: Optional[Palette] = None):
 
 def ensure_tab_close_icons(palette: Optional[Palette] = None):
     """Рисует крестик закрытия вкладки для состояний: normal, hover, pressed."""
-    p = palette if palette is not None else PALETTE
+    p = palette if palette is not None else DEFAULT_PALETTE
     os.makedirs(_BRANCH_DIR, exist_ok=True)
     
     normal = _draw_cross(
@@ -214,7 +226,7 @@ def ensure_tab_close_icons(palette: Optional[Palette] = None):
     return normal, hover, pressed
 
 # ======================================================================
-# QSS-шаблон (все значения — из Palette, все шрифты — в pt)
+# QSS-шаблон (все значения — из DEFAULT_PALETTE, все шрифты — в pt)
 # ======================================================================
 
 _QSS = Template("""
@@ -957,36 +969,95 @@ QMainWindow::separator:hover {
 # Сборка QSS и применение темы
 # ======================================================================
 
-def build_stylesheet(palette: Palette = PALETTE) -> str:
+def build_stylesheet(palette: Palette = DEFAULT_PALETTE) -> str:
     """Собирает QSS из палитры: цвета, шрифты и url иконок."""
     closed, opened = ensure_branch_icons(palette)
     tab_close, tab_close_hover, tab_close_pressed = ensure_tab_close_icons(palette)
-    
+
     mapping = asdict(palette)
     mapping["branch_closed_url"] = closed
     mapping["branch_open_url"] = opened
-    
+
     # Добавляем иконки крестика
     mapping["tab_close_url"] = tab_close
     mapping["tab_close_hover_url"] = tab_close_hover
     mapping["tab_close_pressed_url"] = tab_close_pressed
-    
+
     return _QSS.substitute(mapping)
+
+
+class ThemeService:
+    """Единственный источник текущей палитры и токенов темы."""
+
+    def __init__(self, palette: Optional[Palette] = None):
+        self._base = palette if palette is not None else DEFAULT_PALETTE
+        self._current = self._base
+        self._app = None
+        self._listeners = []
+
+    @property
+    def palette(self) -> Palette:
+        return self._current
+
+    def token(self, name, fallback=None):
+        return getattr(self._current, str(name), fallback)
+
+    def subscribe(self, callback):
+        if callable(callback) and callback not in self._listeners:
+            self._listeners.append(callback)
+        return callback
+
+    def unsubscribe(self, callback):
+        try:
+            self._listeners.remove(callback)
+        except ValueError:
+            return False
+        return True
+
+    def apply(self, app=None, palette: Optional[Palette] = None) -> Palette:
+        if app is not None:
+            self._app = app
+        if palette is not None:
+            self._base = palette
+            self._current = palette
+        if self._app is not None:
+            self._app.setStyleSheet(build_stylesheet(self._current))
+        for callback in tuple(self._listeners):
+            try:
+                callback(self._current)
+            except Exception:
+                log.exception("Ошибка подписчика темы")
+        return self._current
+
+    def set_override(self, enabled: bool) -> Palette:
+        if enabled:
+            self._current = replace(
+                self._base,
+                tab_bg=self._base.override_tab_bg,
+                tab_bg_selected=self._base.override_tab_bg_selected,
+                tab_text=self._base.override_tab_text,
+                tab_text_selected=self._base.override_tab_text_selected,
+            )
+        else:
+            self._current = self._base
+        return self.apply()
+
+
+_THEME_SERVICE = ThemeService()
+
+
+def theme_service() -> ThemeService:
+    return _THEME_SERVICE
 
 
 _DARK_THEME_CACHE: Optional[str] = None
 
 
 def _get_dark_theme() -> str:
-    """Лениво собирает и кэширует DARK_THEME.
-
-    Ленивость важна: ensure_branch_icons() рисует QImage/QPainter, что
-    безопасно делать после создания QApplication (т.е. в apply_theme),
-    а не на импорте модуля.
-    """
+    """Лениво собирает и кэширует DARK_THEME для обратной совместимости."""
     global _DARK_THEME_CACHE
     if _DARK_THEME_CACHE is None:
-        _DARK_THEME_CACHE = build_stylesheet(PALETTE)
+        _DARK_THEME_CACHE = build_stylesheet(DEFAULT_PALETTE)
     return _DARK_THEME_CACHE
 
 
@@ -997,41 +1068,20 @@ def __getattr__(name):  # PEP 562: модульный атрибут DARK_THEME 
 
 
 def apply_theme(app, palette: Optional[Palette] = None) -> Palette:
-    """Применяет тёмную тему V2.1 ко всему приложению PyQt5.
-
-    Возвращает применённую палитру. Для кастомной палитры QSS собирается
-    заново (иконки ветвей перерисовываются её цветом текста).
-    """
-    if palette is None:
-        app.setStyleSheet(_get_dark_theme())
-        return PALETTE
-    app.setStyleSheet(build_stylesheet(palette))
-    return palette
+    """Применить тему и запомнить палитру в ThemeService."""
+    return _THEME_SERVICE.apply(app, palette)
 
 
-# Розовые цвета опасного режима Override.
-OVERRIDE_PINK = "#C05A7A"
-OVERRIDE_PINK_SELECTED = "#D66B8B"
+# Розовые цвета опасного режима Override берутся из токенов палитры.
+OVERRIDE_PINK = DEFAULT_PALETTE.override_tab_bg
+OVERRIDE_PINK_SELECTED = DEFAULT_PALETTE.override_tab_bg_selected
 
 
 def apply_override_theme(app, enabled: bool) -> Palette:
-    """Включает/выключает розовые вкладки редактора в режиме Override.
-
-    Рамки и разделители не меняются. Возвращает применённую палитру.
-    """
-    if not enabled:
-        app.setStyleSheet(_get_dark_theme())
-        return PALETTE
-
-    palette = replace(
-        PALETTE,
-        tab_bg=OVERRIDE_PINK,
-        tab_bg_selected=OVERRIDE_PINK_SELECTED,
-        tab_text="#FFE3EC",
-        tab_text_selected="#FFFFFF",
-    )
-    app.setStyleSheet(build_stylesheet(palette))
-    return palette
+    """Включает/выключает розовые вкладки редактора в режиме Override."""
+    if app is not None:
+        _THEME_SERVICE._app = app
+    return _THEME_SERVICE.set_override(bool(enabled))
 
 
 def apply_window_caption(window, enabled: bool) -> None:

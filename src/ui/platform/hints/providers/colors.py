@@ -10,7 +10,7 @@ from sdk.ui.hints import (
     HintItem,
     HintResult,
 )
-from ui.hints.triggers import color_trigger
+from ui.platform.hints.triggers import color_trigger
 
 
 def _hex(rgba):

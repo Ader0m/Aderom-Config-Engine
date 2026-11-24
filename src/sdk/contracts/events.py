@@ -46,6 +46,8 @@ class Events:
     PROJECT_CHANGED = "ui.project_changed"
     # Изменены настройки активного проекта (payload — {key: value}).
     PROJECT_SETTINGS_CHANGED = "ui.project_settings_changed"
+    # Платформа применила другую палитру (payload — Palette).
+    UI_THEME_CHANGED = "ui.theme_changed"
     # Изменился живой resolved-документ (payload — ResolvedDocumentChange).
     RESOLVED_DOCUMENT_CHANGED = "ui.resolved_document_changed"
     # Запрошено открытие карточки предмета по секции (payload — ItemCardRequest).

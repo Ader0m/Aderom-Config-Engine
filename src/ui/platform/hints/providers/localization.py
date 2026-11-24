@@ -12,7 +12,7 @@ from sdk.ui.hints import (
     HintItem,
     HintResult,
 )
-from ui.hints.triggers import localization_trigger
+from ui.platform.hints.triggers import localization_trigger
 
 from .flags import LTX_HINTS_ENABLED
 

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """Лексеры редактора: LTX/DLTX, XML и Lua (.script).
 
-Цвета берутся только из :mod:`ui.theme` (PALETTE). QSS не управляет
-стилями Scintilla, поэтому все цвета назначаются программно.
+Цвета берутся только из :mod:`ui.platform.theme` (ThemeService). QSS не
+управляет стилями Scintilla, поэтому все цвета назначаются программно.
 
 Конструкции LTX/DLTX и соответствующие им цвета:
 
@@ -36,15 +36,19 @@ from PyQt5.Qsci import (
 )
 
 try:  # запуск с корня проекта (src в sys.path)
-    from ui.theme import PALETTE
+    from ui.platform.theme import theme_service
 except ImportError:  # запуск как пакета
-    from .theme import PALETTE
+    from .platform.theme import theme_service
+
+
+def _palette():
+    return theme_service().palette
 
 
 # ---------------------------------------------------------------- LTX styles
 # Единственный построчный разбор LTX/DLTX живёт в core. Здесь остаётся
 # только сопоставление токенов со стилями Scintilla и палитрой.
-from core.patching.ltx.syntax import (  # noqa: E402
+from app.lexing import (  # noqa: E402
     STYLE_ASSIGN,
     STYLE_COMMENT,
     STYLE_CONSTANT,
@@ -67,27 +71,32 @@ from core.patching.ltx.syntax import (  # noqa: E402
     tokenize_line,
 )
 
-_STYLE_COLORS = {
-    STYLE_DEFAULT: PALETTE.syn_default,
-    STYLE_COMMENT: PALETTE.syn_comment,
-    STYLE_DIRECTIVE: PALETTE.syn_include,
-    STYLE_SECTION: PALETTE.syn_section,
-    STYLE_SECTION_OVERRIDE: PALETTE.syn_override,
-    STYLE_SECTION_DELETE: PALETTE.syn_deleted,
-    STYLE_SECTION_SAFE: PALETTE.syn_safe,
-    STYLE_KEY: PALETTE.syn_key,
-    STYLE_KEY_DELETE: PALETTE.syn_deleted,
-    STYLE_KEY_INSERT: PALETTE.syn_list_add,
-    STYLE_KEY_REMOVE: PALETTE.syn_list_remove,
-    STYLE_ASSIGN: PALETTE.syn_assign,
-    STYLE_VALUE: PALETTE.syn_value,
-    STYLE_NUMBER: PALETTE.syn_number,
-    STYLE_CONSTANT: PALETTE.syn_constant,
-    STYLE_PARENT: PALETTE.syn_parent,
-    STYLE_PARENT_DELETE: PALETTE.syn_deleted,
-    STYLE_INCLUDE_PATH: PALETTE.syn_value,
-    STYLE_LIST_VALUE: PALETTE.syn_list_value,
+_STYLE_TOKENS = {
+    STYLE_DEFAULT: "syn_default",
+    STYLE_COMMENT: "syn_comment",
+    STYLE_DIRECTIVE: "syn_include",
+    STYLE_SECTION: "syn_section",
+    STYLE_SECTION_OVERRIDE: "syn_override",
+    STYLE_SECTION_DELETE: "syn_deleted",
+    STYLE_SECTION_SAFE: "syn_safe",
+    STYLE_KEY: "syn_key",
+    STYLE_KEY_DELETE: "syn_deleted",
+    STYLE_KEY_INSERT: "syn_list_add",
+    STYLE_KEY_REMOVE: "syn_list_remove",
+    STYLE_ASSIGN: "syn_assign",
+    STYLE_VALUE: "syn_value",
+    STYLE_NUMBER: "syn_number",
+    STYLE_CONSTANT: "syn_constant",
+    STYLE_PARENT: "syn_parent",
+    STYLE_PARENT_DELETE: "syn_deleted",
+    STYLE_INCLUDE_PATH: "syn_value",
+    STYLE_LIST_VALUE: "syn_list_value",
 }
+
+
+def _style_color(style):
+    token = _STYLE_TOKENS.get(style, "syn_default")
+    return getattr(_palette(), token, "")
 
 _BOLD_STYLES = {
     STYLE_DIRECTIVE,
@@ -119,13 +128,16 @@ class LtxLexer(QsciLexerCustom):
         self._total = 0
         self._full_pass = False
 
-        self.setDefaultColor(QColor(PALETTE.syn_default))
-        self.setDefaultPaper(QColor(PALETTE.bg_main))
+        self.setDefaultColor(QColor(_palette().syn_default))
+        self.setDefaultPaper(QColor(_palette().bg_main))
         self.setDefaultFont(self._font(STYLE_DEFAULT))
 
-        for style, color in _STYLE_COLORS.items():
-            self.setColor(QColor(color), style)
-            self.setPaper(QColor(PALETTE.bg_main), style)
+        for style, token in _STYLE_TOKENS.items():
+            self.setColor(
+                QColor(getattr(_palette(), token, "")),
+                style,
+            )
+            self.setPaper(QColor(_palette().bg_main), style)
             self.setFont(self._font(style), style)
 
     # -------------------------------------------------- QsciLexerCustom API
@@ -156,10 +168,10 @@ class LtxLexer(QsciLexerCustom):
         }.get(style, "")
 
     def defaultColor(self, style):
-        return QColor(_STYLE_COLORS.get(style, PALETTE.syn_default))
+        return QColor(_style_color(style))
 
     def defaultPaper(self, style):
-        return QColor(PALETTE.bg_main)
+        return QColor(_palette().bg_main)
 
     def defaultFont(self, style):
         return self._font(style)
@@ -267,7 +279,7 @@ class LtxLexer(QsciLexerCustom):
     # -------------------------------------------------- служебное
     @staticmethod
     def _font(style):
-        font = QFont(PALETTE.editor_font_family, PALETTE.editor_font_size_pt)
+        font = QFont(_palette().editor_font_family, _palette().editor_font_size_pt)
         if style in _BOLD_STYLES:
             font.setBold(True)
         return font
@@ -276,9 +288,9 @@ class LtxLexer(QsciLexerCustom):
 # ---------------------------------------------------------------- настройка
 def _base_lexer(lexer):
     """Общие настройки встроенного лексера: шрифт, фон, дефолтный цвет."""
-    font = QFont(PALETTE.editor_font_family, PALETTE.editor_font_size_pt)
-    paper = QColor(PALETTE.bg_main)
-    fg = QColor(PALETTE.syn_default)
+    font = QFont(_palette().editor_font_family, _palette().editor_font_size_pt)
+    paper = QColor(_palette().bg_main)
+    fg = QColor(_palette().syn_default)
 
     lexer.setDefaultFont(font)
     lexer.setDefaultColor(fg)
@@ -294,51 +306,51 @@ def _base_lexer(lexer):
 
 def _configure_xml(lexer):
     _base_lexer(lexer)
-    lexer.setColor(QColor(PALETTE.syn_section), QsciLexerXML.Tag)
-    lexer.setColor(QColor(PALETTE.syn_section), QsciLexerXML.XMLTagEnd)
-    lexer.setColor(QColor(PALETTE.syn_key), QsciLexerXML.Attribute)
+    lexer.setColor(QColor(_palette().syn_section), QsciLexerXML.Tag)
+    lexer.setColor(QColor(_palette().syn_section), QsciLexerXML.XMLTagEnd)
+    lexer.setColor(QColor(_palette().syn_key), QsciLexerXML.Attribute)
     lexer.setColor(
-        QColor(PALETTE.syn_value),
+        QColor(_palette().syn_value),
         QsciLexerXML.HTMLDoubleQuotedString,
     )
     lexer.setColor(
-        QColor(PALETTE.syn_value),
+        QColor(_palette().syn_value),
         QsciLexerXML.HTMLSingleQuotedString,
     )
-    lexer.setColor(QColor(PALETTE.syn_comment), QsciLexerXML.HTMLComment)
-    lexer.setColor(QColor(PALETTE.syn_comment), QsciLexerXML.CDATA)
-    lexer.setColor(QColor(PALETTE.syn_number), QsciLexerXML.HTMLNumber)
-    lexer.setColor(QColor(PALETTE.syn_constant), QsciLexerXML.Entity)
-    lexer.setColor(QColor(PALETTE.syn_directive), QsciLexerXML.SGMLCommand)
+    lexer.setColor(QColor(_palette().syn_comment), QsciLexerXML.HTMLComment)
+    lexer.setColor(QColor(_palette().syn_comment), QsciLexerXML.CDATA)
+    lexer.setColor(QColor(_palette().syn_number), QsciLexerXML.HTMLNumber)
+    lexer.setColor(QColor(_palette().syn_constant), QsciLexerXML.Entity)
+    lexer.setColor(QColor(_palette().syn_directive), QsciLexerXML.SGMLCommand)
     return lexer
 
 
 def _configure_lua(lexer):
     _base_lexer(lexer)
 
-    lexer.setColor(QColor(PALETTE.syn_comment), QsciLexerLua.Comment)
-    lexer.setColor(QColor(PALETTE.syn_comment), QsciLexerLua.LineComment)
-    lexer.setColor(QColor(PALETTE.syn_number), QsciLexerLua.Number)
-    lexer.setColor(QColor(PALETTE.syn_directive), QsciLexerLua.Keyword)
-    lexer.setColor(QColor(PALETTE.syn_directive), QsciLexerLua.KeywordSet5)
-    lexer.setColor(QColor(PALETTE.syn_directive), QsciLexerLua.KeywordSet6)
-    lexer.setColor(QColor(PALETTE.syn_directive), QsciLexerLua.KeywordSet7)
-    lexer.setColor(QColor(PALETTE.syn_directive), QsciLexerLua.KeywordSet8)
-    lexer.setColor(QColor(PALETTE.syn_value), QsciLexerLua.String)
-    lexer.setColor(QColor(PALETTE.syn_value), QsciLexerLua.LiteralString)
-    lexer.setColor(QColor(PALETTE.syn_value), QsciLexerLua.Character)
-    lexer.setColor(QColor(PALETTE.syn_deleted), QsciLexerLua.UnclosedString)
-    lexer.setColor(QColor(PALETTE.syn_assign), QsciLexerLua.Operator)
-    lexer.setColor(QColor(PALETTE.syn_key), QsciLexerLua.Identifier)
-    lexer.setColor(QColor(PALETTE.syn_directive), QsciLexerLua.Preprocessor)
-    lexer.setColor(QColor(PALETTE.syn_constant), QsciLexerLua.Label)
-    lexer.setColor(QColor(PALETTE.syn_section), QsciLexerLua.BasicFunctions)
+    lexer.setColor(QColor(_palette().syn_comment), QsciLexerLua.Comment)
+    lexer.setColor(QColor(_palette().syn_comment), QsciLexerLua.LineComment)
+    lexer.setColor(QColor(_palette().syn_number), QsciLexerLua.Number)
+    lexer.setColor(QColor(_palette().syn_directive), QsciLexerLua.Keyword)
+    lexer.setColor(QColor(_palette().syn_directive), QsciLexerLua.KeywordSet5)
+    lexer.setColor(QColor(_palette().syn_directive), QsciLexerLua.KeywordSet6)
+    lexer.setColor(QColor(_palette().syn_directive), QsciLexerLua.KeywordSet7)
+    lexer.setColor(QColor(_palette().syn_directive), QsciLexerLua.KeywordSet8)
+    lexer.setColor(QColor(_palette().syn_value), QsciLexerLua.String)
+    lexer.setColor(QColor(_palette().syn_value), QsciLexerLua.LiteralString)
+    lexer.setColor(QColor(_palette().syn_value), QsciLexerLua.Character)
+    lexer.setColor(QColor(_palette().syn_deleted), QsciLexerLua.UnclosedString)
+    lexer.setColor(QColor(_palette().syn_assign), QsciLexerLua.Operator)
+    lexer.setColor(QColor(_palette().syn_key), QsciLexerLua.Identifier)
+    lexer.setColor(QColor(_palette().syn_directive), QsciLexerLua.Preprocessor)
+    lexer.setColor(QColor(_palette().syn_constant), QsciLexerLua.Label)
+    lexer.setColor(QColor(_palette().syn_section), QsciLexerLua.BasicFunctions)
     lexer.setColor(
-        QColor(PALETTE.syn_section),
+        QColor(_palette().syn_section),
         QsciLexerLua.StringTableMathsFunctions,
     )
     lexer.setColor(
-        QColor(PALETTE.syn_section),
+        QColor(_palette().syn_section),
         QsciLexerLua.CoroutinesIOSystemFacilities,
     )
     return lexer

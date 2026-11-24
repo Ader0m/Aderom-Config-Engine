@@ -682,28 +682,18 @@ class ModuleLoader:
         cancel = getattr(tasks, "cancel_owner", None)
         if callable(cancel):
             try:
-                cancel()
+                active = cancel()
             except Exception:
+                active = 0
                 log(
                     "Модуль %s: ошибка отмены задач.\n%s"
                     % (entry.manifest.name, traceback.format_exc())
                 )
-        wait = getattr(tasks, "wait_owner", None)
-        if callable(wait):
-            try:
-                finished = wait(timeout_ms=5000)
-            except TypeError:
-                finished = wait()
-            except Exception:
+            if active:
                 log(
-                    "Модуль %s: ошибка ожидания задач.\n%s"
-                    % (entry.manifest.name, traceback.format_exc())
-                )
-                finished = True
-            if not finished:
-                log(
-                    "Модуль %s: фоновые задачи не завершились"
-                    % entry.manifest.name
+                    "Модуль %s: отменено фоновых задач: %d; deactivate "
+                    "не блокирует UI ожиданием callbacks"
+                    % (entry.manifest.name, int(active or 0))
                 )
 
     def _rollback(self, entry, ctx, log):

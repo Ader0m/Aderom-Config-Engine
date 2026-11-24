@@ -66,8 +66,8 @@ class LtxLexerTest(unittest.TestCase):
         self.assertIn((0, 8, lexers.STYLE_DIRECTIVE), tokens)
         self.assertIn((9, 30, lexers.STYLE_INCLUDE_PATH), tokens)
         self.assertEqual(
-            lexers._STYLE_COLORS[lexers.STYLE_DIRECTIVE],
-            lexers.PALETTE.syn_include,
+            lexers._style_color(lexers.STYLE_DIRECTIVE),
+            lexers._palette().syn_include,
         )
 
     def test_comment_inside_quotes_is_not_comment(self):

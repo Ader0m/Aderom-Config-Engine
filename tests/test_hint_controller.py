@@ -13,8 +13,9 @@ from PyQt5.QtTest import QTest
 
 from core.catalogs.colors import ColorDef, ColorSet
 from sdk.ui.hints import HintItem, HintResult, HintTargetInfo
-from ui.hints import HintService
-from ui.hints.providers.colors import ColorTagProvider
+from ui.hints.controller import create_controller
+from ui.platform.hints import HintService
+from ui.platform.hints.providers.colors import ColorTagProvider
 from modules.base_module.item_viewer import LocalizedDescriptionEdit
 
 
@@ -24,6 +25,7 @@ class _Provider:
     surfaces = frozenset({"plain"})
     languages = frozenset({"plain"})
     allow_in_comment = False
+    enabled = True
 
     def matches(self, context):
         if context.prefix != "xx":
@@ -49,6 +51,7 @@ class HintControllerTest(unittest.TestCase):
             tasks=None,
             forest_getter=lambda: None,
             overlay_getter=lambda: None,
+            controller_factory=create_controller,
         )
         self.service.register(_Provider())
 
@@ -164,6 +167,7 @@ class ColorHintPopupTest(unittest.TestCase):
             tasks=None,
             forest_getter=lambda: None,
             overlay_getter=lambda: None,
+            controller_factory=create_controller,
         )
         self.service.register(ColorTagProvider(self.service.catalogs))
         entries = tuple(
@@ -288,6 +292,7 @@ class ScintillaControllerTest(unittest.TestCase):
             tasks=None,
             forest_getter=lambda: None,
             overlay_getter=lambda: None,
+            controller_factory=create_controller,
         )
         provider = _Provider()
         provider.surfaces = frozenset({"raw"})

@@ -8,9 +8,9 @@ from PyQt5.QtGui import QColor, QTextCharFormat, QTextCursor
 from PyQt5.QtWidgets import QTextEdit
 
 try:  # запуск с корня проекта (src в sys.path)
-    from ui.theme import PALETTE
+    from ui.platform.theme import theme_service
 except ImportError:  # запуск как пакета
-    from .theme import PALETTE
+    from .platform.theme import theme_service
 
 
 class DiagnosticsLog(QTextEdit):
@@ -23,8 +23,9 @@ class DiagnosticsLog(QTextEdit):
         super().__init__(parent)
         self.setReadOnly(True)
 
-        self._amber = QColor(PALETTE.accent_amber)
-        self._base = QColor(PALETTE.text)
+        palette = theme_service().palette
+        self._amber = QColor(palette.accent_amber)
+        self._base = QColor(palette.text)
         self._fades = []  # [{"block": int, "start": monotonic}]
         self._status_blocks = {}  # key -> block number
 
@@ -33,6 +34,11 @@ class DiagnosticsLog(QTextEdit):
         self._timer.timeout.connect(self._on_tick)
 
     # -------------------------------------------------- добавление
+    def refresh_theme(self):
+        palette = theme_service().palette
+        self._amber = QColor(palette.accent_amber)
+        self._base = QColor(palette.text)
+        self.update()
     def append_message(self, message):
         lines = self._split_lines(message)
         self._insert_lines(lines, self._amber)

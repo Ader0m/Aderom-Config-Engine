@@ -24,18 +24,20 @@ from sdk import (
     DEFAULT_SEARCH_DELAY_MS,
     HintTargetInfo,
     LANGUAGE_LOCALIZATION_TEXT,
+    LANGUAGE_PLAIN,
     SURFACE_ENGINE_TEXT,
+    SURFACE_PLAIN,
+    TabSpec,
+    WindowSpec,
 )
 from sdk.features.items import ITEM_SECTION_MIME, encode_item_section
 from sdk.features.documents import engine_source_text, parse_engine_text
 from sdk.contracts.events import Events
 
 from PyQt5.QtCore import (
-    QEvent,
     QMimeData,
     QPersistentModelIndex,
     QPoint,
-    QRect,
     QRectF,
     QSize,
     QSortFilterProxyModel,
@@ -408,106 +410,20 @@ def _append_xml_strings(
     return text[:index].rstrip() + newline + block + newline + text[index:]
 
 
-class ParentComboBox(QComboBox):
-    """Поле родителя, открывающее собственный список предложений."""
-
-    popup_requested = pyqtSignal()
-
-    def showPopup(self):
-        # Не показываем стандартный popup: вместо него диалог открывает
-        # прокручиваемый контейнер с ближайшими родителями.
-        self.popup_requested.emit()
-
-
-class ParentSuggestionPopup(QFrame):
-    """Прокручиваемый список ближайших родителей под полем ввода."""
-
-    suggestion_chosen = pyqtSignal(str)
-
-    def __init__(self, parent=None):
-        flags = (
-            Qt.Tool
-            | Qt.FramelessWindowHint
-            | Qt.WindowDoesNotAcceptFocus
-            | Qt.NoDropShadowWindowHint
-        )
-        super().__init__(parent, flags)
-        self.setObjectName("parentSuggestionPopup")
-        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        self.setFocusPolicy(Qt.NoFocus)
-
-        palette = self.palette()
-        background = palette.color(QPalette.Window).name()
-        border = palette.color(QPalette.Mid).name()
-        self.setStyleSheet(
-            "#parentSuggestionPopup {"
-            "  background-color: %s;"
-            "  border: 1px solid %s;"
-            "}" % (background, border)
-        )
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        self.list = QListWidget()
-        self.list.setFocusPolicy(Qt.NoFocus)
-        self.list.setUniformItemSizes(True)
-        self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.list.itemClicked.connect(self._on_item_clicked)
-        self.list.itemActivated.connect(self._on_item_clicked)
-        layout.addWidget(self.list)
-
-    def set_suggestions(self, values):
-        self.list.clear()
-        for value in values or ():
-            self.list.addItem(str(value))
-        if self.list.count() > 0:
-            self.list.setCurrentRow(0)
-        return self.list.count()
-
-    def show_at(self, widget):
-        if self.list.count() <= 0:
-            self.hide()
-            return
-
-        row_height = self.list.sizeHintForRow(0)
-        if row_height <= 0:
-            row_height = 22
-
-        visible_rows = min(self.list.count(), 12)
-        height = min(320, row_height * visible_rows + 4)
-        width = max(widget.width(), 360)
-
-        position = widget.mapToGlobal(
-            QPoint(0, widget.height() + 2)
-        )
-        screen = QApplication.desktop().availableGeometry(widget)
-        if position.y() + height > screen.bottom():
-            position.setY(
-                widget.mapToGlobal(QPoint(0, 0)).y() - height
-            )
-
-        self.setGeometry(QRect(position, QSize(width, height)))
-        self.show()
-        self.raise_()
-
-    def _on_item_clicked(self, item):
-        if item is None:
-            return
-        value = item.text()
-        self.hide()
-        self.suggestion_chosen.emit(value)
-
-
 class CreateItemDialog(QDialog):
     """Выбор имени нового предмета и его родителя."""
 
-    def __init__(self, parent_candidates=(), parent=None):
+    def __init__(
+        self,
+        parent_candidates=(),
+        parent=None,
+        attach_hints=None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Создать предмет")
         self.resize(560, 240)
+        self._attach_hints = attach_hints
+        self._hints = None
 
         self._all_parents = sorted(
             {
@@ -517,7 +433,6 @@ class CreateItemDialog(QDialog):
             },
             key=str.lower,
         )
-        self._choosing_parent = False
 
         layout = QVBoxLayout(self)
 
@@ -532,7 +447,7 @@ class CreateItemDialog(QDialog):
         layout.addWidget(self.no_parent)
 
         layout.addWidget(QLabel("Родитель:"))
-        self.parent_combo = ParentComboBox()
+        self.parent_combo = QComboBox()
         self.parent_combo.setEditable(True)
         self.parent_combo.setInsertPolicy(QComboBox.NoInsert)
         self.parent_combo.addItems(self._all_parents)
@@ -546,24 +461,18 @@ class CreateItemDialog(QDialog):
             line_edit.setPlaceholderText(
                 "Выберите из списка или введите вручную"
             )
-            line_edit.textEdited.connect(self._on_parent_text_edited)
-            line_edit.installEventFilter(self)
-
-        completer = self.parent_combo.completer()
-        if completer is not None:
-            completer.setCaseSensitivity(Qt.CaseInsensitive)
-            completer.setFilterMode(Qt.MatchContains)
-            # Видимый список рисует наш прокручиваемый контейнер;
-            # автодополнение остаётся строчным, без второго popup.
-            completer.setCompletionMode(QCompleter.InlineCompletion)
-
-        self._suggestion_popup = ParentSuggestionPopup(self)
-        self._suggestion_popup.suggestion_chosen.connect(
-            self._on_suggestion_chosen
-        )
-        self.parent_combo.popup_requested.connect(
-            self._on_parent_popup_requested
-        )
+            completer = self.parent_combo.completer()
+            if completer is not None:
+                completer.setCompletionMode(QCompleter.InlineCompletion)
+            if callable(self._attach_hints):
+                self._hints = self._attach_hints(
+                    line_edit,
+                    target=HintTargetInfo(
+                        surface=SURFACE_PLAIN,
+                        language=LANGUAGE_PLAIN,
+                        role="item.parent",
+                    ),
+                )
         layout.addWidget(self.parent_combo)
 
         hint = QLabel(
@@ -583,92 +492,24 @@ class CreateItemDialog(QDialog):
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        self.finished.connect(self._detach_hints)
 
-    def _filter_parents(self, query):
-        query = str(query or "").strip().lower()
-        if not query:
-            return list(self._all_parents)
-
-        starts = []
-        contains = []
-        for value in self._all_parents:
-            lowered = value.lower()
-            if lowered.startswith(query):
-                starts.append(value)
-            elif query in lowered:
-                contains.append(value)
-        return starts + contains
-
-    def _show_suggestions(self, query):
-        if self.no_parent.isChecked():
-            self._suggestion_popup.hide()
-            return
-
-        count = self._suggestion_popup.set_suggestions(
-            self._filter_parents(query)
-        )
-        if count <= 0:
-            self._suggestion_popup.hide()
-            return
-        self._suggestion_popup.show_at(self.parent_combo)
-
-    def _on_parent_text_edited(self, text):
-        if self._choosing_parent:
-            return
-        self._show_suggestions(text)
-
-    def _on_parent_popup_requested(self):
-        self._show_suggestions(self.parent_combo.currentText())
-
-    def _on_suggestion_chosen(self, value):
-        self._choosing_parent = True
-        try:
-            self.parent_combo.setCurrentText(value)
-            line_edit = self.parent_combo.lineEdit()
-            if line_edit is not None:
-                line_edit.setText(value)
-                line_edit.setFocus()
-        finally:
-            self._choosing_parent = False
-        self._suggestion_popup.hide()
-
-    def _hide_suggestions(self):
-        self._suggestion_popup.hide()
-
-    def _hide_suggestions_later(self):
-        QTimer.singleShot(100, self._hide_suggestions_if_left)
-
-    def _hide_suggestions_if_left(self):
-        line_edit = self.parent_combo.lineEdit()
-        if line_edit is not None and line_edit.hasFocus():
-            return
-        if self._suggestion_popup.list.underMouse():
-            return
-        self._suggestion_popup.hide()
-
-    def eventFilter(self, obj, event):
-        line_edit = self.parent_combo.lineEdit()
-        if obj is line_edit:
-            if event.type() == QEvent.FocusIn:
-                self._show_suggestions(
-                    self.parent_combo.currentText()
-                )
-            elif event.type() == QEvent.FocusOut:
-                self._hide_suggestions_later()
-        return super().eventFilter(obj, event)
-
-    def hideEvent(self, event):
-        self._suggestion_popup.hide()
-        super().hideEvent(event)
-
-    def moveEvent(self, event):
-        self._suggestion_popup.hide()
-        super().moveEvent(event)
+    def _detach_hints(self, *_args):
+        handle = self._hints
+        self._hints = None
+        if handle is not None:
+            try:
+                handle.detach()
+            except Exception:
+                log.exception("Не удалось отцепить подсказки родителя")
 
     def _on_no_parent_toggled(self, checked):
         self.parent_combo.setEnabled(not checked)
-        if checked:
-            self._suggestion_popup.hide()
+        if self._hints is not None:
+            try:
+                self._hints.set_enabled(not checked)
+            except Exception:
+                log.exception("Не удалось переключить подсказки родителя")
 
     def values(self):
         section = self.section_edit.text().strip()
@@ -706,11 +547,9 @@ class CreateItemDialog(QDialog):
                 )
                 return
 
-        self._suggestion_popup.hide()
         super().accept()
 
     def reject(self):
-        self._suggestion_popup.hide()
         super().reject()
 
 
@@ -719,12 +558,12 @@ class ItemViewerFeature:
 
     WINDOW_KEY = WINDOW_KEY
 
-    def __init__(self, ctx, session):
+    def __init__(self, ctx, session, attach_hints=None):
         self.ctx = ctx
         self.session = session
+        self._attach_hints = attach_hints
         self._window = None
         self._request_seq = 0
-        self._running = False
         self._catalog = None
         self._images = {}
 
@@ -847,41 +686,55 @@ class ItemViewerFeature:
     # -------------------------------------------------- жизненный цикл
     def show(self):
         self._disposed = False
-        if not self.session.has_tree:
+        if self.ctx.tasks.operation_active("items.catalog"):
+            self.ctx.ui.log("Просмотр предметов уже выполняется.")
+            return
+
+        self._request_seq += 1
+        token = self._request_seq
+        waiting_for_vfs = self.ctx.tasks.operation_active("vfs.rebuild")
+        if waiting_for_vfs:
+            self.ctx.ui.set_status("Предметы: ожидание сборки VFS…")
+            self.ctx.ui.log(
+                "Просмотр предметов: ожидание сборки VFS."
+            )
+        elif not self.session.has_tree:
             self.ctx.ui.show_error(
                 "Дерево не построено: дождитесь окончания сборки."
             )
             return
 
-        if self._running:
-            self.ctx.ui.log("Просмотр предметов уже выполняется.")
-            return
+        def depends_on():
+            if self.ctx.tasks.operation_active("vfs.rebuild"):
+                return ("vfs.rebuild",)
+            return ()
 
-        self._running = True
-        self._request_seq += 1
-        token = self._request_seq
-        forest = self.session.forest
-
-        root = self.ctx.items.item_catalog_root(forest)
-        rel = (
-            self.ctx.services.relative_path(forest, root)
-            if root is not None
-            else ""
-        )
-        tab_id = resolved_tab_id(rel) if rel else ""
-        title = "[Res]%s" % rel if rel else ""
-
-        draft = self.ctx.documents.resolved_draft(tab_id) if tab_id else None
-        overlay = self._project_overlay()
-        has_overlay = bool(
-            getattr(overlay, "source_files", None)
-            or getattr(overlay, "resolved_edits", None)
-        )
-
-        self.ctx.ui.set_status("Предметы: сборка каталога…")
-        self.ctx.ui.log("Просмотр игровых предметов: сборка каталога…")
+        if not waiting_for_vfs:
+            self.ctx.ui.set_status("Предметы: сборка каталога…")
+            self.ctx.ui.log("Просмотр игровых предметов: сборка каталога…")
 
         def work(log):
+            forest = self.session.forest
+            root = self.ctx.items.item_catalog_root(forest)
+            rel = (
+                self.ctx.services.relative_path(forest, root)
+                if root is not None
+                else ""
+            )
+            tab_id = resolved_tab_id(rel) if rel else ""
+            title = "[Res]%s" % rel if rel else ""
+
+            draft = (
+                self.ctx.documents.resolved_draft(tab_id)
+                if tab_id
+                else None
+            )
+            overlay = self._project_overlay()
+            has_overlay = bool(
+                getattr(overlay, "source_files", None)
+                or getattr(overlay, "resolved_edits", None)
+            )
+
             original_text = ""
             sources = ()
 
@@ -963,7 +816,22 @@ class ItemViewerFeature:
             work,
             on_done=lambda result, err: self._on_done(result, err, token),
             on_log=self._on_log,
+            operation_key="items.catalog",
+            title="Каталог предметов",
+            depends_on=depends_on,
         )
+
+    def refresh_theme(self):
+        if self._window is not None:
+            try:
+                self._window.refresh_theme()
+            except Exception:
+                log.exception("Не удалось обновить тему окна предметов")
+        for _tab_id, _section, card in list(self._cards.values()):
+            try:
+                card.refresh_theme()
+            except Exception:
+                log.exception("Не удалось обновить тему карточки предмета")
 
     def close(self):
         self._disposed = True
@@ -1020,8 +888,6 @@ class ItemViewerFeature:
         self.ctx.ui.log(text)
 
     def _on_done(self, result, err, token):
-        self._running = False
-
         if token != self._request_seq:
             return
 
@@ -1060,11 +926,7 @@ class ItemViewerFeature:
             self._window = ItemViewerWindow(
                 theme_color=self.ctx.ui.theme_color,
                 color_defs=self._color_definitions,
-                attach_hints=getattr(
-                    self.ctx.ui,
-                    "attach_text_hints",
-                    None,
-                ),
+                attach_hints=self._attach_hints,
                 on_refresh=self.show,
                 can_edit=self._can_edit,
                 on_replace_line=lambda line, text: self._replace_line(
@@ -1130,7 +992,15 @@ class ItemViewerFeature:
             )
 
         self._window.set_catalog(catalog, images)
-        self.ctx.ui.show_module_window(self.WINDOW_KEY, self._window)
+        self.ctx.ui.open_window(
+            WindowSpec(
+                key=self.WINDOW_KEY,
+                title="Просмотр предметов",
+                kind="floating",
+                state_key="base.item_viewer",
+            ),
+            self._window,
+        )
 
     # -------------------------------------------------- редактирование
     def _apply_context(self, context):
@@ -1513,9 +1383,13 @@ class ItemViewerFeature:
         title = self._card_title(section)
         existing = self._cards.get(card_tab_id)
         if existing is not None:
-            self.ctx.ui.open_editor_tab(
-                card_tab_id,
-                title,
+            self.ctx.ui.open_tab(
+                TabSpec(
+                    id=card_tab_id,
+                    title=title,
+                    kind="tool_tab",
+                    close_policy="owner",
+                ),
                 existing[2],
             )
             existing[2].refresh()
@@ -1578,18 +1452,22 @@ class ItemViewerFeature:
             on_open_text_source=self._open_text_source,
             theme_color=self.ctx.ui.theme_color,
             color_defs=self._color_definitions,
-            attach_hints=getattr(
-                self.ctx.ui,
-                "attach_text_hints",
-                None,
-            ),
+            attach_hints=self._attach_hints,
             section=section,
             document_title=self._document_title(tab_id),
             preview=False,
             defer_field_refresh=True,
         )
         self._cards[card_tab_id] = (tab_id, section, card)
-        self.ctx.ui.open_editor_tab(card_tab_id, title, card)
+        self.ctx.ui.open_tab(
+            TabSpec(
+                id=card_tab_id,
+                title=title,
+                kind="tool_tab",
+                close_policy="owner",
+            ),
+            card,
+        )
         card.refresh()
 
     def _can_edit_tab(self, tab_id):
@@ -2466,8 +2344,8 @@ class ClickToEditLineEdit(QLineEdit):
         "QLineEdit { background: transparent; border: none; "
         "padding: 0; font-weight: 600; }"
     )
-    _DEFAULT_BORDER = "#3C3F41"
-    _DEFAULT_ACCENT = "#3592E4"
+    _DEFAULT_BORDER = ""
+    _DEFAULT_ACCENT = ""
     _EDIT_STYLE_TEMPLATE = (
         "QLineEdit { background: transparent; "
         "border: 1px solid %(border)s; padding: 2px; "
@@ -2576,8 +2454,8 @@ class LocalizedDescriptionEdit(QPlainTextEdit):
     _IDLE_STYLE = (
         "QPlainTextEdit { background: transparent; border: none; }"
     )
-    _DEFAULT_BORDER = "#3C3F41"
-    _DEFAULT_ACCENT = "#3592E4"
+    _DEFAULT_BORDER = ""
+    _DEFAULT_ACCENT = ""
     _EDIT_STYLE_TEMPLATE = (
         "QPlainTextEdit { background: transparent; "
         "border: 1px solid %(border)s; }"
@@ -2685,7 +2563,7 @@ class LocalizedDescriptionEdit(QPlainTextEdit):
 
             text_color = self.palette().color(QPalette.Text)
             if not text_color.isValid():
-                text_color = QColor("#787878")
+                text_color = self.palette().color(QPalette.WindowText)
             text_color.setAlpha(160)
             fill = QColor(text_color)
             fill.setAlpha(24)
@@ -2967,7 +2845,7 @@ class ItemCardView(QWidget):
         self._shown_description = ""
 
         self._placeholder = _placeholder_pixmap(
-            self._palette("text_muted", "#787878")
+            self._palette("text_muted")
         )
         self._build_ui()
         self._init_shortcuts()
@@ -3049,8 +2927,8 @@ class ItemCardView(QWidget):
             self._on_name_editing_changed
         )
         self.name_label.set_theme_colors(
-            self._palette("border", "#3C3F41"),
-            self._palette("accent", "#3592E4"),
+            self._palette("border"),
+            self._palette("accent"),
         )
         self.name_label.setContextMenuPolicy(Qt.CustomContextMenu)
         self.name_label.customContextMenuRequested.connect(
@@ -3101,8 +2979,8 @@ class ItemCardView(QWidget):
             self._apply_description_text
         )
         self.description_label.set_theme_colors(
-            self._palette("border", "#3C3F41"),
-            self._palette("accent", "#3592E4"),
+            self._palette("border"),
+            self._palette("accent"),
         )
         self.description_label.setContextMenuPolicy(Qt.CustomContextMenu)
         self.description_label.customContextMenuRequested.connect(
@@ -3168,8 +3046,8 @@ class ItemCardView(QWidget):
         self.details_splitter.setStretchFactor(1, 1)
         self.details_splitter.setSizes([110, 450])
 
-        border = self._palette("border", "#3C3F41")
-        accent = self._palette("accent", "#3592E4")
+        border = self._palette("border")
+        accent = self._palette("accent")
         self.details_splitter.setStyleSheet(
             "QSplitter::handle:vertical { height: 6px; "
             "background-color: %s; }"
@@ -3221,6 +3099,19 @@ class ItemCardView(QWidget):
 
     def set_section(self, section):
         self._section = str(section or "")
+        self.refresh()
+
+    def refresh_theme(self):
+        border = self._palette("border")
+        accent = self._palette("accent")
+        self.name_label.set_theme_colors(border, accent)
+        self.description_label.set_theme_colors(border, accent)
+        self.details_splitter.setStyleSheet(
+            "QSplitter::handle:vertical { height: 6px; "
+            "background-color: %s; }"
+            "QSplitter::handle:vertical:hover { "
+            "background-color: %s; }" % (border, accent)
+        )
         self.refresh()
 
     def refresh(self, entry=_MISSING):
@@ -3345,7 +3236,7 @@ class ItemCardView(QWidget):
             self.description_label.set_engine_text(
                 description_raw,
                 self._engine_color_defs(),
-                self._palette("text", "#BCBFBC"),
+                self._palette("text"),
             )
             self.description_label.set_edit_allowed(
                 description_editable
@@ -3452,7 +3343,7 @@ class ItemCardView(QWidget):
             language=LANGUAGE_LOCALIZATION_TEXT,
             path=Path(path) if path else None,
             role="item.description",
-            default_color=lambda: self._palette("text", "#BCBFBC"),
+            default_color=lambda: self._palette("text"),
         )
 
     def refresh_color_suggestions(self):
@@ -3466,7 +3357,7 @@ class ItemCardView(QWidget):
                 self.description_label.set_engine_text(
                     self._shown_description,
                     self._engine_color_defs(),
-                    self._palette("text", "#BCBFBC"),
+                    self._palette("text"),
                 )
         except RuntimeError:
             pass
@@ -3868,10 +3759,10 @@ class ItemCardView(QWidget):
 
     def _palette(self, name, fallback=None):
         try:
-            value = self._theme_color(name, fallback)
+            value = self._theme_color(name)
         except Exception:
-            value = fallback
-        return value or fallback or "#787878"
+            value = None
+        return value or fallback or ""
 
 
 class ItemViewerWindow(QDialog):
@@ -3944,7 +3835,7 @@ class ItemViewerWindow(QDialog):
         self._filter_timer.timeout.connect(self._apply_filter_now)
 
         self._placeholder = _placeholder_pixmap(
-            self._palette("text_muted", "#787878")
+            self._palette("text_muted")
         )
 
         self.setWindowTitle("Просмотр игровых предметов")
@@ -4506,16 +4397,27 @@ class ItemViewerWindow(QDialog):
         if self._on_create_item is None:
             return
 
-        dialog = CreateItemDialog(self._parent_candidates(), self)
+        dialog = CreateItemDialog(
+            self._parent_candidates(),
+            self,
+            attach_hints=self._attach_hints,
+        )
         if not dialog.exec_():
             return
 
         section, parent = dialog.values()
         self._on_create_item(section, parent)
 
+    def refresh_theme(self):
+        self._placeholder = _placeholder_pixmap(
+            self._palette("text_muted")
+        )
+        self.card.refresh_theme()
+        self.update()
+
     def _palette(self, name, fallback=None):
         try:
-            value = self._theme_color(name, fallback)
+            value = self._theme_color(name)
         except Exception:
-            value = fallback
-        return value or fallback or "#787878"
+            value = None
+        return value or fallback or ""

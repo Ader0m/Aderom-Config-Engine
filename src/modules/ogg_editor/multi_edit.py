@@ -175,25 +175,20 @@ class MultiEditDialog(QDialog):
 
     def _apply_dialog_theme(self, theme_color):
         """Сразу закрасить фон диалога, не дожидаясь hover-перерисовки."""
-        background = "#1E1F22"
-        foreground = "#DCDCDC"
-        muted = "#9A9A9A"
-        border = "#3C3F41"
-        selection = "#2E436E"
+        palette = self.palette()
+        background = palette.color(QPalette.Window).name()
+        foreground = palette.color(QPalette.WindowText).name()
+        muted = palette.color(QPalette.Mid).name()
+        border = palette.color(QPalette.Mid).name()
+        selection = palette.color(QPalette.Highlight).name()
 
         if callable(theme_color):
             try:
-                background = (
-                    theme_color("bg_main", background) or background
-                )
-                foreground = (
-                    theme_color("text", foreground) or foreground
-                )
-                muted = theme_color("text_muted", muted) or muted
-                border = theme_color("border", border) or border
-                selection = (
-                    theme_color("selection", selection) or selection
-                )
+                background = theme_color("bg_main") or background
+                foreground = theme_color("text") or foreground
+                muted = theme_color("text_muted") or muted
+                border = theme_color("border") or border
+                selection = theme_color("selection") or selection
             except Exception:
                 pass
 

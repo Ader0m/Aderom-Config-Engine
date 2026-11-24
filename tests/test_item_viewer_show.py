@@ -44,6 +44,7 @@ class _Ui:
         self.window = None
         self.status = []
         self.logs = []
+        self.errors = []
         self.active = True
         self.document = None
 
@@ -102,10 +103,10 @@ class _Ui:
     def item_entry(self, tab_id, section):
         return None
 
-    def open_editor_tab(self, tab_id, title, widget):
+    def open_tab(self, spec, widget):
         pass
 
-    def show_module_window(self, key, window):
+    def open_window(self, spec, window):
         self.window = window
 
     def close_module_window(self, key):
@@ -120,20 +121,39 @@ class _Ui:
     def log(self, message):
         self.logs.append(str(message))
 
+    def show_error(self, message):
+        self.errors.append(str(message))
+
     def is_project_active(self):
         return self.active
 
 
 class _Tasks:
-    def run(self, work, on_done, on_log=None):
+    def run(self, work, on_done, on_log=None, **kwargs):
         result = work(lambda message: None)
         on_done(result, None)
+
+    def operation_active(self, operation_key):
+        return False
 
 
 class _Session:
     has_tree = True
     forest = object()
     config_dir = None
+
+
+class _WaitingTasks:
+    def __init__(self, active=()):
+        self.active = set(active)
+        self.calls = []
+
+    def run(self, work, on_done, on_log=None, **kwargs):
+        self.calls.append((work, on_done, kwargs))
+        return None
+
+    def operation_active(self, operation_key):
+        return operation_key in self.active
 
 
 class _Ctx:
@@ -148,6 +168,113 @@ class _Ctx:
 
 
 class ItemViewerShowTest(unittest.TestCase):
+    def test_show_waits_for_vfs_rebuild(self):
+        ctx = _Ctx()
+        ctx.tasks = _WaitingTasks(("vfs.rebuild",))
+        session = _Session()
+        session.has_tree = False
+        session.forest = None
+        feature = ItemViewerFeature(ctx, session)
+        try:
+            feature.show()
+
+            self.assertEqual(ctx.ui.errors, [])
+            self.assertEqual(len(ctx.tasks.calls), 1)
+            kwargs = ctx.tasks.calls[0][2]
+            depends_on = kwargs.get("depends_on")
+            if callable(depends_on):
+                depends_on = depends_on()
+            self.assertEqual(
+                depends_on,
+                ("vfs.rebuild",),
+            )
+            self.assertEqual(
+                kwargs.get("operation_key"),
+                "items.catalog",
+            )
+        finally:
+            feature.close()
+
+    def test_show_waits_for_rebuild_even_with_old_tree(self):
+        ctx = _Ctx()
+        ctx.tasks = _WaitingTasks(("vfs.rebuild",))
+        feature = ItemViewerFeature(ctx, _Session())
+        try:
+            feature.show()
+
+            self.assertEqual(ctx.ui.errors, [])
+            self.assertEqual(len(ctx.tasks.calls), 1)
+            depends_on = ctx.tasks.calls[0][2].get("depends_on")
+            if callable(depends_on):
+                depends_on = depends_on()
+            self.assertEqual(
+                depends_on,
+                ("vfs.rebuild",),
+            )
+        finally:
+            feature.close()
+
+    def test_show_keeps_waiting_status_while_vfs_rebuild_runs(self):
+        ctx = _Ctx()
+        ctx.tasks = _WaitingTasks(("vfs.rebuild",))
+        feature = ItemViewerFeature(ctx, _Session())
+        try:
+            feature.show()
+
+            self.assertEqual(
+                ctx.ui.status,
+                [("Предметы: ожидание сборки VFS…",)],
+            )
+            self.assertFalse(
+                any("сборка каталога" in str(item) for item in ctx.ui.status)
+            )
+        finally:
+            feature.close()
+
+    def test_show_sets_catalog_status_without_vfs_wait(self):
+        ctx = _Ctx()
+        feature = ItemViewerFeature(ctx, _Session())
+        try:
+            feature.show()
+
+            self.assertTrue(
+                any("сборка каталога" in str(item) for item in ctx.ui.status)
+            )
+        finally:
+            feature.close()
+
+    def test_show_does_not_duplicate_active_catalog(self):
+        ctx = _Ctx()
+        ctx.tasks = _WaitingTasks(("items.catalog",))
+        feature = ItemViewerFeature(ctx, _Session())
+        try:
+            feature.show()
+
+            self.assertEqual(ctx.tasks.calls, [])
+            self.assertTrue(
+                any("уже выполняется" in message for message in ctx.ui.logs)
+            )
+        finally:
+            feature.close()
+
+    def test_refresh_theme_updates_window_and_cards(self):
+        ctx = _Ctx()
+        feature = ItemViewerFeature(ctx, _Session())
+        try:
+            feature.show()
+            calls = []
+            feature._window.refresh_theme = lambda: calls.append("window")
+
+            class _Card:
+                def refresh_theme(self):
+                    calls.append("card")
+
+            feature._cards["card"] = ("tab", "section", _Card())
+            feature.refresh_theme()
+            self.assertEqual(calls, ["window", "card"])
+        finally:
+            feature.close()
+
     def test_show_builds_catalog_and_creates_window(self):
         ctx = _Ctx()
         feature = ItemViewerFeature(ctx, _Session())

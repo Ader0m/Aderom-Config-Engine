@@ -5,15 +5,7 @@ from __future__ import annotations
 
 from PyQt5.QtGui import QColor
 
-from core.patching.ltx.document import parse_key_line, parse_section_header
-from core.patching.ltx.syntax import (
-    STYLE_COMMENT,
-    STYLE_INCLUDE_PATH,
-    STYLE_LIST_VALUE,
-    STYLE_VALUE,
-    token_at,
-    tokenize_line,
-)
+from app.hints import build_ltx_line_info
 from sdk.ui.hints import (
     HintContext,
     HintTargetInfo,
@@ -86,97 +78,6 @@ def _is_ltx(target):
     return str(target.language or "").lower() == LANGUAGE_LTX
 
 
-def _comment_token(tokens, column):
-    token = token_at(tokens, column)
-    return token is not None and token[2] == STYLE_COMMENT
-
-
-def _string_token(line, tokens, column):
-    token = token_at(tokens, column)
-    if token is None:
-        return False
-    start, end, style = token
-    if style not in (STYLE_VALUE, STYLE_LIST_VALUE, STYLE_INCLUDE_PATH):
-        return False
-    raw = line[start:end]
-    return raw.startswith('"')
-
-
-def _section_at(adapter, line):
-    """Ближайший заголовок секции и его вид."""
-    for index in range(int(line), max(-1, int(line) - _WINDOW_BACK), -1):
-        text = adapter.line_text(index).strip()
-        if not text or text.startswith((";", "//")):
-            continue
-        header = parse_section_header(text)
-        if header is not None:
-            kind, name, _parents, _rest = header
-            return name, kind, index
-    return "", "", None
-
-
-def _local_sections(adapter, line):
-    names = []
-    seen = set()
-    start = max(0, int(line) - _WINDOW_AROUND)
-    end = int(line) + _WINDOW_AROUND
-    for index in range(start, end + 1):
-        text = adapter.line_text(index).strip()
-        if not text or text.startswith((";", "//")):
-            continue
-        header = parse_section_header(text)
-        if header is None:
-            continue
-        name = header[1]
-        if name and name not in seen:
-            seen.add(name)
-            names.append(name)
-    return tuple(names)
-
-
-def _local_keys(adapter, header_line, line):
-    result = []
-    seen = set()
-    start = int(header_line) + 1
-    end = int(line) - 1
-    if start > end:
-        return ()
-    for index in range(start, min(end + 1, start + _MAX_LOCAL_KEYS)):
-        text = adapter.line_text(index).strip()
-        if not text or text.startswith((";", "//", "#")):
-            continue
-        if parse_section_header(text) is not None:
-            break
-        parsed = parse_key_line(text)
-        if not parsed:
-            continue
-        _operation, key, value, _has_value = parsed
-        key = str(key or "").strip()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        result.append((key, str(value or "").strip()))
-        if len(result) >= _MAX_LOCAL_KEYS:
-            break
-    return tuple(result)
-
-
-def _value_kind(parsed):
-    if not parsed:
-        return ""
-    _operation, _key, value, has_value = parsed
-    if not has_value:
-        return ""
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    if '"' in text and text.startswith('"'):
-        return "quoted"
-    if "," in text:
-        return "list"
-    return "bare"
-
-
 def build_context(
     adapter,
     target,
@@ -199,31 +100,23 @@ def build_context(
     prefix = line_text[:column]
     suffix = line_text[column:]
 
-    tokens = tokenize_line(line_text) if _is_ltx(target) else []
-    in_comment = _comment_token(tokens, column) if tokens else False
-    in_string = (
-        _string_token(line_text, tokens, column) if tokens else False
-    )
-
+    in_comment = False
+    in_string = False
     section = ""
     section_kind = ""
-    section_line = None
     key = ""
     value_kind = ""
     local_keys = ()
+    info = None
     if _is_ltx(target):
-        section, section_kind, section_line = _section_at(adapter, line)
-        stripped = line_text.strip()
-        if section_line == line and parse_section_header(stripped):
-            key = ""
-            value_kind = ""
-        else:
-            parsed = parse_key_line(stripped)
-            if parsed:
-                key = str(parsed[1] or "")
-                value_kind = _value_kind(parsed)
-        if section_line is not None:
-            local_keys = _local_keys(adapter, section_line, line)
+        info = build_ltx_line_info(adapter.line_text, line, column)
+        in_comment = info.in_comment
+        in_string = info.in_string
+        section = info.section
+        section_kind = info.section_kind
+        key = info.key
+        value_kind = info.value_kind
+        local_keys = info.local_keys
 
     local_sections = ()
     provider = getattr(adapter, "local_sections", None)
@@ -232,8 +125,8 @@ def build_context(
             local_sections = tuple(provider() or ())
         except Exception:
             local_sections = ()
-    if _is_ltx(target) and not local_sections:
-        local_sections = _local_sections(adapter, line)
+    if _is_ltx(target) and not local_sections and info is not None:
+        local_sections = info.local_sections
 
     editable = bool(adapter.is_editable())
     if target.read_only:

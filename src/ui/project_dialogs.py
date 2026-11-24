@@ -35,10 +35,7 @@ from PyQt5.QtWidgets import (
 
 from app.projects import ProjectPatchPreview
 
-try:
-    from .theme import PALETTE
-except Exception:  # pragma: no cover - запуск без UI-темы
-    PALETTE = None
+from .platform.theme import theme_service
 
 
 _DLTX_HELP = (
@@ -258,16 +255,9 @@ class ProjectSettingsDialog(QDialog):
         self.delete_button = None
 
         if not self.is_create:
-            red = (
-                PALETTE.accent_red
-                if PALETTE is not None
-                else "#F14C4C"
-            )
-            bright = (
-                PALETTE.text_bright
-                if PALETTE is not None
-                else "#FFFFFF"
-            )
+            palette = theme_service().palette
+            red = palette.accent_red
+            bright = palette.text_bright
 
             self.delete_button = QPushButton("Удалить проект")
             self.delete_button.setMinimumWidth(230)
@@ -591,10 +581,10 @@ class ProjectPreviewDialog(QDialog):
         separator.setFrameShape(QFrame.HLine)
         separator.setFrameShadow(QFrame.Plain)
         separator.setFixedHeight(1)
-        if PALETTE is not None:
-            separator.setStyleSheet(
-                "QFrame { background-color: %s; }" % PALETTE.bg_titlebar
-            )
+        separator.setStyleSheet(
+            "QFrame { background-color: %s; }"
+            % theme_service().palette.bg_titlebar
+        )
         right_layout.addWidget(separator)
 
         self.patch_text = QPlainTextEdit()
@@ -604,11 +594,13 @@ class ProjectPreviewDialog(QDialog):
         )
         fixed = QFontDatabase.systemFont(QFontDatabase.FixedFont)
         self.patch_text.setFont(fixed)
-        if PALETTE is not None:
-            self.patch_text.setStyleSheet(
-                "QPlainTextEdit { background-color: %s; color: %s; }"
-                % (PALETTE.bg_main, PALETTE.syn_default)
+        self.patch_text.setStyleSheet(
+            "QPlainTextEdit { background-color: %s; color: %s; }"
+            % (
+                theme_service().palette.bg_main,
+                theme_service().palette.syn_default,
             )
+        )
         right_layout.addWidget(self.patch_text, 1)
 
         splitter.addWidget(right)
@@ -656,8 +648,12 @@ class ProjectPreviewDialog(QDialog):
         if item.excluded:
             tooltip += "\nНе будет добавлен в патч-мод"
         entry.setToolTip(tooltip)
-        if PALETTE is not None and item.excluded:
-            entry.setForeground(QBrush(QColor(PALETTE.text_disabled)))
+        if item.excluded:
+            entry.setForeground(
+                QBrush(
+                    QColor(theme_service().palette.text_disabled)
+                )
+            )
         else:
             entry.setForeground(QBrush())
 

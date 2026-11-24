@@ -365,6 +365,7 @@ class PackageLifecycleTest(unittest.TestCase):
     def _demo_source(self):
         return """
         from sdk.kernel import ModuleBase, ModuleManifest
+        from sdk.ui import WindowSpec
         from PyQt5.QtWidgets import QWidget
 
         class DemoModule(ModuleBase):
@@ -389,7 +390,14 @@ class PackageLifecycleTest(unittest.TestCase):
             def activate(self, ctx):
                 self.activated = True
                 self.window = QWidget()
-                ctx.ui.show_module_window("demo.window", self.window)
+                ctx.ui.open_window(
+                    WindowSpec(
+                        key="demo.window",
+                        title="Demo",
+                        kind="floating",
+                    ),
+                    self.window,
+                )
 
             def deactivate(self, ctx):
                 self.deactivated = True
@@ -486,6 +494,37 @@ class PackageLifecycleTest(unittest.TestCase):
         self.assertNotIn("dependent", loader.records)
         self.assertFalse(commands.has("demo.run"))
         self.assertFalse(commands.has("dependent.run"))
+
+
+class ReleaseRuntimeTest(unittest.TestCase):
+    def test_release_runtime_cancels_without_waiting(self):
+        loader = ModuleLoader(lambda *_args, **_kwargs: None)
+        calls = []
+
+        class _Tasks:
+            def cancel_owner(self):
+                calls.append("cancel")
+                return 2
+
+            def wait_owner(self, *_args, **_kwargs):
+                calls.append("wait")
+                raise AssertionError("UI не должен ждать callbacks")
+
+        ui = SimpleNamespace(
+            release_owner=lambda: calls.append("release"),
+        )
+        ctx = SimpleNamespace(ui=ui, tasks=_Tasks())
+        entry = SimpleNamespace(
+            manifest=SimpleNamespace(name="demo"),
+        )
+        logs = []
+
+        loader._release_runtime(entry, ctx, logs.append)
+
+        self.assertEqual(calls, ["release", "cancel"])
+        self.assertTrue(
+            any("не блокирует" in message for message in logs)
+        )
 
 
 if __name__ == "__main__":

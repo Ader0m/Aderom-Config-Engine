@@ -21,7 +21,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
 )
 
-from ui.theme import PALETTE
+from ui.platform.theme import theme_service
 
 _ITEM_ROLE = Qt.UserRole + 1
 
@@ -132,7 +132,7 @@ class HintItemDelegate(QStyledItemDelegate):
         painter.save()
         try:
             selected = bool(option.state & QStyle.State_Selected)
-            background = QColor(PALETTE.accent if selected else PALETTE.bg_panel)
+            background = QColor(theme_service().palette.accent if selected else theme_service().palette.bg_panel)
             if selected:
                 background.setAlpha(70)
             painter.fillRect(option.rect, background)
@@ -161,7 +161,7 @@ class HintItemDelegate(QStyledItemDelegate):
                     max(80, rect.width() // 3),
                 )
                 painter.setFont(detail_font)
-                painter.setPen(QColor(PALETTE.text_muted))
+                painter.setPen(QColor(theme_service().palette.text_muted))
                 painter.drawText(
                     QRect(
                         rect.right() - detail_width,
@@ -182,7 +182,7 @@ class HintItemDelegate(QStyledItemDelegate):
             painter.setFont(option.font)
             painter.setPen(
                 QColor(
-                    PALETTE.text_bright if selected else PALETTE.text
+                    theme_service().palette.text_bright if selected else theme_service().palette.text
                 )
             )
             label_rect = QRect(
@@ -208,7 +208,7 @@ class HintItemDelegate(QStyledItemDelegate):
                 )
                 desc_metrics = QFontMetrics(desc_font)
                 painter.setFont(desc_font)
-                painter.setPen(QColor(PALETTE.text_muted))
+                painter.setPen(QColor(theme_service().palette.text_muted))
                 painter.drawText(
                     QRect(
                         x,
@@ -269,7 +269,7 @@ class HintPopup(QFrame):
         self.setAutoFillBackground(True)
         self.setStyleSheet(
             "QFrame#hintPopup { background: %s; border: 1px solid %s; }"
-            % (PALETTE.bg_panel, PALETTE.border)
+            % (theme_service().palette.bg_panel, theme_service().palette.border)
         )
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
 
@@ -287,7 +287,7 @@ class HintPopup(QFrame):
         self.footer = QLabel(self)
         self.footer.setFocusPolicy(Qt.NoFocus)
         self.footer.setStyleSheet(
-            "QLabel { color: %s; padding: 2px 8px; }" % PALETTE.text_muted
+            "QLabel { color: %s; padding: 2px 8px; }" % theme_service().palette.text_muted
         )
         self.footer.hide()
         layout.addWidget(self.footer, 0)

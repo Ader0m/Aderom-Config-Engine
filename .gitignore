@@ -3,6 +3,11 @@ src/generated
 /projects
 /ACE.lnk
 
+# Локальная конфигурация рабочей среды (не исходники)
+/config/layout.json
+/config/file_open.json
+/config/modules.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

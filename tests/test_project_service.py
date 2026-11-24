@@ -1,6 +1,11 @@
 # -*- coding: utf-8 -*-
+import json
+import shutil
 import tempfile
+import threading
+import time
 import unittest
+from unittest.mock import patch
 from dataclasses import replace
 from pathlib import Path
 
@@ -19,6 +24,369 @@ from app.projects import ProjectError, ProjectService
 
 
 class ProjectServiceTest(unittest.TestCase):
+    def test_lifecycle_is_serialized(self):
+        with tempfile.TemporaryDirectory() as d:
+            service = ProjectService(Path(d) / "projects")
+            started = threading.Event()
+            release = threading.Event()
+            entered = []
+            errors = []
+            original = service.repository.write_meta
+
+            def blocking_meta(project):
+                entered.append(project.name)
+                if len(entered) == 1:
+                    started.set()
+                    release.wait(2)
+                return original(project)
+
+            service.repository.write_meta = blocking_meta
+
+            def make(name):
+                try:
+                    service.create(name)
+                except Exception as exc:
+                    errors.append(exc)
+
+            first = threading.Thread(target=make, args=("first",))
+            second = threading.Thread(target=make, args=("second",))
+            first.start()
+            self.assertTrue(started.wait(2))
+            second.start()
+            time.sleep(0.05)
+            self.assertEqual(entered, ["first"])
+
+            release.set()
+            first.join(2)
+            second.join(2)
+            self.assertEqual(errors, [])
+            self.assertEqual(entered, ["first", "second"])
+
+    def test_invalid_project_dir_keeps_active_project(self):
+        with tempfile.TemporaryDirectory() as d:
+            service = ProjectService(Path(d) / "projects")
+            service.create("keep")
+
+            bad = Path(d) / "bad"
+            bad.mkdir()
+            (bad / "file.txt").write_text("x", encoding="utf-8")
+
+            with self.assertRaises(ProjectError):
+                service.create("new", project_dir=str(bad))
+
+            self.assertEqual(service.active.name, "keep")
+
+    def test_load_is_serialized(self):
+        with tempfile.TemporaryDirectory() as d:
+            service = ProjectService(Path(d) / "projects")
+            first = service.create("first")
+            second = service.create("second")
+            entered = []
+            errors = []
+            started = threading.Event()
+            release = threading.Event()
+            original = service.repository.read_meta
+
+            def blocking_meta(root):
+                entered.append(Path(root).name)
+                if len(entered) == 1:
+                    started.set()
+                    release.wait(2)
+                return original(root)
+
+            service.repository.read_meta = blocking_meta
+
+            def load(project_id):
+                try:
+                    service.load(project_id)
+                except Exception as exc:
+                    errors.append(exc)
+
+            thread1 = threading.Thread(target=load, args=(first.id,))
+            thread2 = threading.Thread(target=load, args=(second.id,))
+            thread1.start()
+            self.assertTrue(started.wait(2))
+            thread2.start()
+            time.sleep(0.05)
+            self.assertEqual(entered, [first.id])
+
+            release.set()
+            thread1.join(2)
+            thread2.join(2)
+            self.assertEqual(errors, [])
+            self.assertEqual(entered, [first.id, second.id])
+
+    def test_list_projects_is_serialized_with_create(self):
+        with tempfile.TemporaryDirectory() as d:
+            service = ProjectService(Path(d) / "projects")
+            service.create("first")
+            started = threading.Event()
+            release = threading.Event()
+            writes = []
+            errors = []
+            original_read = service.repository.read_meta
+            original_write = service.repository.write_meta
+
+            def blocking_read(root):
+                if not started.is_set():
+                    started.set()
+                    release.wait(2)
+                return original_read(root)
+
+            def tracked_write(project):
+                writes.append(project.name)
+                return original_write(project)
+
+            service.repository.read_meta = blocking_read
+            service.repository.write_meta = tracked_write
+
+            def list_projects():
+                try:
+                    service.list_projects()
+                except Exception as exc:
+                    errors.append(exc)
+
+            def create_project():
+                try:
+                    service.create("second")
+                except Exception as exc:
+                    errors.append(exc)
+
+            listing = threading.Thread(target=list_projects)
+            creating = threading.Thread(target=create_project)
+            listing.start()
+            self.assertTrue(started.wait(2))
+            creating.start()
+            time.sleep(0.05)
+            self.assertEqual(writes, [])
+
+            release.set()
+            listing.join(2)
+            creating.join(2)
+
+            self.assertEqual(errors, [])
+            self.assertEqual(writes, ["second"])
+
+    def test_list_projects_honors_should_stop(self):
+        with tempfile.TemporaryDirectory() as d:
+            service = ProjectService(Path(d) / "projects")
+            service.create("project")
+
+            self.assertEqual(
+                service.list_projects(should_stop=lambda: True),
+                [],
+            )
+
+    def test_failed_project_dir_creation_keeps_previous_project(self):
+        with tempfile.TemporaryDirectory() as d:
+            service = ProjectService(Path(d) / "projects")
+            old = service.create("keep")
+
+            with patch(
+                "pathlib.Path.mkdir",
+                side_effect=OSError("access denied"),
+            ):
+                with self.assertRaisesRegex(
+                    ProjectError,
+                    "Не удалось создать каталог проекта",
+                ):
+                    service.create("new")
+
+            self.assertEqual(service.active.id, old.id)
+
+    def test_close_is_serialized(self):
+        with tempfile.TemporaryDirectory() as d:
+            service = ProjectService(Path(d) / "projects")
+            service.create("active")
+            entered = []
+            started = threading.Event()
+            release = threading.Event()
+            original = service.flush
+
+            def blocking_flush():
+                entered.append(True)
+                if len(entered) == 1:
+                    started.set()
+                    release.wait(2)
+                return original()
+
+            service.flush = blocking_flush
+            thread1 = threading.Thread(target=service.close)
+            thread2 = threading.Thread(target=service.close)
+            thread1.start()
+            self.assertTrue(started.wait(2))
+            thread2.start()
+            time.sleep(0.05)
+            self.assertEqual(len(entered), 1)
+
+            release.set()
+            thread1.join(2)
+            thread2.join(2)
+            self.assertEqual(len(entered), 1)
+            self.assertIsNone(service.active)
+
+    def test_delete_is_serialized(self):
+        with tempfile.TemporaryDirectory() as d:
+            service = ProjectService(Path(d) / "projects")
+            service.create("active")
+            entered = []
+            errors = []
+            started = threading.Event()
+            release = threading.Event()
+
+            def blocking_rmtree(path):
+                entered.append(Path(path).name)
+                if len(entered) == 1:
+                    started.set()
+                    release.wait(2)
+                return original(path)
+
+            original = shutil.rmtree
+            with patch(
+                "app.projects.service.shutil.rmtree",
+                side_effect=blocking_rmtree,
+            ):
+                def delete():
+                    try:
+                        service.delete_active_project()
+                    except Exception as exc:
+                        errors.append(exc)
+
+                thread1 = threading.Thread(target=delete)
+                thread2 = threading.Thread(target=delete)
+                thread1.start()
+                self.assertTrue(started.wait(2))
+                thread2.start()
+                time.sleep(0.05)
+                self.assertEqual(len(entered), 1)
+
+                release.set()
+                thread1.join(2)
+                thread2.join(2)
+
+            self.assertEqual(len(entered), 1)
+            self.assertEqual(len(errors), 1)
+            self.assertIsInstance(errors[0], ProjectError)
+            self.assertIsNone(service.active)
+
+    def test_delete_waits_for_write_lock(self):
+        with tempfile.TemporaryDirectory() as d:
+            service = ProjectService(Path(d) / "projects")
+            service.create("active")
+            entered = []
+            original = shutil.rmtree
+
+            def recording_rmtree(path):
+                entered.append(Path(path).name)
+                return original(path)
+
+            with patch(
+                "app.projects.service.shutil.rmtree",
+                side_effect=recording_rmtree,
+            ):
+                service._write_lock.acquire()
+                try:
+                    thread = threading.Thread(
+                        target=service.delete_active_project,
+                    )
+                    thread.start()
+                    time.sleep(0.05)
+                    self.assertEqual(entered, [])
+                finally:
+                    service._write_lock.release()
+
+                thread.join(2)
+                self.assertFalse(thread.is_alive())
+
+            self.assertEqual(len(entered), 1)
+            self.assertIsNone(service.active)
+
+    def test_failed_meta_write_keeps_active_project(self):
+        with tempfile.TemporaryDirectory() as d:
+            service = ProjectService(Path(d) / "projects")
+            old = service.create("old")
+
+            def fail_meta(_project):
+                raise OSError("disk full")
+
+            service.repository.write_meta = fail_meta
+            with self.assertRaises(OSError):
+                service.create("new")
+
+            self.assertEqual(service.active.id, old.id)
+            self.assertEqual(
+                [path.name for path in (Path(d) / "projects").iterdir()],
+                [old.root_dir.name],
+            )
+
+    def test_failed_create_rolls_back_new_root(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d) / "projects"
+            service = ProjectService(base)
+            old = service.create("old")
+            custom_parent = Path(d) / "custom_parent"
+            new_dir = custom_parent / "new_project"
+
+            def fail_meta(_project):
+                raise OSError("disk full")
+
+            service.repository.write_meta = fail_meta
+            with self.assertRaises(OSError):
+                service.create("new", project_dir=str(new_dir))
+
+            self.assertEqual(service.active.id, old.id)
+            self.assertFalse(new_dir.exists())
+            self.assertNotIn(
+                custom_parent.resolve(),
+                service._project_roots,
+            )
+            roots = json.loads(
+                (base / service.ROOTS_NAME).read_text(encoding="utf-8")
+            )
+            self.assertNotIn(str(custom_parent.resolve()), roots)
+
+    def test_activation_failure_restores_previous_project(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d) / "projects"
+            service = ProjectService(base)
+            old = service.create("old")
+            original_activate = service.session.activate
+            failed = [False]
+
+            def activate(project):
+                if project.name == "new" and not failed[0]:
+                    failed[0] = True
+                    raise RuntimeError("activate failed")
+                return original_activate(project)
+
+            service.session.activate = activate
+            with self.assertRaises(RuntimeError):
+                service.create("new")
+
+            self.assertEqual(service.active.id, old.id)
+            self.assertEqual(
+                [path.name for path in base.iterdir()],
+                [old.root_dir.name],
+            )
+
+    def test_list_projects_skips_incomplete_directories(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d) / "projects"
+            service = ProjectService(base)
+            valid = service.create("valid")
+
+            broken = base / "broken"
+            broken.mkdir()
+            (broken / service.META_NAME).write_text(
+                "{not json",
+                encoding="utf-8",
+            )
+            (base / "empty").mkdir()
+
+            projects = service.list_projects()
+
+            self.assertEqual([project.id for project in projects], [valid.id])
+
     def _services(self, d, cfg, root):
         cache = FileCacheSystem()
         forest = TreeBuilder(cache).build(
@@ -137,6 +505,18 @@ class ProjectServiceTest(unittest.TestCase):
             self.assertFalse(service.is_active)
             self.assertFalse(root.exists())
             self.assertEqual(service.list_projects(), [])
+
+    def test_delete_active_project_rejects_other_expected_project(self):
+        with tempfile.TemporaryDirectory() as d:
+            service = ProjectService(Path(d) / "projects")
+            first = service.create("first")
+            second = service.create("second")
+
+            with self.assertRaises(ProjectError):
+                service.delete_active_project(expected_project=first)
+
+            self.assertIs(service.active, second)
+            self.assertTrue(second.root_dir.is_dir())
 
     def test_custom_project_directory_is_listed_and_deleted(self):
         with tempfile.TemporaryDirectory() as d:

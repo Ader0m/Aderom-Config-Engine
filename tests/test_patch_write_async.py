@@ -64,7 +64,7 @@ class _Tasks:
         self.calls = []
         self.cancelled = []
 
-    def run(self, fn, on_done=None, on_log=None, owner=None):
+    def run(self, fn, on_done=None, on_log=None, owner=None, **kwargs):
         self.calls.append(
             {
                 "fn": fn,

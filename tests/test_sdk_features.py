@@ -33,7 +33,8 @@ class _Platform:
     def document_text(self, path):
         return "text:%s" % Path(path).name
 
-    def apply_resolved_line_edit(self, tab_id, action, line_number, text=""):
+    def apply_resolved_line_edit(self, tab_id, action, line_number, text="",
+                                 owner=None):
         self.applied.append((tab_id, action, line_number, text))
         return True
 

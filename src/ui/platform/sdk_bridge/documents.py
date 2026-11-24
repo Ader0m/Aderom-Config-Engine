@@ -54,6 +54,7 @@ class DocumentApiAdapter:
             edit.action,
             edit.line_number,
             edit.text,
+            owner=self._owner,
         )
 
     def subscribe(self, handler):
@@ -103,6 +104,7 @@ class DocumentApiAdapter:
             action,
             line_number,
             text,
+            owner=self._owner,
         )
 
     def apply_resolved_field_edit(self, tab_id, section, key, value):
@@ -111,6 +113,7 @@ class DocumentApiAdapter:
             section,
             key,
             value,
+            owner=self._owner,
         )
 
     def rename_resolved_field(
@@ -127,6 +130,7 @@ class DocumentApiAdapter:
             old_key,
             new_key,
             value,
+            owner=self._owner,
         )
 
     def apply_resolved_field_edit_async(
@@ -143,6 +147,7 @@ class DocumentApiAdapter:
             key,
             value,
             on_done=on_done,
+            owner=self._owner,
         )
 
     def rename_resolved_field_async(
@@ -161,22 +166,35 @@ class DocumentApiAdapter:
             new_key,
             value,
             on_done=on_done,
+            owner=self._owner,
         )
 
     def undo_resolved_document(self, tab_id):
-        return self._platform.undo_resolved_document(tab_id)
+        return self._platform.undo_resolved_document(
+            tab_id,
+            owner=self._owner,
+        )
 
     def redo_resolved_document(self, tab_id):
-        return self._platform.redo_resolved_document(tab_id)
+        return self._platform.redo_resolved_document(
+            tab_id,
+            owner=self._owner,
+        )
 
     def resolved_section_at_line(self, tab_id, line_number):
         return self._platform.resolved_section_at_line(tab_id, line_number)
 
     def retain_resolved_document(self, tab_id):
-        return self._platform.retain_resolved_document(tab_id)
+        return self._platform.retain_resolved_document(
+            tab_id,
+            owner=self._owner,
+        )
 
     def release_resolved_document(self, tab_id):
-        return self._platform.release_resolved_document(tab_id)
+        return self._platform.release_resolved_document(
+            tab_id,
+            owner=self._owner,
+        )
 
     def update_resolved_draft(
         self,
@@ -196,6 +214,7 @@ class DocumentApiAdapter:
             current_text,
             line_sources,
             line_edit=line_edit,
+            owner=self._owner,
         )
 
     def sync_resolved_tab(self, tab_id, text, line_sources, root_path):
@@ -204,6 +223,7 @@ class DocumentApiAdapter:
             text,
             line_sources,
             root_path,
+            owner=self._owner,
         )
 
     def open_resolved_tab(self, tab_id, title, text, line_sources, root_path,
@@ -216,6 +236,7 @@ class DocumentApiAdapter:
             root_path,
             line_number,
             request_id=request_id,
+            owner=self._owner,
         )
 
     def ensure_resolved_document(self, tab_id, root_path, title="", text="",
@@ -226,12 +247,14 @@ class DocumentApiAdapter:
             title,
             text,
             line_sources,
+            owner=self._owner,
         )
 
     def open_resolved_document(self, tab_id, line_number=None):
         return self._platform.open_resolved_document(
             tab_id,
             line_number,
+            owner=self._owner,
         )
 
     def open_xml_resolved_tab(self, tab_id, title, text, root_path,
@@ -245,4 +268,5 @@ class DocumentApiAdapter:
             line_sources,
             line_number,
             request_id=request_id,
+            owner=self._owner,
         )

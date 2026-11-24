@@ -4,6 +4,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from PyQt5.QtCore import QMimeData, Qt
@@ -12,12 +13,14 @@ from PyQt5.QtWidgets import QDoubleSpinBox, QStyleOptionViewItem
 from tests.qt_support import qapp
 from tests.support import SRC  # noqa: F401
 
+from sdk.contracts.events import Events
 from sdk.features.items import ITEM_SECTION_MIME, encode_item_section
 from tests.test_ogg_comment import _make_file
 
 from modules.ogg_editor import editor_tab as editor_tab_module
 from modules.ogg_editor import module as ogg_module
 from modules.ogg_editor.editor_tab import OggEditorTab
+from ui.platform.theme import theme_service
 from modules.ogg_editor.explorer import (
     FIELD_COLUMNS,
     MISSING_STATE,
@@ -53,7 +56,11 @@ class _Sub:
 
 
 class _Events:
-    def subscribe(self, *_args, **_kwargs):
+    def __init__(self):
+        self.subscriptions = []
+
+    def subscribe(self, name, callback):
+        self.subscriptions.append((name, callback))
         return _Sub()
 
     def publish(self, *_args, **_kwargs):
@@ -76,7 +83,7 @@ class _Ui:
         return True
 
     def theme_color(self, name, fallback=None):
-        return fallback
+        return theme_service().token(name, fallback)
 
     def read_project_asset(self, path):
         return None
@@ -227,6 +234,30 @@ class OggEditorUiTest(unittest.TestCase):
         self.assertEqual(module.manifest.sdk_min, "0.1.0")
         self.assertEqual(module.manifest.requires, ("base",))
 
+    def test_theme_event_refreshes_open_window_and_tabs(self):
+        ctx = _Ctx()
+        module = OggEditorModule()
+        module.init(ctx)
+        calls = []
+        module._window = SimpleNamespace(
+            refresh_theme=lambda: calls.append("window")
+        )
+        module._tabs = {
+            "tab": SimpleNamespace(
+                refresh_theme=lambda: calls.append("tab")
+            )
+        }
+
+        callbacks = [
+            callback
+            for name, callback in ctx.events.subscriptions
+            if name == Events.UI_THEME_CHANGED
+        ]
+        self.assertEqual(len(callbacks), 1)
+        callbacks[0](None)
+
+        self.assertEqual(calls, ["window", "tab"])
+
     def test_common_values_show_dash_only_for_mixed(self):
         first = XraySoundComment(
             min_dist=1.0,
@@ -250,7 +281,11 @@ class OggEditorUiTest(unittest.TestCase):
         same = common_values([first, first])
         self.assertAlmostEqual(same.max_dist, 30.0)
 
-        dialog = MultiEditDialog(count=2, initial=common)
+        dialog = MultiEditDialog(
+            count=2,
+            initial=common,
+            theme_color=theme_service().token,
+        )
         try:
             self.assertEqual(dialog.max_spin.text(), "-")
             self.assertAlmostEqual(dialog.min_spin.value(), 1.0)
@@ -267,7 +302,8 @@ class OggEditorUiTest(unittest.TestCase):
                 dialog.styleSheet(),
             )
             self.assertIn(
-                "background-color: #1E1F22",
+                "background-color: %s"
+                % theme_service().token("bg_main"),
                 dialog.styleSheet(),
             )
         finally:
@@ -870,7 +906,7 @@ snd_2_layer = weapons\\far
                 )
                 self.assertEqual(window.selected_files(), [path])
                 self.assertIn(
-                    "#CCA700",
+                    theme_service().token("accent_amber"),
                     window.edit_selected_button.styleSheet(),
                 )
 
@@ -964,7 +1000,7 @@ snd_2_layer = weapons\\far
                     "Отменить выбор",
                 )
                 self.assertIn(
-                    "#F14C4C",
+                    theme_service().token("accent_red"),
                     window.multi_button.styleSheet(),
                 )
 

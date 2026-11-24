@@ -141,20 +141,24 @@ def main():
     from ui.platform.sdk_bridge import build_module_context
     from sdk.contracts.events import Events
     from ui.bus import CommandBus, EventBus
-    from ui.hints import HintService
-    from ui.hints.providers import (
+    from ui.hints.controller import create_controller
+    from ui.platform.hints import HintService
+    from ui.platform.hints.providers import (
         ColorTagProvider,
         DirectiveProvider,
         IncludePathProvider,
         KeyProvider,
         LocalizationKeyProvider,
+        ParentNameProvider,
         ParentProvider,
         SectionProvider,
     )
     from ui.main_window import MainWindow
+    from ui.operations import OperationRegistry
     from ui.platform_api import PlatformApi
     from ui.tasks import TaskService
-    from ui.theme import apply_theme, configure_cache_dir
+    from ui.platform.theme import apply_theme, configure_cache_dir
+    from ui.platform.window_service import WindowService
 
     # Portable-раскладка: код может лежать в src/, но все данные
     # приложения — generated/projects — находятся рядом с приложением.
@@ -246,7 +250,9 @@ def main():
     # 2) Сервисы платформы.
     events = EventBus()
     commands = CommandBus()
-    tasks = TaskService()
+    operations = OperationRegistry()
+    tasks = TaskService(operations=operations)
+    window_service = WindowService(app_root / "config" / "layout.json")
     app_paths = AppPaths(
         app_dir=app_dir,
         generated_dir=generated_dir,
@@ -261,6 +267,8 @@ def main():
         services,
         paths,
         snapshot_service=snapshot_service,
+        operations=operations,
+        window_service=window_service,
     )
     if removed_caches:
         api.log(
@@ -279,6 +287,7 @@ def main():
         forest_getter=lambda: api.workspace.forest,
         overlay_getter=api.project_overlay,
         log_fn=api.log,
+        controller_factory=create_controller,
     )
     for provider_type in (
         IncludePathProvider,
@@ -286,6 +295,7 @@ def main():
         LocalizationKeyProvider,
         SectionProvider,
         ParentProvider,
+        ParentNameProvider,
         KeyProvider,
         DirectiveProvider,
     ):
@@ -313,7 +323,10 @@ def main():
     # 4) Главное окно. Сразу разворачиваем: рабочая среда рассчитана
     # на широкий экран (дерево + редактор + диагностика).
     window = MainWindow(api)
-    window.showMaximized()
+    if getattr(window, "layout_restored", False):
+        window.show()
+    else:
+        window.showMaximized()
 
     # 5) Активация модулей и старт.
     loader.activate_all(log=api.log)

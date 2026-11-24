@@ -202,6 +202,108 @@ def _call_name(func):
     return ""
 
 
+class ThemeHardColorTest(unittest.TestCase):
+    THEME = ROOT / "ui" / "platform" / "theme.py"
+    _HEX = re.compile(r"#[0-9A-Fa-f]{3,8}\b")
+    _PALETTE_ROLE = re.compile(
+        r"palette\((?:mid|window|bright-text|text|base|alternate-base)\)"
+    )
+
+    def test_theme_module_lives_in_platform(self):
+        self.assertTrue(self.THEME.is_file())
+        self.assertFalse((ROOT / "ui" / "theme.py").exists())
+    _NAMED = (
+        "white|black|red|green|blue|gray|grey|yellow|cyan|magenta"
+    )
+    _NAMED_CSS = re.compile(
+        r"(?:color|background(?:-color)?)\s*:\s*(?:%s)\b" % _NAMED,
+        re.IGNORECASE,
+    )
+    _QCOLOR_NAMED = re.compile(
+        r"QColor\s*\(\s*['\"](?:%s)['\"]" % _NAMED,
+        re.IGNORECASE,
+    )
+    _QT_NAMED = re.compile(r"Qt\.(?:%s)\b" % _NAMED, re.IGNORECASE)
+    _RGB = re.compile(r"\brgba?\s*\(", re.IGNORECASE)
+
+    def _matches(self, line):
+        return bool(
+            self._HEX.search(line)
+            or self._NAMED_CSS.search(line)
+            or self._QCOLOR_NAMED.search(line)
+            or self._QT_NAMED.search(line)
+            or self._RGB.search(line)
+        )
+
+    def test_recognizes_named_and_short_colors(self):
+        for sample in (
+            "color: white;",
+            "background-color: black;",
+            'QColor("red")',
+            "Qt.blue",
+            "#FFF",
+            "#FFFFFFFF",
+            "rgba(1, 2, 3, 0.5)",
+        ):
+            with self.subTest(sample=sample):
+                self.assertTrue(self._matches(sample))
+        self.assertFalse(self._matches("color: palette(mid);"))
+        self.assertFalse(self._matches("background: transparent;"))
+
+    def test_ui_and_modules_have_no_hard_colors(self):
+        roots = (ROOT / "ui", ROOT / "modules")
+        offenders = []
+        for root in roots:
+            for path in root.rglob("*.py"):
+                if path == self.THEME:
+                    continue
+                for number, line in enumerate(
+                    path.read_text(encoding="utf-8").splitlines(),
+                    start=1,
+                ):
+                    if self._matches(line):
+                        offenders.append(
+                            "%s:%d: %s"
+                            % (
+                                path.relative_to(ROOT),
+                                number,
+                                line.strip(),
+                            )
+                        )
+        self.assertEqual(
+            offenders,
+            [],
+            "Жёсткие цвета вне ui/platform/theme.py:\n" + "\n".join(offenders),
+        )
+
+    def test_palette_qss_roles_are_not_used_as_theme_source(self):
+        roots = (ROOT / "ui", ROOT / "modules")
+        offenders = []
+        for root in roots:
+            for path in root.rglob("*.py"):
+                if path == self.THEME:
+                    continue
+                for number, line in enumerate(
+                    path.read_text(encoding="utf-8").splitlines(),
+                    start=1,
+                ):
+                    if self._PALETTE_ROLE.search(line):
+                        offenders.append(
+                            "%s:%d: %s"
+                            % (
+                                path.relative_to(ROOT),
+                                number,
+                                line.strip(),
+                            )
+                        )
+        self.assertEqual(
+            offenders,
+            [],
+            "QSS-роли palette(...) вне ui/platform/theme.py:\n"
+            + "\n".join(offenders),
+        )
+
+
 class ArchitectureBoundaryTest(unittest.TestCase):
     def test_packages_are_discovered(self):
         for package, known in KNOWN_FILES.items():
@@ -273,6 +375,15 @@ class ArchitectureBoundaryTest(unittest.TestCase):
             roots = _imports(path)
             for forbidden in ("sdk", "app", "platform", "ui", "modules"):
                 self.assertNotIn(forbidden, roots, str(path))
+
+    def test_platform_hint_service_does_not_import_ui_hints(self):
+        path = ROOT / "ui" / "platform" / "hints" / "service.py"
+        offenders = [
+            name
+            for name in _import_names(path)
+            if name.startswith("ui.hints")
+        ]
+        self.assertEqual(offenders, [])
 
     def test_ui_core_imports_are_allowlisted(self):
         found = set()

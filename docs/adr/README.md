@@ -97,3 +97,36 @@
   проверка источника, дублей и `DLTX_DELETE` перед авторизацией.
 - [ADR-24](ADR-24-async-patch-write-ui.md) — фоновая запись через
   `TaskService`, прогресс/отмена и UI предпросмотра с diff и рисками.
+
+Решения Этапа 6:
+
+- [ADR-25](ADR-25-task-operation-contract.md) — `operation_key`,
+  `title` и `depends_on` в `TaskApi.run`; `OperationRegistry` и
+  `TaskHandle` как платформенная инфраструктура.
+- [ADR-26](ADR-26-window-specs.md) — `WindowSpec`/`DockSpec`/`TabSpec`,
+  `open_window`/`open_tab`/`open_dock` и `save_state`/`load_state`.
+- [ADR-27](ADR-27-file-open-context.md) — контексты открытия
+  `view/edit/preview/patch`, предпочтения и разрешение неоднозначности.
+- [ADR-28](ADR-28-file-open-handler-id.md) — стабильный `handler_id`
+  обработчика открытия и ключ предпочтения.
+- [ADR-29](ADR-29-task-pool.md) — пул потоков `TaskService`,
+  `max_workers`, приоритеты и отмена через `current_task()`.
+- [ADR-30](ADR-30-theme-changed-event.md) — событие
+  `Events.UI_THEME_CHANGED` для перекраски открытых окон и вкладок
+  модулей без пересоздания.
+
+Решения перед Этапом 7 (приняты до кода):
+
+- [ADR-31](ADR-31-manifest-and-lifecycle.md) — `module.json`, состояния
+  загрузчика, `config/modules.json`, trust, reload/unload и изоляция
+  ошибок.
+- [ADR-32](ADR-32-capabilities-and-public-sdk.md) — типизированные
+  capability-протоколы, версии, конфликт провайдеров как ошибка
+  валидации, `CapabilitiesApi` вместо публичных registry/scope,
+  `ModuleManifest.id` и SDK `0.12.0`.
+- [ADR-33](ADR-33-base-item-browser-domain.md) — `base` как обычный
+  модуль, `item_browser`, домен items/ogg, default-set и закрытие
+  MOD-1…MOD-4.
+- [ADR-34](ADR-34-module-data-and-settings.md) — настройки модулей,
+  `config/modules.json`, `layout.json`, перенос DATA-4 на Этап 9 и
+  закрытие P1 `needs_confirmation`.

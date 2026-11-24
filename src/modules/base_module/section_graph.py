@@ -21,6 +21,7 @@ from PyQt5.QtWidgets import (
 )
 
 from sdk.contracts import SectionGraphRequest
+from sdk.ui import WindowSpec
 
 
 # Маркеры и цвета типов связей. Цвета запрашиваются через ctx.ui,
@@ -115,8 +116,22 @@ class SectionGraphFeature:
             self.ctx.ui.close_module_window(self.WINDOW_KEY)
             self._window = None
 
+    def refresh_theme(self):
+        if self._window is not None:
+            self._window.refresh_theme()
+
     # -------------------------------------------------- запросы
     def _request_graph(self, section_name, vfs_mode):
+        operation_key = "section.graph:%s:%s" % (
+            section_name,
+            "vfs" if vfs_mode else "resolved",
+        )
+        if self.ctx.tasks.operation_active(operation_key):
+            self.ctx.ui.log(
+                "Граф связей '%s' уже строится." % section_name
+            )
+            return
+
         self._request_seq += 1
         token = self._request_seq
         progress_key = "base.section_graph.progress.%d" % token
@@ -201,6 +216,8 @@ class SectionGraphFeature:
                 token,
             ),
             on_log=on_log,
+            operation_key=operation_key,
+            title="Граф связей: %s" % section_name,
         )
 
     def _on_graph_log(self, message, progress_key):
@@ -339,7 +356,15 @@ class SectionGraphFeature:
                 % (section_name, len(lost))
             )
 
-        self.ctx.ui.show_module_window(self.WINDOW_KEY, self._window)
+        self.ctx.ui.open_window(
+            WindowSpec(
+                key=self.WINDOW_KEY,
+                title="Связи секции",
+                kind="floating",
+                state_key="base.section_graph",
+            ),
+            self._window,
+        )
 
 
 class SectionGraphWindow(QDialog):
@@ -358,6 +383,7 @@ class SectionGraphWindow(QDialog):
         self._theme_color = theme_color
         self._graph = None
         self._vfs_mode = False
+        self._lost_nodes = ()
         self._lost_panel_expanded = False
         self._edge_styles = dict(EDGE_STYLES)
         self._openers = {}
@@ -504,6 +530,7 @@ class SectionGraphWindow(QDialog):
         if openers is not None:
             self._openers = dict(openers)
 
+        self._lost_nodes = tuple(nodes)
         self._populate_list(
             self.lost_list_widget,
             nodes,
@@ -524,6 +551,7 @@ class SectionGraphWindow(QDialog):
 
     def clear_lost_nodes(self):
         """Скрыть правую панель, не трогая левый список."""
+        self._lost_nodes = ()
         self.lost_list_widget.clear()
         self.lost_panel.setVisible(False)
         info = "\n".join(
@@ -532,9 +560,22 @@ class SectionGraphWindow(QDialog):
         )
         self.info_label.setText(info)
 
+    def refresh_theme(self):
+        if self._graph is not None:
+            self._populate_list(
+                self.list_widget,
+                self._graph.children,
+                include_root=True,
+            )
+        if self._lost_nodes:
+            self._populate_list(
+                self.lost_list_widget,
+                self._lost_nodes,
+                include_root=False,
+            )
+
     def _populate_list(self, list_widget, nodes, include_root):
         list_widget.clear()
-
         if include_root:
             list_widget.addTopLevelItem(
                 self._make_root_item(self._graph.root)

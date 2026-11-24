@@ -21,7 +21,7 @@ from app.projects import ProjectError
 from PyQt5.QtCore import QTimer
 from sdk.features.items import ItemCardRequest
 from sdk.features.documents import ResolvedDraftInfo
-from sdk.contracts.events import Events
+from sdk.contracts.events import Events, PLATFORM_OWNER
 
 
 class ResolvedDocumentMixin:
@@ -41,6 +41,7 @@ class ResolvedDocumentMixin:
                     unbind(document)
             document.unbind_view()
         self._resolved_documents.clear()
+        self._resolved_owner_map().clear()
         self._clear_pending_file_actions()
         self._patch_preview_ready = False
         apply_label = getattr(self, "_apply_patch_action_label", None)
@@ -60,14 +61,66 @@ class ResolvedDocumentMixin:
                     except Exception:
                         pass
 
+    # -------------------------------------------------- владение
+    def _resolved_owner_map(self):
+        owners = self.__dict__.get("_resolved_tab_owners")
+        if owners is None:
+            owners = {}
+            self._resolved_tab_owners = owners
+        return owners
+
+    def _resolved_owner(self, tab_id):
+        tab_id = str(tab_id or "")
+        owners = self._resolved_owner_map()
+        if tab_id in owners:
+            return owners[tab_id]
+        window = getattr(self, "window", None)
+        if window is None:
+            return ""
+        editor = getattr(window, "editor", None)
+        if editor is None:
+            return ""
+        return str(editor.owner_of(tab_id) or "")
+
+    def _resolved_owner_allows(self, tab_id, owner):
+        if not owner:
+            return True
+        stored = self._resolved_owner(tab_id)
+        return not stored or stored == str(owner)
+
+    def _remember_resolved_owner(self, tab_id, owner):
+        owner = PLATFORM_OWNER if not owner else str(owner)
+        tab_id = str(tab_id or "")
+        owners = self._resolved_owner_map()
+        if not owners.get(tab_id):
+            owners[tab_id] = owner
+
+    def _clear_resolved_owner(self, tab_id):
+        self._resolved_owner_map().pop(str(tab_id or ""), None)
+
+    def _check_resolved_owner(self, tab_id, owner):
+        if self._resolved_owner_allows(tab_id, owner):
+            self._remember_resolved_owner(tab_id, owner)
+            return True
+        try:
+            self.log(
+                "Resolved: вкладка %s принадлежит другому владельцу"
+                % (tab_id,)
+            )
+        except Exception:
+            pass
+        return False
+
     def _on_tab_closed(self, tab_id):
         self.close_section_cards(tab_id)
         document = self._resolved_documents.get(str(tab_id))
         if document is None:
+            self._clear_resolved_owner(tab_id)
             return
         document.unbind_view()
         if document.can_drop():
             self._resolved_documents.pop(str(tab_id), None)
+            self._clear_resolved_owner(tab_id)
 
     def _refresh_orphan_resolved_tab(self, tab_id, view):
         """Перерезолвить открытую resolved-вкладку из активного проекта.
@@ -281,8 +334,11 @@ class ResolvedDocumentMixin:
         text="",
         line_sources=(),
         document_format="ltx",
+        owner=None,
     ):
         """Публичная точка создания/получения документа для модулей."""
+        if not self._check_resolved_owner(tab_id, owner):
+            return None
         document = self._ensure_resolved_document(
             tab_id,
             root_path=root_path,
@@ -458,21 +514,27 @@ class ResolvedDocumentMixin:
         )
         return draft.title if draft is not None else ""
 
-    def retain_resolved_document(self, tab_id):
+    def retain_resolved_document(self, tab_id, owner=None):
+        if not self._check_resolved_owner(tab_id, owner):
+            return False
         document = self._get_or_restore_document(tab_id)
         if document is not None:
             document.retain()
             return True
         return False
 
-    def release_resolved_document(self, tab_id):
+    def release_resolved_document(self, tab_id, owner=None):
         tab_id = str(tab_id or "")
+        if not self._check_resolved_owner(tab_id, owner):
+            return False
         document = self._resolved_documents.get(tab_id)
         if document is None:
+            self._clear_resolved_owner(tab_id)
             return False
         document.release()
         if document.can_drop():
             self._resolved_documents.pop(tab_id, None)
+            self._clear_resolved_owner(tab_id)
         return True
 
     def _flush_resolved_view(self, tab_id):
@@ -498,8 +560,11 @@ class ResolvedDocumentMixin:
         action,
         line_number,
         text="",
+        owner=None,
     ):
         """Единственная точка правки resolved-документа из модуля."""
+        if not self._check_resolved_owner(tab_id, owner):
+            return False
         self._flush_resolved_view(tab_id)
         document = self._get_or_restore_document(tab_id)
         if document is None:
@@ -514,7 +579,9 @@ class ResolvedDocumentMixin:
             )
         return ok
 
-    def apply_resolved_field_edit(self, tab_id, section, key, value):
+    def apply_resolved_field_edit(self, tab_id, section, key, value, owner=None):
+        if not self._check_resolved_owner(tab_id, owner):
+            return False
         self._flush_resolved_view(tab_id)
         document = self._get_or_restore_document(tab_id)
         if document is None:
@@ -536,7 +603,10 @@ class ResolvedDocumentMixin:
         old_key,
         new_key,
         value,
+        owner=None,
     ):
+        if not self._check_resolved_owner(tab_id, owner):
+            return False
         self._flush_resolved_view(tab_id)
         document = self._get_or_restore_document(tab_id)
         if document is None:
@@ -564,6 +634,7 @@ class ResolvedDocumentMixin:
         key,
         value,
         on_done=None,
+        owner=None,
     ):
         """Поставить правку поля в фоновую очередь.
 
@@ -571,6 +642,8 @@ class ResolvedDocumentMixin:
         рабочем потоке; в UI-потоке остаётся только короткая фиксация
         результата в документе и представлении.
         """
+        if not self._check_resolved_owner(tab_id, owner):
+            return False
         return self._enqueue_resolved_edit(
             tab_id,
             {
@@ -580,6 +653,7 @@ class ResolvedDocumentMixin:
                 "value": str(value),
             },
             on_done,
+            owner=owner,
         )
 
     def rename_resolved_field_async(
@@ -590,7 +664,10 @@ class ResolvedDocumentMixin:
         new_key,
         value,
         on_done=None,
+        owner=None,
     ):
+        if not self._check_resolved_owner(tab_id, owner):
+            return False
         return self._enqueue_resolved_edit(
             tab_id,
             {
@@ -601,15 +678,19 @@ class ResolvedDocumentMixin:
                 "value": str(value),
             },
             on_done,
+            owner=owner,
         )
 
-    def _enqueue_resolved_edit(self, tab_id, job, on_done=None):
+    def _enqueue_resolved_edit(self, tab_id, job, on_done=None, owner=None):
         tab_id = str(tab_id or "")
         if not tab_id:
+            return False
+        if not self._check_resolved_owner(tab_id, owner):
             return False
         job = dict(job)
         job["attempts"] = 0
         job["on_done"] = on_done
+        job["owner"] = owner
         self._resolved_edit_queues.setdefault(tab_id, []).append(job)
         self._pump_resolved_edit_queue(tab_id)
         return True
@@ -626,6 +707,14 @@ class ResolvedDocumentMixin:
         self._start_resolved_edit_job(tab_id, queue.pop(0))
 
     def _start_resolved_edit_job(self, tab_id, job):
+        if not self._resolved_owner_allows(tab_id, job.get("owner")):
+            self._finish_resolved_edit(
+                tab_id,
+                job,
+                False,
+                "Resolved-документ принадлежит другому владельцу",
+            )
+            return
         self._flush_resolved_view(tab_id)
         document = self._get_or_restore_document(tab_id)
         if document is None:
@@ -785,13 +874,17 @@ class ResolvedDocumentMixin:
             lambda: self._pump_resolved_edit_queue(tab_id),
         )
 
-    def undo_resolved_document(self, tab_id):
+    def undo_resolved_document(self, tab_id, owner=None):
+        if not self._check_resolved_owner(tab_id, owner):
+            return False
         document = self._get_or_restore_document(tab_id)
         return bool(
             document is not None and document.apply(UndoIntent())
         )
 
-    def redo_resolved_document(self, tab_id):
+    def redo_resolved_document(self, tab_id, owner=None):
+        if not self._check_resolved_owner(tab_id, owner):
+            return False
         document = self._get_or_restore_document(tab_id)
         return bool(
             document is not None and document.apply(RedoIntent())
@@ -895,12 +988,15 @@ class ResolvedDocumentMixin:
         current_text,
         line_sources=(),
         line_edit=None,
+        owner=None,
     ):
         if not self.project.is_active:
             self.set_status(
                 "Создайте проект, чтобы изменять файлы",
                 7000,
             )
+            return False
+        if not self._check_resolved_owner(tab_id, owner):
             return False
 
         document = self._ensure_resolved_document(
@@ -919,6 +1015,7 @@ class ResolvedDocumentMixin:
                 line_edit.action,
                 line_edit.line_number,
                 line_edit.text,
+                owner=owner,
             )
 
         # Полная замена допустима, но не должна затирать более свежий
@@ -933,17 +1030,21 @@ class ResolvedDocumentMixin:
             )
         )
 
-    def sync_resolved_line_edit(self, tab_id, edit):
+    def sync_resolved_line_edit(self, tab_id, edit, owner=None):
         """Точечно обновить открытую resolved-вкладку."""
         return self.apply_resolved_line_edit(
             tab_id,
             edit.action,
             edit.line_number,
             edit.text,
+            owner=owner,
         )
 
-    def sync_resolved_tab(self, tab_id, text, line_sources, root_path):
+    def sync_resolved_tab(self, tab_id, text, line_sources, root_path,
+                          owner=None):
         """Обновить открытую resolved-вкладку без переключения на неё."""
+        if not self._check_resolved_owner(tab_id, owner):
+            return False
         document = self._resolved_documents.get(str(tab_id or ""))
         if document is not None:
             document.apply(
@@ -989,7 +1090,7 @@ class ResolvedDocumentMixin:
 
 
     def open_resolved_tab(self, tab_id, title, text, line_sources, root_path,
-                          line_number=None, request_id=None):
+                          line_number=None, request_id=None, owner=None):
         """Открыть (или сфокусировать) вкладку живого resolved-документа."""
         if self.window is None:
             return
@@ -1000,6 +1101,8 @@ class ResolvedDocumentMixin:
             claim=True,
         )
         tab_id = str(tab_id or "")
+        if not self._check_resolved_owner(tab_id, owner):
+            return False
         existing_widget = self.window.editor.get_tab(tab_id)
         from ..editor import ResolvedView
 
@@ -1046,6 +1149,7 @@ class ResolvedDocumentMixin:
                 existing_widget,
                 source_path=str(root_path),
                 request_id=request_id,
+                owner=owner,
             )
             if line_number is not None:
                 existing_widget.goto_line(int(line_number))
@@ -1113,6 +1217,7 @@ class ResolvedDocumentMixin:
             view,
             source_path=root_path,
             request_id=request_id,
+            owner=owner,
         )
         tab_elapsed = time.perf_counter() - started
         self._log_slow_view("resolved", title, content_elapsed, tab_elapsed)
@@ -1144,9 +1249,11 @@ class ResolvedDocumentMixin:
         )
         view._section_card_wired = True
 
-    def open_resolved_document(self, tab_id, line_number=None):
+    def open_resolved_document(self, tab_id, line_number=None, owner=None):
         """Открыть или сфокусировать resolved-документ по id вкладки."""
         tab_id = str(tab_id or "")
+        if not self._check_resolved_owner(tab_id, owner):
+            return False
         document = self._resolved_documents.get(tab_id)
         if document is None:
             draft = (
@@ -1173,15 +1280,18 @@ class ResolvedDocumentMixin:
             document.line_sources,
             document.root_path,
             line_number=line_number,
+            owner=owner,
         )
         return True
 
     def open_xml_resolved_tab(self, tab_id, title, text, root_path,
                               line_sources=None, line_number=None,
-                              request_id=None):
+                              request_id=None, owner=None):
         """Открыть XML-резолв в отдельной вкладке с панелью источников."""
         if self.window is None:
             return
+        if not self._check_resolved_owner(tab_id, owner):
+            return False
         from ..editor import ResolvedView
 
         request_id = self._resolve_file_request_id(
@@ -1249,6 +1359,7 @@ class ResolvedDocumentMixin:
                 existing_widget,
                 source_path=str(root_path),
                 request_id=request_id,
+                owner=owner,
             )
             if line_number is not None:
                 existing_widget.goto_line(int(line_number))
@@ -1292,6 +1403,7 @@ class ResolvedDocumentMixin:
             view,
             source_path=str(root_path),
             request_id=request_id,
+            owner=owner,
         )
         tab_elapsed = time.perf_counter() - started
         self._log_slow_view("xml-resolved", title, content_elapsed, tab_elapsed)

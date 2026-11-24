@@ -16,6 +16,8 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor
 from PyQt5.QtWidgets import QStyle, QTreeWidget, QTreeWidgetItem
 
+from .platform.theme import theme_service
+
 DRIVE_KEY = "::drive::"
 FOLDER_PREFIX = "::folder::"
 
@@ -100,7 +102,7 @@ class SortableTreeWidgetItem(QTreeWidgetItem):
 class FileTreeWidget(QTreeWidget):
     file_opened = pyqtSignal(str)
 
-    HL_COLOR = QColor("#4f4f00")
+    HL_COLOR = QColor(theme_service().palette.tree_highlight)
 
     def __init__(self, sort_fn=None, parent=None):
         super().__init__(parent)
@@ -317,6 +319,13 @@ class FileTreeWidget(QTreeWidget):
 
         for item in self._path_to_item.values():
             item.setBackground(0, QBrush())
+
+    def refresh_theme(self):
+        self.HL_COLOR = QColor(
+            theme_service().token("tree_highlight")
+        )
+        self.highlight(self._highlight)
+        self.viewport().update()
 
     # -------------------------------------------------- поиск: показать узел
     def _walk_down(self, item, key, segs):

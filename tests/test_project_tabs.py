@@ -6,16 +6,21 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from tests.support import SRC  # noqa: F401
 
+from PyQt5.QtCore import QEventLoop, Qt, QTimer
 from PyQt5.QtWidgets import QMainWindow, QWidget
 
 from app.projects import ProjectService
+from sdk.ui import DockSpec, TabSpec, WindowSpec
 from tests.qt_support import qapp
 from ui.bus import EventBus
 from ui.editor_tabs import EditorTabs, MissingOwnerTab
+from ui.platform.window_service import WindowService
 from ui.platform_api import PlatformApi
+from ui.tasks import TaskService
 
 
 class _Services:
@@ -114,7 +119,7 @@ class EditorTabsSessionTest(unittest.TestCase):
         tabs = EditorTabs()
         self.addCleanup(tabs.deleteLater)
         tabs.open_file("a.ltx", text="[a]\n")
-        tabs.open_tab("plugin.tab", "Plugin", QWidget())
+        tabs.open_tab("plugin.tab", "Plugin", QWidget(), owner="plugin")
         tabs.set_tab_dirty("plugin.tab", True)
         tabs.set_current_tab("plugin.tab")
 
@@ -125,6 +130,7 @@ class EditorTabsSessionTest(unittest.TestCase):
         )
         self.assertEqual(records[0]["kind"], "editor")
         self.assertEqual(records[1]["kind"], "module")
+        self.assertEqual(records[1]["owner"], "plugin")
         self.assertEqual(records[1]["title"], "Plugin")
         self.assertTrue(records[1]["active"])
         self.assertFalse(records[0]["active"])
@@ -161,17 +167,18 @@ class RestoreProjectTabsTest(unittest.TestCase):
     def setUp(self):
         self.app = qapp()
 
-    def _api(self, root):
+    def _api(self, root, tasks=None, window_service=None):
         events = EventBus()
         api = PlatformApi(
             events,
             SimpleNamespace(register=lambda *a, **k: None),
-            None,
+            tasks,
             _Services(),
             SimpleNamespace(
                 projects_dir=Path(root) / "projects",
                 app_dir=Path(root),
             ),
+            window_service=window_service,
         )
         window = _Window(events)
         api.window = window
@@ -187,7 +194,12 @@ class RestoreProjectTabsTest(unittest.TestCase):
             api, window, _project = self._api(d)
             api.project.update_draft(source, "[a]\nx = 2\n")
             window.editor.open_file(source, text="[a]\nx = 2\n")
-            window.editor.open_tab("ogg_editor.abc", "sound.ogg", QWidget())
+            window.editor.open_tab(
+                "ogg_editor.abc",
+                "sound.ogg",
+                QWidget(),
+                owner="ogg_editor",
+            )
             window.editor.set_current_tab("ogg_editor.abc")
 
             self.assertTrue(api._save_open_tabs())
@@ -241,7 +253,12 @@ class RestoreProjectTabsTest(unittest.TestCase):
 
             api, window, project = self._api(d)
             window.editor.open_file(source, text="[a]\nx = 1\n")
-            window.editor.open_tab("ogg_editor.abc", "sound.ogg", QWidget())
+            window.editor.open_tab(
+                "ogg_editor.abc",
+                "sound.ogg",
+                QWidget(),
+                owner="ogg_editor",
+            )
             self.assertTrue(api._save_open_tabs())
 
             project_id = project.id
@@ -257,6 +274,332 @@ class RestoreProjectTabsTest(unittest.TestCase):
                 window.editor.get_tab("ogg_editor.abc"),
                 MissingOwnerTab,
             )
+
+    def _wait_until(self, predicate, timeout=3000):
+        loop = QEventLoop()
+        timer = QTimer()
+        timer.setInterval(10)
+
+        def check():
+            if predicate():
+                loop.quit()
+
+        timer.timeout.connect(check)
+        timer.start()
+        QTimer.singleShot(timeout, loop.quit)
+        loop.exec_()
+        timer.stop()
+        return predicate()
+
+    def test_load_project_runs_in_tasks(self):
+        with tempfile.TemporaryDirectory() as d:
+            tasks = TaskService()
+            api, _window, first = self._api(d, tasks=tasks)
+            first_id = first.id
+            second = api.project.create("second", save_mode="root")
+            second_id = second.id
+            api._forest = object()
+
+            class _Dialog:
+                def __init__(self, *_args, **_kwargs):
+                    pass
+
+                def exec_(self):
+                    return True
+
+                def selected_id(self):
+                    return first_id
+
+            with patch(
+                "ui.platform.project_controller.ProjectLoadDialog",
+                _Dialog,
+            ):
+                api.load_project()
+                self.assertTrue(self._wait_until(
+                    lambda: bool(
+                        api.project.active
+                        and api.project.active.id == first_id
+                        and not tasks.operations.is_active(
+                            "project.load"
+                        )
+                    )
+                ))
+            self.assertFalse(
+                tasks.operations.is_active("project.load")
+            )
+            snapshot = tasks.operations.get("project.load")
+            self.assertIsNotNone(snapshot)
+            self.assertEqual(snapshot.owner, second_id)
+
+    def test_default_tab_restores_with_legacy_ui_owner(self):
+        with tempfile.TemporaryDirectory() as d:
+            source = Path(d) / "a.ltx"
+            source.write_text("[a]\nx = 1\n", encoding="windows-1251")
+
+            api, window, _project = self._api(d)
+            api.project.save_tabs(
+                [
+                    {
+                        "tab_id": "ui.editor",
+                        "title": "a.ltx",
+                        "kind": "editor",
+                        "owner": "ui",
+                        "source_path": str(source),
+                        "active": True,
+                    }
+                ]
+            )
+
+            api._restore_editor_tabs()
+
+            self.assertIsNotNone(window.editor.get_tab("ui.editor"))
+
+    def test_platform_api_checks_tab_owner(self):
+        with tempfile.TemporaryDirectory() as d:
+            api, window, _project = self._api(d)
+            widget = QWidget()
+            self.assertFalse(
+                api.open_editor_tab(
+                    "ui.editor",
+                    "Reserved",
+                    QWidget(),
+                    owner="demo",
+                )
+            )
+            self.assertTrue(
+                api.open_editor_tab(
+                    "demo.tab",
+                    "Demo",
+                    widget,
+                    owner="demo",
+                )
+            )
+            self.assertFalse(
+                api.close_editor_tab("demo.tab", owner="other")
+            )
+            self.assertTrue(window.editor.has_tab("demo.tab"))
+            self.assertTrue(
+                api.close_editor_tab("demo.tab", owner="demo")
+            )
+            self.assertFalse(window.editor.has_tab("demo.tab"))
+
+    def test_platform_api_checks_window_owner(self):
+        with tempfile.TemporaryDirectory() as d:
+            api, _window, _project = self._api(d)
+            widget = QWidget()
+
+            self.assertTrue(
+                api.show_module_window(
+                    "demo.window",
+                    widget,
+                    owner="demo",
+                )
+            )
+            self.assertFalse(
+                api.close_module_window("demo.window", owner="other")
+            )
+            self.assertTrue(widget.isVisible())
+            self.assertTrue(
+                api.close_module_window("demo.window", owner="demo")
+            )
+            self.assertFalse(widget.isVisible())
+
+    def test_platform_api_open_specs(self):
+        with tempfile.TemporaryDirectory() as d:
+            api, window, _project = self._api(d)
+
+            self.assertTrue(
+                api.open_tab(
+                    TabSpec(
+                        id="demo.tab",
+                        title="Tab",
+                        owner="demo",
+                        dirty=True,
+                        busy=True,
+                    ),
+                    QWidget(),
+                    owner="demo",
+                )
+            )
+            self.assertTrue(window.editor.has_tab("demo.tab"))
+            self.assertIn("demo.tab", window.editor._tab_dirty)
+            self.assertTrue(
+                window.editor.is_tab_busy("demo.tab")
+            )
+
+            self.assertTrue(
+                api.open_window(
+                    WindowSpec(
+                        key="demo.window",
+                        title="Window",
+                        kind="floating",
+                        owner="demo",
+                        size=(320, 200),
+                    ),
+                    QWidget(),
+                    owner="demo",
+                )
+            )
+            self.assertIn("demo.window", api._window_manager._windows)
+
+            self.assertTrue(
+                api.open_dock(
+                    DockSpec(
+                        key="demo.dock",
+                        title="Dock",
+                        owner="demo",
+                    ),
+                    QWidget(),
+                    owner="demo",
+                )
+            )
+            self.assertIn("demo.dock", api._docks)
+
+            self.assertTrue(
+                api.save_state("demo.state", {"value": 1})
+            )
+            self.assertEqual(
+                api.load_state("demo.state"),
+                {"value": 1},
+            )
+
+            self.assertFalse(
+                api.close_module_window("demo.dock", owner="other")
+            )
+            self.assertTrue(
+                api.close_module_window("demo.dock", owner="demo")
+            )
+            self.assertNotIn("demo.dock", api._docks)
+            self.assertTrue(
+                api.close_editor_tab("demo.tab", owner="demo")
+            )
+
+    def test_platform_api_restores_dock_geometry(self):
+        with tempfile.TemporaryDirectory() as d:
+            layout_path = Path(d) / "layout.json"
+            service = WindowService(layout_path)
+            api, window, _project = self._api(
+                d,
+                window_service=service,
+            )
+            self.assertTrue(
+                api.open_dock(
+                    DockSpec(
+                        key="demo.dock",
+                        title="Dock",
+                        area="left",
+                        size=(320, 200),
+                        owner="demo",
+                    ),
+                    QWidget(),
+                    owner="demo",
+                )
+            )
+            dock = api._docks["demo.dock"][0]
+            self.assertEqual(
+                window.dockWidgetArea(dock),
+                Qt.LeftDockWidgetArea,
+            )
+            dock.resize(340, 220)
+            api._persist_dock("demo.dock")
+            service.save_main_window(window)
+            api.close_module_windows()
+
+            events = EventBus()
+            service2 = WindowService(layout_path)
+            api2 = PlatformApi(
+                events,
+                SimpleNamespace(register=lambda *a, **k: None),
+                None,
+                _Services(),
+                SimpleNamespace(
+                    projects_dir=Path(d) / "projects",
+                    app_dir=Path(d),
+                ),
+                window_service=service2,
+            )
+            window2 = _Window(events)
+            api2.window = window2
+            service2.restore_main_window(window2)
+            _ALIVE.append((api2, window2))
+            saved = WindowService(layout_path).load_dock("demo.dock")
+            self.assertGreater(saved["size"][0], 0)
+            self.assertGreater(saved["size"][1], 0)
+            self.assertTrue(
+                api2.open_dock(
+                    DockSpec(
+                        key="demo.dock",
+                        title="Dock",
+                        area="right",
+                        owner="demo",
+                    ),
+                    QWidget(),
+                    owner="demo",
+                )
+            )
+            dock2 = api2._docks["demo.dock"][0]
+            self.assertEqual(
+                window2.dockWidgetArea(dock2),
+                Qt.LeftDockWidgetArea,
+            )
+            self.assertFalse(
+                api2.open_dock(
+                    DockSpec(
+                        key="demo.dock",
+                        title="Dock",
+                        area="right",
+                        owner="other",
+                    ),
+                    QWidget(),
+                    owner="other",
+                )
+            )
+
+    def test_window_spec_dialog_and_closable(self):
+        with tempfile.TemporaryDirectory() as d:
+            api, _window, _project = self._api(d)
+            widget = QWidget()
+            self.assertTrue(
+                api.open_window(
+                    WindowSpec(
+                        key="demo.dialog",
+                        title="Dialog",
+                        kind="dialog",
+                        owner="demo",
+                        closable=False,
+                    ),
+                    widget,
+                    owner="demo",
+                )
+            )
+            flags = widget.windowFlags()
+            self.assertTrue(flags & Qt.Dialog)
+            self.assertFalse(flags & Qt.WindowCloseButtonHint)
+
+    def test_hidden_dock_stays_hidden(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "layout.json"
+            service = WindowService(path)
+            api, window, _project = self._api(
+                d,
+                window_service=service,
+            )
+            window.show()
+            self.assertTrue(
+                api.open_dock(
+                    DockSpec(
+                        key="demo.hidden",
+                        title="Hidden",
+                        owner="demo",
+                        visible=False,
+                    ),
+                    QWidget(),
+                    owner="demo",
+                )
+            )
+            dock = api._docks["demo.hidden"][0]
+            self.assertFalse(dock.isVisible())
+            self.assertFalse(service.load_dock("demo.hidden")["visible"])
 
 
 if __name__ == "__main__":

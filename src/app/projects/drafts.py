@@ -277,8 +277,11 @@ class DraftStore:
                 result.append(draft)
         return result
 
+    def delete_target(self, target) -> None:
+        _unlink(target)
+
     def delete_text(self, project_dir, path) -> None:
-        _unlink(self.text_target(project_dir, path))
+        self.delete_target(self.text_target(project_dir, path))
 
     @staticmethod
     def _read_text_draft(draft_path: Path) -> Optional[ProjectDraft]:
@@ -365,7 +368,7 @@ class DraftStore:
         return result
 
     def delete_asset(self, project_dir, path) -> None:
-        _unlink(self.asset_target(project_dir, path))
+        self.delete_target(self.asset_target(project_dir, path))
 
     @staticmethod
     def _read_asset_draft(
@@ -470,7 +473,7 @@ class DraftStore:
         return result
 
     def delete_resolved(self, target) -> None:
-        _unlink(target)
+        self.delete_target(target)
 
     @staticmethod
     def _read_resolved_draft(

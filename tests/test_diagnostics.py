@@ -7,7 +7,7 @@ from PyQt5.QtGui import QTextCursor
 
 from tests.qt_support import qapp
 from ui.diagnostics import DiagnosticsLog
-from ui.theme import PALETTE
+from ui.platform.theme import DEFAULT_PALETTE
 
 _app = qapp()
 
@@ -25,7 +25,7 @@ class DiagnosticsTest(unittest.TestCase):
 
         self.assertEqual(
             self._block_color(log),
-            PALETTE.accent_amber.lower(),
+            DEFAULT_PALETTE.accent_amber.lower(),
         )
 
     def test_line_fades_to_base(self):
@@ -39,7 +39,7 @@ class DiagnosticsTest(unittest.TestCase):
 
         self.assertEqual(
             self._block_color(log),
-            PALETTE.text.lower(),
+            DEFAULT_PALETTE.text.lower(),
         )
         self.assertEqual(log._fades, [])
 

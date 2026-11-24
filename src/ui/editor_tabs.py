@@ -9,15 +9,16 @@ from PyQt5.QtGui import QColor, QIcon, QPainter, QPalette, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QLabel,
     QMenu,
+    QMessageBox,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from sdk.contracts import FileOpened
-from sdk.contracts.events import Events
+from sdk.contracts.events import Events, PLATFORM_OWNER
 
-from .editor import CodeEditor
+from .editor import CodeEditor, ResolvedView
 
 
 log = logging.getLogger(__name__)
@@ -55,7 +56,10 @@ class EditorTabs(QTabWidget):
         self._commands = commands
         self._file_actions = file_actions or (lambda: ())
         self._tab_ids = {}
+        self._tab_owners = {}
         self._tab_source_paths = {}
+        self._tab_close_policies = {}
+        self._tab_dirty = set()
         self._default_editor = None
         self._can_edit = can_edit or (lambda: False)
         self._hint_attach = hint_attach
@@ -103,19 +107,26 @@ class EditorTabs(QTabWidget):
 
         editor = self._create_editor()
         self._default_editor = editor
-        self._add_tab(DEFAULT_TAB_ID, "Редактор", editor)
+        self._add_tab(DEFAULT_TAB_ID, "Редактор", editor, PLATFORM_OWNER)
         return editor
 
-    def _ensure_text_tab(self, tab_id, title):
+    def _ensure_text_tab(self, tab_id, title, owner=None):
         """Вернуть текстовую вкладку по id, создав её при необходимости."""
         existing = self._tab_ids.get(tab_id)
+        if existing is not None and not self._owner_allows(tab_id, owner):
+            log.warning(
+                "Вкладка %s принадлежит другому владельцу: %s",
+                tab_id,
+                self._tab_owners.get(tab_id, ""),
+            )
+            return None
         if isinstance(existing, CodeEditor):
             return existing
         if existing is not None:
             self.close_tab(tab_id)
 
         editor = self._create_editor()
-        self._add_tab(tab_id, title, editor)
+        self._add_tab(tab_id, title, editor, owner)
         return editor
 
     # -------------------------------------------------- проект и черновик
@@ -134,21 +145,31 @@ class EditorTabs(QTabWidget):
         if tab_id is not None:
             self.set_tab_dirty(tab_id, dirty)
 
-    def set_tab_dirty(self, tab_id, dirty):
+    def set_tab_dirty(self, tab_id, dirty, owner=None):
+        if not self._owner_allows(tab_id, owner):
+            log.warning(
+                "Нельзя изменить чужую вкладку %s (owner=%s)",
+                tab_id,
+                owner,
+            )
+            return False
         widget = self._tab_ids.get(tab_id)
         if widget is None:
-            return
+            return False
         index = self.indexOf(widget)
         if index < 0:
-            return
+            return False
 
         title = self.tabText(index)
         if dirty:
             if not title.startswith("* "):
                 self.setTabText(index, "* " + title)
+            self._tab_dirty.add(str(tab_id))
         else:
             if title.startswith("* "):
                 self.setTabText(index, title[2:])
+            self._tab_dirty.discard(str(tab_id))
+        return True
 
     def mark_tab_clean(self, tab_id):
         widget = self._tab_ids.get(tab_id)
@@ -187,9 +208,16 @@ class EditorTabs(QTabWidget):
     def is_busy(self):
         return self._busy
 
-    def set_tab_busy(self, tab_id, busy):
+    def set_tab_busy(self, tab_id, busy, owner=None):
         """Индивидуальные «часики»: вкладка ещё не готова к правке."""
         tab_id = str(tab_id or "")
+        if not self._owner_allows(tab_id, owner):
+            log.warning(
+                "Нельзя изменить чужую вкладку %s (owner=%s)",
+                tab_id,
+                owner,
+            )
+            return False
         widget = self._tab_ids.get(tab_id)
         if widget is None:
             return False
@@ -345,7 +373,10 @@ class EditorTabs(QTabWidget):
                     "tab_id": str(tab_id),
                     "title": title,
                     "kind": self._tab_kind(widget),
-                    "owner": _tab_owner(tab_id),
+                    "owner": self._tab_owners.get(
+                        tab_id,
+                        PLATFORM_OWNER,
+                    ),
                     "source_path": (
                         str(source_path)
                         if source_path is not None
@@ -361,12 +392,20 @@ class EditorTabs(QTabWidget):
     def _tab_kind(widget):
         if isinstance(widget, CodeEditor):
             return "editor"
-        if hasattr(widget, "root_path") and hasattr(
-            widget,
-            "line_sources",
-        ):
+        if isinstance(widget, ResolvedView):
             return "resolved"
         return "module"
+
+    def tab_mode(self, tab_id):
+        """Режим вкладки: raw, draft, resolved или preview."""
+        widget = self._tab_ids.get(str(tab_id or ""))
+        if widget is None:
+            return ""
+        if isinstance(widget, CodeEditor):
+            return widget.mode
+        if isinstance(widget, ResolvedView):
+            return widget.mode
+        return "preview"
 
     def ensure_default_tab(self):
         """Вернуть базовую вкладку редактора, создав её при необходимости."""
@@ -398,36 +437,58 @@ class EditorTabs(QTabWidget):
         self._close_tabs_by_indices(range(self.count()))
         return self.count() == 0
 
-    def open_missing_owner_tab(self, tab_id, title):
+    def open_missing_owner_tab(self, tab_id, title, owner=None):
         """Открыть заглушку вкладки, чей плагин-владелец не найден."""
         widget = MissingOwnerTab()
-        self.open_tab(tab_id, str(title or tab_id), widget)
+        if not self.open_tab(
+            tab_id,
+            str(title or tab_id),
+            widget,
+            owner=owner,
+        ):
+            return None
         return widget
 
     # -------------------------------------------------- вкладки модулей
     def open_tab(self, tab_id, title, widget, source_path=None,
-                 request_id=0):
+                 request_id=0, owner=None):
         """Открыть вкладку модуля и опубликовать факт её размещения.
 
         ``source_path`` — файл, который показывает вкладка. Он попадает в
         событие :attr:`Events.FILE_OPENED`; по нему платформа понимает,
         к какому именно открытию относится отложенная навигация.
         ``request_id`` связывает событие с конкретным запросом открытия.
+        ``owner`` — модуль-владелец вкладки; ``None`` означает платформу.
+        ``ui.editor`` зарезервирован: возвращается ``False`` без исключения.
         """
         if not tab_id:
             raise ValueError("tab_id не может быть пустым")
         if tab_id == DEFAULT_TAB_ID:
-            raise ValueError("tab_id '%s' зарезервирован" % DEFAULT_TAB_ID)
+            log.warning(
+                "Нельзя открыть зарезервированную вкладку %s",
+                DEFAULT_TAB_ID,
+            )
+            return False
         if not isinstance(widget, QWidget):
             raise TypeError("Содержимое вкладки должно быть QWidget")
 
         existing = self._tab_ids.get(tab_id)
+        if existing is not None and not self._owner_allows(tab_id, owner):
+            log.warning(
+                "Вкладка %s принадлежит другому владельцу: %s",
+                tab_id,
+                self._tab_owners.get(tab_id, ""),
+            )
+            return False
+
         if existing is widget:
             # Виджет переиспользуется, но вкладка всё равно становится
             # текущей — это тоже состоявшееся открытие.
             index = self.indexOf(widget)
             self.setTabText(index, title)
             self.setCurrentIndex(index)
+            if owner:
+                self._tab_owners[tab_id] = str(owner)
             self._tab_source_paths[tab_id] = source_path
             self._publish(Events.UI_TAB_OPENED, tab_id)
             self._publish_file_opened(
@@ -435,12 +496,12 @@ class EditorTabs(QTabWidget):
                 tab_id,
                 request_id,
             )
-            return
+            return True
 
         if existing is not None:
             self.close_tab(tab_id)
 
-        self._add_tab(tab_id, title, widget)
+        self._add_tab(tab_id, title, widget, owner)
         self._tab_source_paths[tab_id] = source_path
         self._publish(Events.UI_TAB_OPENED, tab_id)
         self._publish_file_opened(
@@ -448,6 +509,7 @@ class EditorTabs(QTabWidget):
             tab_id,
             request_id,
         )
+        return True
 
     def flush_pending(self):
         """Зафиксировать отложенный текст всех вкладок."""
@@ -459,7 +521,23 @@ class EditorTabs(QTabWidget):
                 except Exception:
                     log.exception("Не удалось зафиксировать текст вкладки")
 
-    def close_tab(self, tab_id):
+    def refresh_theme(self):
+        for widget in list(self._tab_ids.values()):
+            if not isinstance(widget, (CodeEditor, ResolvedView)):
+                continue
+            try:
+                widget.refresh_theme()
+            except Exception:
+                log.exception("Не удалось обновить тему вкладки")
+
+    def close_tab(self, tab_id, owner=None):
+        if not self._owner_allows(tab_id, owner):
+            log.warning(
+                "Нельзя закрыть чужую вкладку %s (owner=%s)",
+                tab_id,
+                owner,
+            )
+            return False
         widget = self._tab_ids.get(tab_id)
         flush = getattr(widget, "flush_pending", None)
         if callable(flush):
@@ -468,7 +546,10 @@ class EditorTabs(QTabWidget):
             except Exception:
                 log.exception("Не удалось зафиксировать текст вкладки")
         self._tab_ids.pop(tab_id, None)
+        self._tab_owners.pop(tab_id, None)
         self._tab_source_paths.pop(tab_id, None)
+        self._tab_close_policies.pop(tab_id, None)
+        self._tab_dirty.discard(tab_id)
         self._tab_busy.discard(tab_id)
         self._busy_icons.pop(tab_id, None)
         if widget is None:
@@ -488,11 +569,13 @@ class EditorTabs(QTabWidget):
         return True
 
     def close_owner_tabs(self, owner):
-        """Закрыть вкладки модуля по префиксу ``tab_id``."""
+        """Закрыть вкладки, явно принадлежащие ``owner``."""
         wanted = str(owner or "")
+        if not wanted:
+            return 0
         closed = 0
-        for tab_id in list(self._tab_ids):
-            if _tab_owner(tab_id) != wanted:
+        for tab_id, tab_owner in list(self._tab_owners.items()):
+            if tab_owner != wanted:
                 continue
             if self.close_tab(tab_id):
                 closed += 1
@@ -504,6 +587,43 @@ class EditorTabs(QTabWidget):
     def get_tab(self, tab_id):
         """Виджет вкладки по id или ``None``."""
         return self._tab_ids.get(tab_id)
+
+    def owner_of(self, tab_id):
+        """Модуль-владелец вкладки; пустая строка — владелец неизвестен."""
+        return self._tab_owners.get(str(tab_id or ""), "")
+
+    def can_manage_tab(self, tab_id, owner=None):
+        """Можно ли открыть/изменить вкладку от имени ``owner``.
+
+        Для новой именованной вкладки владелец ещё не записан — её может
+        создать любой модуль. Default-вкладка всегда платформенная.
+        ``PLATFORM_OWNER`` — доверенный владелец: ему разрешено управлять
+        любой вкладкой.
+        """
+        tab_id = str(tab_id or DEFAULT_TAB_ID)
+        if tab_id == DEFAULT_TAB_ID or tab_id in self._tab_ids:
+            return self._owner_allows(tab_id, owner)
+        return True
+
+    def set_tab_icon(self, tab_id, icon):
+        widget = self._tab_ids.get(str(tab_id or ""))
+        if widget is None or icon is None:
+            return False
+        index = self.indexOf(widget)
+        if index < 0:
+            return False
+        try:
+            self.setTabIcon(index, icon)
+        except TypeError:
+            return False
+        return True
+
+    def set_tab_close_policy(self, tab_id, policy):
+        policy = str(policy or "owner")
+        if policy not in ("owner", "ask_if_dirty"):
+            raise ValueError("Неизвестная политика закрытия: %s" % policy)
+        self._tab_close_policies[str(tab_id or "")] = policy
+        return True
 
     @property
     def current_tab_id(self):
@@ -545,19 +665,27 @@ class EditorTabs(QTabWidget):
 
     def show_text(self, text, label, readonly=True, source_path=None,
                   line_number=None, syntax=True, notice=None, request_id=0,
-                  tab_id=None):
+                  tab_id=None, owner=None):
         """Показать текст в базовой или в отдельной именованной вкладке.
 
         ``tab_id=None`` — прежнее поведение: зарезервированная вкладка
         ``ui.editor``. Именованная вкладка создаётся один раз и затем
         переиспользуется; это позволяет держать открытыми несколько
         сырых файлов (например, DLTX-патчей) одновременно.
+        ``owner`` — модуль-владелец именованной вкладки.
         """
         title = str(label)
         tab_text = _short_title(title)
         tab_id = str(tab_id or "")
 
         if not tab_id or tab_id == DEFAULT_TAB_ID:
+            if not self._owner_allows(DEFAULT_TAB_ID, owner):
+                log.warning(
+                    "Нельзя изменить default-вкладку %s (owner=%s)",
+                    DEFAULT_TAB_ID,
+                    owner,
+                )
+                return False
             editor = self._ensure_default_tab()
             self.setCurrentWidget(editor)
             editor.set_editable(self._can_edit())
@@ -576,9 +704,11 @@ class EditorTabs(QTabWidget):
                 source_path,
                 request_id,
             )
-            return
+            return True
 
-        editor = self._ensure_text_tab(tab_id, tab_text)
+        editor = self._ensure_text_tab(tab_id, tab_text, owner=owner)
+        if editor is None:
+            return False
         self.setCurrentWidget(editor)
         editor.set_editable(self._can_edit())
         editor.show_text(
@@ -597,6 +727,7 @@ class EditorTabs(QTabWidget):
             source_path,
             request_id,
         )
+        return True
 
     def _present_default_tab(self, tab_text, tooltip, source_path,
                              request_id=0):
@@ -654,13 +785,22 @@ class EditorTabs(QTabWidget):
             find()
 
     # -------------------------------------------------- служебное
-    def _add_tab(self, tab_id, title, widget):
+    def _add_tab(self, tab_id, title, widget, owner=None):
         index = self.addTab(widget, title)
         self._tab_ids[tab_id] = widget
+        self._tab_owners[tab_id] = (
+            PLATFORM_OWNER if not owner else str(owner)
+        )
         self.setCurrentIndex(index)
         if self._busy:
             self._apply_busy(index)
         return widget
+
+    def _owner_allows(self, tab_id, owner):
+        """``None``/``<platform>`` — доверенный платформенный вызов."""
+        if owner is None or str(owner) == PLATFORM_OWNER:
+            return True
+        return self._tab_owners.get(str(tab_id), "") == str(owner)
 
     def _active_editor(self):
         widget = self.currentWidget()
@@ -777,6 +917,19 @@ class EditorTabs(QTabWidget):
         widget = self.widget(index)
         tab_id = self._tab_id_for_widget(widget)
         if tab_id is not None:
+            if (
+                self._tab_close_policies.get(tab_id) == "ask_if_dirty"
+                and tab_id in self._tab_dirty
+            ):
+                answer = QMessageBox.question(
+                    self,
+                    "Закрытие вкладки",
+                    "Вкладка содержит несохранённые изменения. Закрыть?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if answer != QMessageBox.Yes:
+                    return
             self.close_tab(tab_id)
 
     def _on_current_changed(self, _index):
@@ -796,12 +949,6 @@ class EditorTabs(QTabWidget):
                     request_id=int(request_id or 0),
                 ),
             )
-
-
-def _tab_owner(tab_id):
-    """Модуль-владелец по префиксу id вкладки (``ogg_editor.xxx``)."""
-    value = str(tab_id or "").split(":", 1)[0]
-    return value.split(".", 1)[0] if "." in value else ""
 
 
 def _short_title(text, limit=40):

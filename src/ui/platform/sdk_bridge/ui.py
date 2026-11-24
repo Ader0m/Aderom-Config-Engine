@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from sdk.contracts.forest import forest_ref
+from sdk.ui.windows import DockSpec, TabSpec, WindowSpec
 
 from .common import _SDK_API_MARKER
 
@@ -141,10 +142,18 @@ class UiApiAdapter:
         return self._platform.workspace_generation()
 
     def set_editor_tab_dirty(self, tab_id, dirty):
-        return self._platform.set_editor_tab_dirty(tab_id, dirty)
+        return self._platform.set_editor_tab_dirty(
+            tab_id,
+            dirty,
+            owner=self._owner,
+        )
 
     def set_editor_tab_busy(self, tab_id, busy):
-        return self._platform.set_editor_tab_busy(tab_id, busy)
+        return self._platform.set_editor_tab_busy(
+            tab_id,
+            busy,
+            owner=self._owner,
+        )
 
     def save_project_now(self):
         return self._platform.save_project_now()
@@ -173,7 +182,7 @@ class UiApiAdapter:
     def show_text(self, text, label, readonly=True, source_path=None,
                   line_number=None, syntax=True, notice=None,
                   request_id=None, tab_id=None):
-        self._platform.show_text(
+        return self._platform.show_text(
             text,
             label,
             readonly=readonly,
@@ -183,23 +192,53 @@ class UiApiAdapter:
             notice=notice,
             request_id=request_id,
             tab_id=tab_id,
-        )
-
-    def show_module_window(self, key, window):
-        return self._platform.show_module_window(
-            key,
-            window,
             owner=self._owner,
         )
 
-    def close_module_window(self, key):
-        self._platform.close_module_window(key)
+    def open_window(self, spec, widget):
+        if not isinstance(spec, WindowSpec):
+            raise TypeError("open_window ожидает WindowSpec")
+        return self._platform.open_window(
+            spec,
+            widget,
+            owner=self._owner,
+        )
 
-    def open_editor_tab(self, tab_id, title, widget):
-        self._platform.open_editor_tab(tab_id, title, widget)
+    def open_tab(self, spec, widget):
+        if not isinstance(spec, TabSpec):
+            raise TypeError("open_tab ожидает TabSpec")
+        return self._platform.open_tab(
+            spec,
+            widget,
+            owner=self._owner,
+        )
+
+    def open_dock(self, spec, widget):
+        if not isinstance(spec, DockSpec):
+            raise TypeError("open_dock ожидает DockSpec")
+        return self._platform.open_dock(
+            spec,
+            widget,
+            owner=self._owner,
+        )
+
+    def save_state(self, state_key, state):
+        return self._platform.save_state(state_key, state)
+
+    def load_state(self, state_key):
+        return self._platform.load_state(state_key)
+
+    def close_module_window(self, key):
+        return self._platform.close_module_window(
+            key,
+            owner=self._owner,
+        )
 
     def close_editor_tab(self, tab_id):
-        self._platform.close_editor_tab(tab_id)
+        return self._platform.close_editor_tab(
+            tab_id,
+            owner=self._owner,
+        )
 
     def release_owner(self):
         """Закрыть окна и вкладки, принадлежащие модулю."""

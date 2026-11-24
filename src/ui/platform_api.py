@@ -8,9 +8,16 @@ PlatformApi — сервисы UI-платформы и точка регист�
 from pathlib import Path
 import traceback
 
-from PyQt5.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import (
+    QApplication,
+    QDockWidget,
+    QFileDialog,
+    QMessageBox,
+)
 
 from sdk.features.projects import AssetDraftInfo, ProjectChanged
+from sdk.ui import DockSpec, TabSpec, WindowSpec
 from sdk.contracts import (
     AppPaths,
     FileOpened,
@@ -33,10 +40,27 @@ from app.workspace import SnapshotService, WorkspaceSession
 from .file_open_router import FileOpenRouter
 from .input_bindings import MouseBindingManager, ShortcutManager
 from .module_windows import ModuleWindowManager
+from .operations import OperationRegistry
 from .platform.project_controller import ProjectControllerMixin
 from .platform.registration import RegistrationHub
 from .platform.resolved import ResolvedDocumentMixin
 from .platform.section_card import SectionCardMixin
+
+
+def _is_platform_owner_value(owner):
+    return owner is None or str(owner) in ("", PLATFORM_OWNER)
+
+
+def _dock_area_name(window, dock):
+    try:
+        area = window.dockWidgetArea(dock)
+    except Exception:
+        return ""
+    return {
+        Qt.LeftDockWidgetArea: "left",
+        Qt.RightDockWidgetArea: "right",
+        Qt.BottomDockWidgetArea: "bottom",
+    }.get(area, "")
 
 
 def _coerce_paths(paths):
@@ -83,6 +107,8 @@ class PlatformApi(
         paths,
         hints=None,
         snapshot_service=None,
+        operations=None,
+        window_service=None,
     ):
         self.events = events
         self.commands = commands
@@ -90,9 +116,24 @@ class PlatformApi(
         self.services = services
         self.paths = _coerce_paths(paths)
         self.hints = hints
+        self.window_service = window_service
+        if operations is None:
+            operations = getattr(tasks, "operations", None)
+        self.operations = operations or OperationRegistry()
 
-        self.router = FileOpenRouter()
-        self._window_manager = ModuleWindowManager()
+        self.router = FileOpenRouter(
+            preferences_path=(
+                self.paths.app_dir / "config" / "file_open.json"
+                if paths is not None
+                else None
+            )
+        )
+        self._window_manager = ModuleWindowManager(
+            layout=window_service
+        )
+        self._docks = {}
+        self._dock_specs = {}
+        self._window_states = {}
         self._shortcut_manager = ShortcutManager(self.trigger_action)
         self._mouse_manager = MouseBindingManager(self.trigger_action)
 
@@ -123,6 +164,11 @@ class PlatformApi(
         self._patch_write_running = False
         self._patch_preview_dialog = None
         self._close_pending = False
+        self._close_flush_running = False
+        self._close_flush_project = None
+        self._close_flush_failed = False
+        self._closing = False
+        self._prebuild_last_state = "idle"
         # Асинхронное автосохранение: один активный проход и один
         # отложенный; повторные запросы объединяются (coalescing).
         self._autosave_running = False
@@ -500,6 +546,83 @@ class PlatformApi(
     def has_forest(self):
         return self._forest is not None
 
+    # -------------------------------------------------- операции
+    def operation_snapshot(self, key):
+        return self.operations.get(key)
+
+    def cancel_operation(self, key):
+        """Отменить задачу или внешнюю операцию по ключу."""
+        if self.tasks is not None:
+            cancel = getattr(self.tasks, "cancel_operation", None)
+            if callable(cancel) and cancel(key):
+                return True
+        return bool(self.operations.cancel(key))
+
+    def clear_finished_operations(self):
+        return self.operations.clear_finished()
+
+    def cancel_prebuild(self):
+        stop = getattr(self.services, "stop_prebuild", None)
+        if callable(stop):
+            stop()
+            return True
+        return False
+
+    def sync_prebuild_operation(self):
+        """Показать фоновую предсборку в общем центре операций."""
+        status_fn = getattr(self.services, "prebuild_status", None)
+        if not callable(status_fn):
+            return
+        try:
+            status = status_fn()
+        except Exception:
+            return
+        state = str(status.get("state") or "idle")
+        previous_state = self._prebuild_last_state
+        self._prebuild_last_state = state
+        done = int(status.get("done") or 0)
+        total = int(status.get("total") or 0)
+        error = status.get("error")
+        key = "vfs.prebuild"
+        if state == "running":
+            self.operations.upsert_external(
+                key,
+                owner=PLATFORM_OWNER,
+                title="Предсборка VFS",
+                state="running",
+                done=done,
+                total=total,
+                error=error,
+                cancel=self.cancel_prebuild,
+            )
+        elif state == "done":
+            if (
+                previous_state != "running"
+                and self.operations.get(key) is None
+            ):
+                return
+            self.operations.upsert_external(
+                key,
+                owner=PLATFORM_OWNER,
+                title="Предсборка VFS",
+                state="done",
+                done=done,
+                total=total,
+                error=error,
+            )
+        else:
+            snapshot = self.operations.get(key)
+            if snapshot is not None and snapshot.is_active:
+                self.operations.upsert_external(
+                    key,
+                    owner=PLATFORM_OWNER,
+                    title="Предсборка VFS",
+                    state="cancelled",
+                    done=done,
+                    total=total,
+                    message="остановлено",
+                )
+
     def can_edit_documents(self):
         return self.project.is_active
 
@@ -549,9 +672,9 @@ class PlatformApi(
         QApplication.clipboard().setText(str(text))
 
     def theme_color(self, name, fallback=None):
-        from .theme import PALETTE
+        from .platform.theme import theme_service
 
-        return getattr(PALETTE, str(name), fallback)
+        return theme_service().token(name, fallback)
 
     def workspace_forest(self):
         return self.workspace.forest_ref
@@ -625,6 +748,12 @@ class PlatformApi(
         window_id = str(window_id or "")
         if self.dispatch_action(Events.UI_WINDOW_REQUESTED, window_id):
             return True
+        dock_entry = self._docks.get(window_id)
+        if dock_entry is not None:
+            dock, _owner = dock_entry
+            dock.show()
+            dock.raise_()
+            return True
         # Модуль мог уже показать окно, но не подписаться на запрос:
         # платформа сама поднимает известное окно по ключу.
         return self._window_manager.focus(window_id)
@@ -662,13 +791,17 @@ class PlatformApi(
             return False
 
     # -------------------------------------------------- команды платформы
-    def request_open_file(self, path):
+    def request_open_file(self, path, context="view"):
         # Явное открытие без навигации отменяет ожидавшие её запросы.
         self._discard_file_requests_for_path(path)
-        ok = self._run_file_request(
-            0,
-            lambda: self.router.open(path, self),
-        )
+        try:
+            ok = self._run_file_request(
+                0,
+                lambda: self.router.open(path, self, context=context),
+            )
+        except ValueError as exc:
+            self.log("request_open_file: %s" % exc)
+            return False
         if not ok:
             self.notify_file_open_failed(
                 path,
@@ -685,38 +818,371 @@ class PlatformApi(
         """Модуль регистрирует своего обработчика открытия файла."""
         return self.router.register(handler, context=context, owner=owner)
 
+    # -------------------------------------------------- окна и доки по spec
+    @staticmethod
+    def _spec_owner(spec_owner, owner):
+        spec_owner = str(spec_owner or "")
+        owner = str(owner or "")
+        if spec_owner and owner and spec_owner != owner:
+            return None
+        return owner or spec_owner
+
+    def open_window(self, spec, widget, owner=None):
+        """Открыть окно/док/вкладку по WindowSpec."""
+        if not isinstance(spec, WindowSpec):
+            self.log("open_window: ожидался WindowSpec")
+            return False
+        owner_value = self._spec_owner(spec.owner, owner)
+        if owner_value is None:
+            self.log(
+                "open_window: owner %s не совпадает с %s"
+                % (spec.owner, owner)
+            )
+            return False
+        if spec.kind == "dock":
+            return self.open_dock(
+                DockSpec(
+                    key=spec.key,
+                    title=spec.title,
+                    area=spec.area or "right",
+                    owner=owner_value,
+                    size=spec.size,
+                    closable=spec.closable,
+                    state_key=spec.state_key,
+                ),
+                widget,
+                owner=owner_value,
+            )
+        if spec.kind in ("document_tab", "tool_tab"):
+            return self.open_tab(
+                TabSpec(
+                    id=spec.key,
+                    title=spec.title,
+                    owner=owner_value,
+                    kind=spec.kind,
+                    source_path=None,
+                ),
+                widget,
+                owner=owner_value,
+            )
+        if spec.title and hasattr(widget, "setWindowTitle"):
+            widget.setWindowTitle(spec.title)
+        flags = widget.windowFlags()
+        if spec.kind == "dialog":
+            flags |= Qt.Dialog
+            try:
+                widget.setWindowModality(Qt.NonModal)
+            except AttributeError:
+                pass
+        if not spec.closable:
+            flags &= ~Qt.WindowCloseButtonHint
+        widget.setWindowFlags(flags)
+        if spec.size:
+            try:
+                widget.resize(*spec.size)
+            except (TypeError, ValueError):
+                pass
+        if spec.min_size:
+            try:
+                widget.setMinimumSize(*spec.min_size)
+            except (TypeError, ValueError):
+                pass
+        shown = self._window_manager.show(
+            spec.key,
+            widget,
+            owner=owner_value,
+            state_key=spec.state_key,
+        )
+        if shown:
+            self.events.publish(Events.UI_WINDOW_SHOWN, spec.key)
+        return bool(shown)
+
+    def open_tab(self, spec, widget, owner=None):
+        """Открыть вкладку редактора по TabSpec."""
+        if not isinstance(spec, TabSpec):
+            self.log("open_tab: ожидался TabSpec")
+            return False
+        if self.window is None:
+            self.log("[open_tab до окна] %s" % spec.id)
+            return False
+        owner_value = self._spec_owner(spec.owner, owner)
+        if owner_value is None:
+            self.log(
+                "open_tab: owner %s не совпадает с %s"
+                % (spec.owner, owner)
+            )
+            return False
+        if not owner_value:
+            owner_value = PLATFORM_OWNER
+        opened = self.window.editor.open_tab(
+            spec.id,
+            spec.title or spec.id,
+            widget,
+            source_path=spec.source_path,
+            owner=owner_value,
+        )
+        if not opened:
+            return False
+        if spec.dirty:
+            self.window.editor.set_tab_dirty(spec.id, True)
+        if spec.busy:
+            self.window.editor.set_tab_busy(spec.id, True)
+        self.window.editor.set_tab_close_policy(
+            spec.id,
+            spec.close_policy,
+        )
+        if spec.icon is not None:
+            self.window.editor.set_tab_icon(spec.id, spec.icon)
+        return True
+
+    def open_dock(self, spec, widget, owner=None):
+        """Открыть док-панель модуля по DockSpec."""
+        if not isinstance(spec, DockSpec):
+            self.log("open_dock: ожидался DockSpec")
+            return False
+        if self.window is None:
+            return False
+        owner_value = self._spec_owner(spec.owner, owner)
+        if owner_value is None:
+            return False
+        key = str(spec.key or "")
+        if not key:
+            return False
+        existing = self._docks.get(key)
+        if existing is not None:
+            dock, dock_owner = existing
+            if not _is_platform_owner_value(owner_value):
+                if dock_owner != owner_value:
+                    return False
+            dock.setWidget(widget)
+            spec_entry = self._dock_specs.setdefault(key, {})
+            if spec.area and not dock.isFloating():
+                area = {
+                    "left": Qt.LeftDockWidgetArea,
+                    "right": Qt.RightDockWidgetArea,
+                    "bottom": Qt.BottomDockWidgetArea,
+                    "center": Qt.RightDockWidgetArea,
+                }.get(spec.area, Qt.RightDockWidgetArea)
+                self.window.addDockWidget(area, dock)
+                spec_entry["area"] = spec.area
+            if spec.closable:
+                dock.setFeatures(
+                    QDockWidget.DockWidgetClosable
+                    | QDockWidget.DockWidgetMovable
+                    | QDockWidget.DockWidgetFloatable
+                )
+            else:
+                dock.setFeatures(
+                    QDockWidget.DockWidgetMovable
+                    | QDockWidget.DockWidgetFloatable
+                )
+            spec_entry["closable"] = bool(spec.closable)
+            if spec.state_key:
+                spec_entry["state_key"] = str(spec.state_key)
+            if spec.size:
+                try:
+                    dock.resize(*spec.size)
+                except (TypeError, ValueError):
+                    pass
+            widget.show()
+            dock.show()
+            dock.raise_()
+            self._persist_dock(key, visible=True)
+            self.events.publish(Events.UI_WINDOW_SHOWN, key)
+            return True
+
+        saved = (
+            self.window_service.load_dock(key)
+            if self.window_service is not None
+            else {}
+        )
+        spec_area = str(saved.get("area") or spec.area or "right")
+        if spec_area not in ("left", "right", "bottom", "center"):
+            spec_area = "right"
+        size = saved.get("size")
+        if not isinstance(size, (list, tuple)) or len(size) != 2:
+            size = spec.size
+        floating = bool(saved.get("floating"))
+        closable = bool(saved.get("closable", spec.closable))
+        visible = bool(saved.get("visible", spec.visible))
+        state_key = str(saved.get("state_key") or spec.state_key or "")
+
+        dock = QDockWidget(spec.title or key, self.window)
+        dock.setObjectName(key)
+        dock.setWidget(widget)
+        if not closable:
+            dock.setFeatures(
+                QDockWidget.DockWidgetMovable
+                | QDockWidget.DockWidgetFloatable
+            )
+        area = {
+            "left": Qt.LeftDockWidgetArea,
+            "right": Qt.RightDockWidgetArea,
+            "bottom": Qt.BottomDockWidgetArea,
+            "center": Qt.RightDockWidgetArea,
+        }.get(spec_area, Qt.RightDockWidgetArea)
+        self.window.addDockWidget(area, dock)
+        if floating:
+            dock.setFloating(True)
+        if size:
+            try:
+                dock.resize(int(size[0]), int(size[1]))
+            except (TypeError, ValueError):
+                pass
+        self._docks[key] = (dock, owner_value)
+        self._dock_specs[key] = {
+            "area": spec_area,
+            "closable": closable,
+            "state_key": state_key,
+        }
+        dock.topLevelChanged.connect(
+            lambda _floating, dock_key=key: self._persist_dock(dock_key)
+        )
+        dock.dockLocationChanged.connect(
+            lambda _area, dock_key=key: self._persist_dock(dock_key)
+        )
+        dock.visibilityChanged.connect(
+            lambda _visible, dock_key=key: self._persist_dock(dock_key)
+        )
+        widget.show()
+        if visible:
+            dock.show()
+        else:
+            dock.hide()
+        self._persist_dock(key, visible=visible)
+        self.events.publish(Events.UI_WINDOW_SHOWN, key)
+        return True
+
+    def _persist_dock(self, key, visible=None):
+        key = str(key or "")
+        existing = self._docks.get(key)
+        if existing is None or self.window is None:
+            return False
+        dock, owner = existing
+        spec = self._dock_specs.get(key, {})
+        area = spec.get("area", "right")
+        if not dock.isFloating():
+            area = _dock_area_name(self.window, dock) or area
+            spec["area"] = area
+        if visible is None:
+            visible = dock.isVisible()
+        if self.window_service is not None:
+            self.window_service.save_dock(
+                key,
+                owner,
+                area,
+                (dock.width(), dock.height()),
+                floating=dock.isFloating(),
+                closable=bool(spec.get("closable", True)),
+                visible=bool(visible),
+                state_key=spec.get("state_key", ""),
+            )
+        return True
+
+    def save_state(self, state_key, state):
+        if self.window_service is not None:
+            return self.window_service.save_state(state_key, state)
+        key = str(state_key or "")
+        if not key or not isinstance(state, dict):
+            return False
+        self._window_states[key] = dict(state)
+        return True
+
+    def load_state(self, state_key):
+        if self.window_service is not None:
+            return self.window_service.load_state(state_key)
+        return dict(self._window_states.get(str(state_key or ""), {}))
+
     # -------------------------------------------------- окна модулей
     def show_module_window(self, key, window, owner=None):
         """Показать окно, созданное модулем."""
-        self._window_manager.show(key, window, owner=owner)
+        shown = self._window_manager.show(key, window, owner=owner)
+        if not shown:
+            self.log(
+                "Окно %s принадлежит другому владельцу" % (key,)
+            )
+            return False
         self.events.publish(Events.UI_WINDOW_SHOWN, key)
+        return True
 
-    def close_module_window(self, key):
-        """Закрыть окно модуля по ключу."""
-        self._window_manager.close(key)
+    def close_module_window(self, key, owner=None):
+        """Закрыть окно или док модуля по ключу."""
+        key = str(key or "")
+        existing = self._docks.get(key)
+        if existing is not None:
+            dock, dock_owner = existing
+            if (
+                not _is_platform_owner_value(owner)
+                and dock_owner != str(owner)
+            ):
+                return False
+            self._persist_dock(key)
+            self._docks.pop(key, None)
+            self._dock_specs.pop(key, None)
+            self.window.removeDockWidget(dock)
+            dock.deleteLater()
+            self.events.publish(Events.UI_WINDOW_CLOSED, key)
+            return True
+
+        closed = self._window_manager.close(key, owner=owner)
+        if not closed:
+            self.log(
+                "Нельзя закрыть окно %s: другой владелец" % (key,)
+            )
+            return False
         self.events.publish(Events.UI_WINDOW_CLOSED, key)
+        return True
 
     def close_module_windows(self, owner=None):
-        """Закрыть окна модулей (все или конкретного владельца)."""
+        """Закрыть окна и доки модулей (все или владельца)."""
+        closed = 0
+        for key, (dock, dock_owner) in list(self._docks.items()):
+            if owner is not None and not _is_platform_owner_value(owner):
+                if dock_owner != str(owner):
+                    continue
+            self._persist_dock(key)
+            self._docks.pop(key, None)
+            self._dock_specs.pop(key, None)
+            self.window.removeDockWidget(dock)
+            dock.deleteLater()
+            self.events.publish(Events.UI_WINDOW_CLOSED, key)
+            closed += 1
         if owner is None:
             self._window_manager.close_all()
-        else:
-            self._window_manager.close_owner(owner)
+            return closed
+        return closed + self._window_manager.close_owner(owner)
 
     # -------------------------------------------------- вкладки редактора
     def open_editor_tab(self, tab_id, title, widget, owner=None):
-        """Открыть вкладку, созданную модулем."""
+        """Открыть вкладку, созданную модулем.
+
+        Возвращает ``False`` для зарезервированного ``ui.editor`` или если
+        вкладка принадлежит другому владельцу; исключение не пересекает
+        границу SDK.
+        """
         if self.window is None:
             self.log("[open_editor_tab до окна] %s" % tab_id)
-            return
-        self.window.editor.open_tab(tab_id, title, widget)
+            return False
+        opened = self.window.editor.open_tab(
+            tab_id,
+            title,
+            widget,
+            owner=owner,
+        )
+        if not opened:
+            self.log("Нельзя открыть вкладку %s" % (tab_id,))
+        return bool(opened)
 
-    def close_editor_tab(self, tab_id):
+    def close_editor_tab(self, tab_id, owner=None):
         """Закрыть вкладку модуля."""
         if self.window is None:
-            return
-        self.window.editor.close_tab(tab_id)
-
+            return False
+        closed = self.window.editor.close_tab(tab_id, owner=owner)
+        if not closed:
+            self.log(
+                "Нельзя закрыть вкладку %s: другой владелец" % (tab_id,)
+            )
+        return bool(closed)
     def close_module_tabs(self, owner):
         """Закрыть все вкладки, принадлежащие модулю."""
         if self.window is None:
@@ -729,8 +1195,15 @@ class PlatformApi(
     # -------------------------------------------------- ui-сервисы
     def show_text(self, text, label, readonly=True, source_path=None,
                   line_number=None, syntax=True, notice=None,
-                  request_id=None, tab_id=None):
+                  request_id=None, tab_id=None, owner=None):
         if self.window is not None:
+            editor = self.window.editor
+            if not editor.can_manage_tab(tab_id, owner):
+                self.log(
+                    "Нельзя изменить чужую вкладку %s (owner=%s)"
+                    % (tab_id or "ui.editor", owner)
+                )
+                return False
             # Показ текста может завершать отложенный запрос открытия:
             # событие FILE_OPENED должно нести его request_id.
             resolved_id = self._resolve_file_request_id(
@@ -738,7 +1211,7 @@ class PlatformApi(
                 request_id,
                 claim=source_path is not None,
             )
-            self.window.editor.show_text(
+            return bool(editor.show_text(
                 text,
                 label,
                 readonly=readonly,
@@ -748,15 +1221,16 @@ class PlatformApi(
                 notice=notice,
                 request_id=resolved_id,
                 tab_id=tab_id,
-            )
-        else:
-            self._log_buffer.append("[show_text до окна] %s" % label)
+                owner=owner,
+            ))
+        self._log_buffer.append("[show_text до окна] %s" % label)
+        return False
 
     def request_open_file_raw(self, path):
         self._discard_file_requests_for_path(path)
         ok = self._run_file_request(
             0,
-            lambda: self.router.open_default(path, self),
+            lambda: self.router.open_default(path, self, context="edit"),
         )
         if not ok:
             self.notify_file_open_failed(
@@ -983,7 +1457,7 @@ class PlatformApi(
             path,
             "line",
             int(line_number),
-            lambda: self.router.open_default(path, self),
+            lambda: self.router.open_default(path, self, context="edit"),
             "Нет обработчика по умолчанию",
         )
 
@@ -993,6 +1467,6 @@ class PlatformApi(
             path,
             "search",
             search_text,
-            lambda: self.router.open_default(path, self),
+            lambda: self.router.open_default(path, self, context="edit"),
             "Нет обработчика по умолчанию",
         )

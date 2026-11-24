@@ -14,7 +14,6 @@ class CleanRunFeature:
     def __init__(self, ctx, session):
         self.ctx = ctx
         self.session = session
-        self._running = False
         self._overlay = {}
 
     # -------------------------------------------------- автоопределение
@@ -32,7 +31,7 @@ class CleanRunFeature:
         self.run()
 
     def run(self):
-        if self._running:
+        if self.ctx.tasks.operation_active("vfs.rebuild"):
             self.ctx.ui.log("Пересборка VFS уже выполняется.")
             return
 
@@ -43,7 +42,6 @@ class CleanRunFeature:
                 return
             self.session.config_dir = Path(directory)
 
-        self._running = True
         self.ctx.ui.set_status("Сканирование…")
         self.ctx.ui.log("Пересборка VFS: %s" % self.session.config_dir)
         self.ctx.events.publish(
@@ -66,6 +64,8 @@ class CleanRunFeature:
             lambda log: self._scan(log, overlay),
             on_done=self._on_scan_done,
             on_log=self.ctx.ui.log,
+            operation_key="vfs.rebuild",
+            title="Пересборка VFS",
         )
 
     # -------------------------------------------------- фоновая работа
@@ -93,8 +93,6 @@ class CleanRunFeature:
         return forest
 
     def _on_scan_done(self, forest, err):
-        self._running = False
-
         if err is not None:
             self.ctx.ui.set_status("Ошибка")
             self.ctx.ui.show_error(str(err))

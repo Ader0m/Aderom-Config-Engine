@@ -12,6 +12,7 @@ from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
     QAction,
     QDockWidget,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMenu,
@@ -28,9 +29,10 @@ from .diagnostics import DiagnosticsLog
 from .editor_tabs import EditorTabs
 from .file_open_router import TextEditorHandler
 from .file_tree import FileTreeWidget
+from .operation_center import OperationCenter
 from .platform.feature_flags import PATCH_WRITE_EXPERIMENTAL
-from .prebuild_panel import PrebuildPanel
 from .search_bar import SearchBar
+from .platform.theme import theme_service
 
 
 class MainWindow(QMainWindow):
@@ -53,6 +55,49 @@ class MainWindow(QMainWindow):
         )
 
         self.api.bind_window(self)
+        self.layout_restored = False
+        service = getattr(self.api, "window_service", None)
+        if service is not None:
+            self.layout_restored = bool(
+                service.restore_main_window(self)
+            )
+        self._theme_listener = self._on_theme_changed
+        theme_service().subscribe(self._theme_listener)
+
+    def _on_theme_changed(self, _palette):
+        editor = getattr(self, "editor", None)
+        if editor is not None:
+            editor.refresh_theme()
+        tree = getattr(self, "file_tree", None)
+        if tree is not None:
+            tree.refresh_theme()
+        log_text = getattr(self, "log_text", None)
+        if log_text is not None:
+            log_text.refresh_theme()
+        events = getattr(self.api, "events", None)
+        if events is not None:
+            events.publish(Events.UI_THEME_CHANGED, _palette)
+        self.update()
+
+    def _choose_open_handler(self, path, context, options):
+        """Спросить обработчик при неоднозначности открытия."""
+        labels = [label for _key, label in options]
+        label, accepted = QInputDialog.getItem(
+            self,
+            "Открыть файл",
+            "Файл: %s\nКонтекст: %s\nЧем открыть?"
+            % (path, context),
+            labels,
+            0,
+            False,
+        )
+        if not accepted:
+            return None
+        try:
+            index = labels.index(label)
+        except ValueError:
+            return None
+        return options[index][0]
 
     # -------------------------------------------------- UI
     def _init_ui(self):
@@ -89,6 +134,7 @@ class MainWindow(QMainWindow):
             text_reader=self.api.document_text,
         )
         self.api.router.set_default(TextEditorHandler(self.editor))
+        self.api.router.set_chooser(self._choose_open_handler)
 
         self.splitter.addWidget(left)
         self.splitter.addWidget(self.editor)
@@ -249,8 +295,13 @@ class MainWindow(QMainWindow):
         self.project_label = QLabel("Проект: не создан")
         self.statusBar().addPermanentWidget(self.project_label)
 
-        self.prebuild_panel = PrebuildPanel(self)
-        self.statusBar().addPermanentWidget(self.prebuild_panel)
+        self.operation_center = OperationCenter(
+            self.api.operations,
+            self,
+            on_cancel=self.api.cancel_operation,
+            on_clear=self.api.clear_finished_operations,
+        )
+        self.statusBar().addPermanentWidget(self.operation_center)
 
         self.patch_write_label = QLabel()
         if PATCH_WRITE_EXPERIMENTAL:
@@ -267,7 +318,7 @@ class MainWindow(QMainWindow):
 
         self._prebuild_timer = QTimer(self)
         self._prebuild_timer.setInterval(250)
-        self._prebuild_timer.timeout.connect(self._update_prebuild)
+        self._prebuild_timer.timeout.connect(self._update_operations)
         self._prebuild_timer.start()
 
         # Автосохранение черновиков проекта раз в минуту.
@@ -297,24 +348,9 @@ class MainWindow(QMainWindow):
     def refresh_project_actions(self):
         self._update_project_menu()
 
-    def _update_prebuild(self):
-        services = getattr(self.api, "services", None)
-        status_fn = getattr(services, "prebuild_status", None)
-        if not callable(status_fn):
-            self.prebuild_panel.setVisible(False)
-            return
-
-        try:
-            status = status_fn()
-        except Exception:
-            return
-
-        self.prebuild_panel.set_status(
-            status.get("state", "idle"),
-            status.get("done", 0),
-            status.get("total", 0),
-            status.get("error"),
-        )
+    def _update_operations(self):
+        self.api.sync_prebuild_operation()
+        self.operation_center.refresh()
 
     # -------------------------------------------------- поиск
     def _toggle_search(self):
@@ -404,6 +440,12 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+        # Сначала сохраняем раскладку, пока доки ещё существуют в окне:
+        # saveState() должен увидеть их area/visible.
+        window_service = getattr(self.api, "window_service", None)
+        if window_service is not None:
+            window_service.save_main_window(self)
+
         # Окна модулей теперь самостоятельные top-level окна, поэтому
         # приложение не завершится, пока хотя бы одно из них открыто.
         close_windows = getattr(self.api, "close_module_windows", None)
@@ -412,6 +454,19 @@ class MainWindow(QMainWindow):
                 close_windows()
             except Exception:
                 pass
+
+        center = getattr(self, "operation_center", None)
+        if center is not None:
+            center.close()
+
+        listener = getattr(self, "_theme_listener", None)
+        if listener is not None:
+            theme_service().unsubscribe(listener)
+            self._theme_listener = None
+
+        router = getattr(self.api, "router", None)
+        if router is not None:
+            router.set_chooser(None)
 
         self._tree_ready_sub.unsubscribe()
         menu_sub = getattr(self, "_menu_rebuild_sub", None)

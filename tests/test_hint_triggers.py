@@ -5,7 +5,7 @@ import unittest
 
 from tests.support import SRC  # noqa: F401
 
-from ui.hints import triggers
+from ui.platform.hints import triggers
 
 
 class HintTriggersTest(unittest.TestCase):

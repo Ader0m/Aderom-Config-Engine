@@ -11,7 +11,7 @@ from sdk.ui.hints import (
     HintItem,
     HintResult,
 )
-from ui.hints.triggers import directive_trigger, include_trigger
+from ui.platform.hints.triggers import directive_trigger, include_trigger
 
 from .flags import LTX_HINTS_ENABLED
 

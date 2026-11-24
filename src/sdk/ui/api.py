@@ -9,6 +9,7 @@ from typing import Callable, Optional, Protocol
 from sdk.contracts.forest import ForestRef
 from sdk.contracts.models import ProjectOverlay, TreeReady
 from sdk.kernel.registrations import RegistrationHandle
+from sdk.ui.windows import DockSpec, TabSpec, WindowSpec
 
 
 class UiApi(Protocol):
@@ -197,14 +198,31 @@ class UiApi(Protocol):
         ``None`` — зарезервированная вкладка ``ui.editor``.
         """
 
-    def show_module_window(self, key: str, window) -> None:
-        """Показать окно, созданное модулем, и передать его платформе."""
+    def open_window(self, spec: WindowSpec, widget) -> bool:
+        """Открыть окно модуля по описанию.
+
+        Платформа сама выбирает контейнер по ``spec.kind``:
+        ``dock``, ``floating``, ``dialog``, ``document_tab``/``tool_tab``.
+        Владелец берётся из контекста модуля.
+        """
+
+    def open_tab(self, spec: TabSpec, widget) -> bool:
+        """Открыть вкладку редактора по описанию.
+
+        ``spec.owner`` обязателен; фактический владелец — текущий модуль.
+        """
+
+    def open_dock(self, spec: DockSpec, widget) -> bool:
+        """Открыть док-панель модуля по описанию."""
+
+    def save_state(self, state_key: str, state: dict) -> None:
+        """Сохранить состояние содержимого, привязанное к ``state_key``."""
+
+    def load_state(self, state_key: str) -> dict:
+        """Прочитать сохранённое состояние содержимого."""
 
     def close_module_window(self, key: str) -> None:
-        """Закрыть окно модуля по ключу."""
-
-    def open_editor_tab(self, tab_id: str, title: str, widget) -> None:
-        """Открыть вкладку редактора, созданную модулем."""
+        """Закрыть окно или док модуля по ключу."""
 
     def close_editor_tab(self, tab_id: str) -> None:
         """Закрыть вкладку модуля по ключу."""
@@ -233,8 +251,8 @@ class UiApi(Protocol):
     def theme_color(self, name: str, fallback: Optional[str] = None) -> Optional[str]:
         """Вернуть цвет темы по имени токена.
 
-        Модуль не импортирует ``ui.theme`` и не знает структуру палитры:
-        он запрашивает только разрешённый токен.
+        Модуль не импортирует ``ui.platform.theme`` и не знает структуру
+        палитры: он запрашивает только разрешённый токен.
         """
 
     def request_window(self, window_id: str) -> bool:

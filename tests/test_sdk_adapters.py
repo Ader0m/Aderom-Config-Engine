@@ -7,9 +7,11 @@ from pathlib import Path
 from tests.support import SRC  # noqa: F401
 
 from sdk.features.patches import PatchTargetInfo
+from sdk.ui import DockSpec, TabSpec, WindowSpec
 from ui.platform.sdk_bridge import (
     CommandApiAdapter,
     CoreApiAdapter,
+    DocumentApiAdapter,
     EventApiAdapter,
     TaskApiAdapter,
     UiApiAdapter,
@@ -26,6 +28,114 @@ class _Ui:
 class _Tasks:
     def run(self, *args, **kwargs):
         pass
+
+
+class _RecordingTasks:
+    def __init__(self):
+        self.calls = []
+
+    def run(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return "handle"
+
+
+class _OwnerPlatform:
+    def __init__(self):
+        self.calls = []
+
+    def open_window(self, spec, widget, owner=None):
+        self.calls.append(("open_window", spec.key, owner))
+        return True
+
+    def open_tab(self, spec, widget, owner=None):
+        self.calls.append(("open_tab", spec.id, owner))
+        return True
+
+    def open_dock(self, spec, widget, owner=None):
+        self.calls.append(("open_dock", spec.key, owner))
+        return True
+
+    def save_state(self, state_key, state):
+        self.calls.append(("save_state", state_key, state))
+        return True
+
+    def load_state(self, state_key):
+        self.calls.append(("load_state", state_key, None))
+        return {}
+
+    def close_editor_tab(self, tab_id, owner=None):
+        self.calls.append(("close_editor_tab", tab_id, owner))
+        return True
+
+    def close_module_window(self, key, owner=None):
+        self.calls.append(("close_module_window", key, owner))
+        return True
+
+    def show_text(self, text, label, **kwargs):
+        self.calls.append(("show_text", label, kwargs.get("owner")))
+        return True
+
+    def set_editor_tab_dirty(self, tab_id, dirty, owner=None):
+        self.calls.append(("set_editor_tab_dirty", tab_id, owner))
+        return True
+
+    def set_editor_tab_busy(self, tab_id, busy, owner=None):
+        self.calls.append(("set_editor_tab_busy", tab_id, owner))
+        return True
+
+
+class _DocumentOwnerPlatform:
+    def __init__(self):
+        self.calls = []
+
+    def _record(self, name, owner):
+        self.calls.append((name, owner))
+        return True
+
+    def apply_resolved_line_edit(self, tab_id, action, line_number, text="",
+                                 owner=None):
+        return self._record("line_edit", owner)
+
+    def apply_resolved_field_edit(self, tab_id, section, key, value,
+                                  owner=None):
+        return self._record("field_edit", owner)
+
+    def rename_resolved_field(self, tab_id, section, old_key, new_key, value,
+                              owner=None):
+        return self._record("rename", owner)
+
+    def apply_resolved_field_edit_async(self, tab_id, section, key, value,
+                                        on_done=None, owner=None):
+        return self._record("field_edit_async", owner)
+
+    def rename_resolved_field_async(self, tab_id, section, old_key, new_key,
+                                    value, on_done=None, owner=None):
+        return self._record("rename_async", owner)
+
+    def undo_resolved_document(self, tab_id, owner=None):
+        return self._record("undo", owner)
+
+    def redo_resolved_document(self, tab_id, owner=None):
+        return self._record("redo", owner)
+
+    def retain_resolved_document(self, tab_id, owner=None):
+        return self._record("retain", owner)
+
+    def release_resolved_document(self, tab_id, owner=None):
+        return self._record("release", owner)
+
+    def update_resolved_draft(self, tab_id, root_path, title, original_text,
+                              current_text, line_sources=(), line_edit=None,
+                              owner=None):
+        return self._record("update_draft", owner)
+
+    def sync_resolved_tab(self, tab_id, text, line_sources, root_path,
+                          owner=None):
+        return self._record("sync_tab", owner)
+
+    def ensure_resolved_document(self, tab_id, root_path, title="", text="",
+                                 line_sources=(), owner=None):
+        return self._record("ensure", owner)
 
 
 class _Services:
@@ -189,6 +299,136 @@ class SdkAdapterTest(unittest.TestCase):
 
         self.assertIsInstance(ctx.events, EventApiAdapter)
         self.assertIsInstance(ctx.commands, CommandApiAdapter)
+
+    def test_ui_adapter_passes_bound_owner_to_windows_and_tabs(self):
+        platform = _OwnerPlatform()
+        ui = UiApiAdapter(platform)
+        ui.bind_owner("demo")
+
+        ui.open_window(
+            WindowSpec("demo.window", "Window", kind="floating"),
+            object(),
+        )
+        ui.open_tab(
+            TabSpec("demo.tab", "Tab"),
+            object(),
+        )
+        ui.open_dock(
+            DockSpec("demo.dock", "Dock"),
+            object(),
+        )
+        ui.close_editor_tab("demo.tab")
+        ui.close_module_window("demo.window")
+        ui.show_text("text", "Label", source_path="a.ltx")
+        ui.set_editor_tab_dirty("demo.tab", True)
+        ui.set_editor_tab_busy("demo.tab", True)
+        ui.save_state("state.key", {"a": 1})
+        ui.load_state("state.key")
+
+        self.assertEqual(
+            [call[0] for call in platform.calls],
+            [
+                "open_window",
+                "open_tab",
+                "open_dock",
+                "close_editor_tab",
+                "close_module_window",
+                "show_text",
+                "set_editor_tab_dirty",
+                "set_editor_tab_busy",
+                "save_state",
+                "load_state",
+            ],
+        )
+        self.assertTrue(
+            all(call[-1] == "demo" for call in platform.calls[:8])
+        )
+
+    def test_task_adapter_forwards_operation_contract(self):
+        service = _RecordingTasks()
+        tasks = TaskApiAdapter(service)
+        tasks.bind_owner("demo")
+
+        result = tasks.run(
+            lambda _log: None,
+            operation_key="demo.build",
+            title="Build",
+            depends_on=("vfs.rebuild",),
+            priority=5,
+        )
+
+        self.assertEqual(result, "handle")
+        self.assertEqual(service.calls[0][1]["owner"], "demo")
+        self.assertEqual(service.calls[0][1]["operation_key"], "demo.build")
+        self.assertEqual(service.calls[0][1]["title"], "Build")
+        self.assertEqual(
+            service.calls[0][1]["depends_on"],
+            ("vfs.rebuild",),
+        )
+        self.assertEqual(service.calls[0][1]["priority"], 5)
+
+    def test_document_adapter_passes_bound_owner_to_mutations(self):
+        platform = _DocumentOwnerPlatform()
+        documents = DocumentApiAdapter(platform)
+        documents.bind_owner("demo")
+
+        self.assertTrue(documents.apply_resolved_line_edit(
+            "tab", "replace", 2, "x = 1",
+        ))
+        self.assertTrue(documents.apply_resolved_field_edit(
+            "tab", "section", "key", "value",
+        ))
+        self.assertTrue(documents.rename_resolved_field(
+            "tab", "section", "old", "new", "value",
+        ))
+        self.assertTrue(documents.apply_resolved_field_edit_async(
+            "tab", "section", "key", "value",
+        ))
+        self.assertTrue(documents.rename_resolved_field_async(
+            "tab", "section", "old", "new", "value",
+        ))
+        self.assertTrue(documents.undo_resolved_document("tab"))
+        self.assertTrue(documents.redo_resolved_document("tab"))
+        self.assertTrue(documents.retain_resolved_document("tab"))
+        self.assertTrue(documents.release_resolved_document("tab"))
+        self.assertTrue(documents.update_resolved_draft(
+            "tab",
+            Path("root.ltx"),
+            "Title",
+            "old",
+            "new",
+        ))
+        self.assertTrue(documents.sync_resolved_tab(
+            "tab",
+            "text",
+            (),
+            Path("root.ltx"),
+        ))
+        self.assertTrue(documents.ensure_resolved_document(
+            "tab",
+            Path("root.ltx"),
+        ))
+
+        self.assertEqual(
+            [call[0] for call in platform.calls],
+            [
+                "line_edit",
+                "field_edit",
+                "rename",
+                "field_edit_async",
+                "rename_async",
+                "undo",
+                "redo",
+                "retain",
+                "release",
+                "update_draft",
+                "sync_tab",
+                "ensure",
+            ],
+        )
+        self.assertTrue(
+            all(call[-1] == "demo" for call in platform.calls)
+        )
 
 
 class CanonicalRedirectTest(unittest.TestCase):

@@ -49,6 +49,7 @@ from .kernel import (
     version_at_least,
 )
 from .ui import (
+    DockSpec,
     FileOpenHandler,
     FileReader,
     HintContext,
@@ -77,7 +78,9 @@ from .ui import (
     SURFACE_PLAIN,
     SURFACE_RAW,
     SURFACE_RESOLVED,
+    TabSpec,
     UiApi,
+    WindowSpec,
 )
 
 __all__ = [
@@ -136,6 +139,9 @@ __all__ = [
     "ProjectOverlay",
     "CoreApi",
     "UiApi",
+    "WindowSpec",
+    "DockSpec",
+    "TabSpec",
     "TaskApi",
     "EventApi",
     "CommandApi",

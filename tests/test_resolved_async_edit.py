@@ -217,6 +217,175 @@ class ResolvedAsyncEditTest(unittest.TestCase):
         self.assertIn("cost = 20", self.document.current_text)
         self.assertEqual(done, [("kind", True), ("cost", True)])
 
+    def _open_owned_document(self):
+        tab_id = "base.resolved:owned.ltx"
+        root = Path(self._tmp.name) / "owned.ltx"
+        self.api.open_resolved_tab(
+            tab_id,
+            "[Res]owned.ltx",
+            "[item]\nkind = i_food\ncost = 10\n",
+            (None, None, None),
+            root,
+            owner="mod_a",
+        )
+        return tab_id, self.api.resolved_document(tab_id)
+
+    def test_foreign_owner_cannot_edit_resolved_document(self):
+        tab_id, document = self._open_owned_document()
+        before = document.current_text
+
+        self.assertFalse(
+            self.api.apply_resolved_line_edit(
+                tab_id,
+                "replace",
+                2,
+                "kind = i_med",
+                owner="mod_b",
+            )
+        )
+        self.assertFalse(
+            self.api.apply_resolved_field_edit(
+                tab_id,
+                "item",
+                "kind",
+                "i_med",
+                owner="mod_b",
+            )
+        )
+        self.assertFalse(
+            self.api.rename_resolved_field(
+                tab_id,
+                "item",
+                "kind",
+                "item_kind",
+                "i_med",
+                owner="mod_b",
+            )
+        )
+        self.assertFalse(
+            self.api.apply_resolved_field_edit_async(
+                tab_id,
+                "item",
+                "kind",
+                "i_med",
+                owner="mod_b",
+            )
+        )
+        self.assertFalse(
+            self.api.rename_resolved_field_async(
+                tab_id,
+                "item",
+                "kind",
+                "item_kind",
+                "i_med",
+                owner="mod_b",
+            )
+        )
+        self.assertFalse(
+            self.api.undo_resolved_document(tab_id, owner="mod_b")
+        )
+        self.assertFalse(
+            self.api.redo_resolved_document(tab_id, owner="mod_b")
+        )
+        self.assertFalse(
+            self.api.update_resolved_draft(
+                tab_id,
+                document.root_path,
+                document.title,
+                document.original_text,
+                "[item]\nkind = i_med\ncost = 10\n",
+                document.line_sources,
+                owner="mod_b",
+            )
+        )
+        self.assertFalse(
+            self.api.sync_resolved_tab(
+                tab_id,
+                "[item]\nkind = i_med\ncost = 10\n",
+                document.line_sources,
+                document.root_path,
+                owner="mod_b",
+            )
+        )
+        self.assertFalse(
+            self.api.sync_resolved_line_edit(
+                tab_id,
+                SimpleNamespace(
+                    action="replace",
+                    line_number=2,
+                    text="kind = i_med",
+                ),
+                owner="mod_b",
+            )
+        )
+        self.assertFalse(
+            self.api.ensure_resolved_document(
+                tab_id,
+                document.root_path,
+                owner="mod_b",
+            )
+        )
+        self.assertEqual(document.current_text, before)
+
+        self.assertTrue(
+            self.api.apply_resolved_field_edit(
+                tab_id,
+                "item",
+                "kind",
+                "i_med",
+                owner="mod_a",
+            )
+        )
+        self.assertIn("kind = i_med", document.current_text)
+        self.assertTrue(
+            self.api.undo_resolved_document(tab_id, owner="mod_a")
+        )
+        self.assertTrue(
+            self.api.redo_resolved_document(tab_id, owner="mod_a")
+        )
+
+    def test_foreign_owner_cannot_retain_or_release_resolved_document(self):
+        tab_id, _document = self._open_owned_document()
+
+        self.assertFalse(
+            self.api.retain_resolved_document(tab_id, owner="mod_b")
+        )
+        self.assertFalse(
+            self.api.release_resolved_document(tab_id, owner="mod_b")
+        )
+        self.assertTrue(
+            self.api.retain_resolved_document(tab_id, owner="mod_a")
+        )
+        self.assertTrue(
+            self.api.release_resolved_document(tab_id, owner="mod_a")
+        )
+
+    def test_closed_tab_without_document_clears_owner(self):
+        tab_id, document = self._open_owned_document()
+        self.api._resolved_documents.pop(tab_id, None)
+        self.window.editor.close_tab(tab_id)
+        self.api._on_tab_closed(tab_id)
+
+        self.api.open_resolved_tab(
+            tab_id,
+            "[Res]reused.ltx",
+            "[item]\nkind = i_med\ncost = 5\n",
+            (None, None, None),
+            document.root_path,
+            owner="mod_b",
+        )
+
+        self.assertIsNotNone(self.api.resolved_document(tab_id))
+        self.assertTrue(
+            self.api.apply_resolved_field_edit(
+                tab_id,
+                "item",
+                "kind",
+                "i_heavy",
+                owner="mod_b",
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

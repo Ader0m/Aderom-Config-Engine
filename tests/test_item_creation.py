@@ -6,8 +6,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
-from PyQt5.QtCore import Qt
-
 from tests.support import SRC  # noqa: F401
 
 from tests.qt_support import qapp
@@ -143,6 +141,18 @@ class _Session:
         self.config_dir = None
 
 
+class _HintHandle:
+    def __init__(self):
+        self.enabled = True
+        self.detached = False
+
+    def set_enabled(self, enabled):
+        self.enabled = bool(enabled)
+
+    def detach(self):
+        self.detached = True
+
+
 class CreateItemDialogTest(unittest.TestCase):
     def test_parent_candidates_and_no_parent(self):
         dialog = CreateItemDialog(
@@ -161,41 +171,34 @@ class CreateItemDialogTest(unittest.TestCase):
         self.assertEqual(dialog.values(), ("new_item", None))
         dialog.close()
 
-    def test_suggestions_are_filtered_and_choose_parent(self):
+    def test_parent_field_uses_platform_hints(self):
+        calls = []
+        handle = _HintHandle()
+
+        def attach_hints(widget, target=None, providers=None, enabled=True):
+            calls.append((widget, target))
+            return handle
+
         dialog = CreateItemDialog(
-            ("wpn_ak74", "wpn_ak74_base", "item_base", "af_base"),
+            ("wpn_ak74", "wpn_ak74_base"),
+            attach_hints=attach_hints,
         )
-        dialog.parent_combo.setCurrentText("ak74")
-        dialog._show_suggestions("ak74")
 
-        values = [
-            dialog._suggestion_popup.list.item(i).text()
-            for i in range(dialog._suggestion_popup.list.count())
-        ]
-        self.assertEqual(values, ["wpn_ak74", "wpn_ak74_base"])
+        self.assertEqual(len(calls), 1)
+        line_edit = dialog.parent_combo.lineEdit()
+        self.assertIs(calls[0][0], line_edit)
+        target = calls[0][1]
+        self.assertEqual(target.surface, "plain")
+        self.assertEqual(target.language, "plain")
+        self.assertEqual(target.role, "item.parent")
 
-        dialog._on_suggestion_chosen("wpn_ak74_base")
-        self.assertEqual(
-            dialog.parent_combo.currentText(),
-            "wpn_ak74_base",
-        )
-        self.assertFalse(dialog._suggestion_popup.isVisible())
-        dialog.close()
+        dialog.no_parent.setChecked(True)
+        self.assertFalse(handle.enabled)
+        dialog.no_parent.setChecked(False)
+        self.assertTrue(handle.enabled)
 
-    def test_empty_query_lists_all_parents_for_scrolling(self):
-        dialog = CreateItemDialog(
-            ["parent_%02d" % index for index in range(30)]
-        )
-        dialog._show_suggestions("")
-        self.assertEqual(
-            dialog._suggestion_popup.list.count(),
-            30,
-        )
-        self.assertEqual(
-            dialog._suggestion_popup.list.verticalScrollBarPolicy(),
-            Qt.ScrollBarAsNeeded,
-        )
-        dialog.close()
+        dialog.reject()
+        self.assertTrue(handle.detached)
 
 
 class ParentCandidatesTest(unittest.TestCase):

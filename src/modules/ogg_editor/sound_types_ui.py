@@ -32,13 +32,13 @@ from .sound_types import (
 
 
 _THEME = {
-    "bg_main": "#1E1F22",
-    "bg_panel": "#2E3033",
-    "text": "#DCDCDC",
-    "text_muted": "#9A9A9A",
-    "text_bright": "#FFFFFF",
-    "selection": "#2E436E",
-    "border": "#3C3F41",
+    "bg_main": "",
+    "bg_panel": "",
+    "text": "",
+    "text_muted": "",
+    "text_bright": "",
+    "selection": "",
+    "border": "",
 }
 
 
@@ -88,7 +88,7 @@ def _list_font(widget):
 
 
 class SoundTypeCombo(QComboBox):
-    """Combo с отдельным списком и фиксированной подписью снизу."""
+    """Combo со списком доменных значений; не hint-popup."""
 
     valueChanged = pyqtSignal(object)
 

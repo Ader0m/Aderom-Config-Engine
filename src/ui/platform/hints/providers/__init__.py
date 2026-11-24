@@ -5,6 +5,7 @@ from .colors import ColorTagProvider
 from .includes import DirectiveProvider, IncludePathProvider
 from .keys import KeyProvider
 from .localization import LocalizationKeyProvider
+from .parents import ParentNameProvider
 from .sections import ParentProvider, SectionProvider
 
 __all__ = [
@@ -13,6 +14,7 @@ __all__ = [
     "IncludePathProvider",
     "KeyProvider",
     "LocalizationKeyProvider",
+    "ParentNameProvider",
     "ParentProvider",
     "SectionProvider",
 ]

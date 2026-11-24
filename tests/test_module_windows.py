@@ -1,14 +1,18 @@
 # -*- coding: utf-8 -*-
 """Тесты менеджера окон модулей."""
 
+import tempfile
 import unittest
+from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 from tests.qt_support import qapp
 
 from PyQt5.QtWidgets import QWidget
 
+from sdk.contracts.events import PLATFORM_OWNER
 from ui.module_windows import ModuleWindowManager
+from ui.platform.window_service import WindowService
 
 
 class ModuleWindowManagerTest(unittest.TestCase):
@@ -47,7 +51,7 @@ class ModuleWindowManagerTest(unittest.TestCase):
         self.assertFalse(self.manager.focus("missing.window"))
 
     def test_close_unknown_key_is_noop(self):
-        self.assertIsNone(self.manager.close("missing.window"))
+        self.assertFalse(self.manager.close("missing.window"))
 
     def test_close_all_closes_every_window(self):
         first = QWidget()
@@ -81,6 +85,77 @@ class ModuleWindowManagerTest(unittest.TestCase):
         self.assertFalse(first.isVisible())
         self.assertTrue(second.isVisible())
         self.assertEqual(self.manager.owner_of("first"), "")
+
+    def test_module_cannot_close_foreign_window(self):
+        window = QWidget()
+        self.manager.show("demo.window", window, owner="demo")
+
+        self.assertFalse(self.manager.close("demo.window", owner="other"))
+        self.assertTrue(window.isVisible())
+        self.assertTrue(self.manager.close("demo.window", owner="demo"))
+        self.assertFalse(window.isVisible())
+
+    def test_module_cannot_replace_foreign_window(self):
+        first = QWidget()
+        second = QWidget()
+        self.manager.show("demo.window", first, owner="demo")
+
+        self.assertFalse(
+            self.manager.show("demo.window", second, owner="other")
+        )
+        self.assertTrue(first.isVisible())
+        self.assertFalse(second.isVisible())
+        self.assertEqual(self.manager.owner_of("demo.window"), "demo")
+
+    def test_platform_owner_can_replace_and_close_any_window(self):
+        first = QWidget()
+        second = QWidget()
+        self.manager.show("demo.window", first, owner="demo")
+
+        self.assertTrue(
+            self.manager.show(
+                "demo.window",
+                second,
+                owner=PLATFORM_OWNER,
+            )
+        )
+        self.assertFalse(first.isVisible())
+        self.assertTrue(second.isVisible())
+        self.assertTrue(
+            self.manager.close(
+                "demo.window",
+                owner=PLATFORM_OWNER,
+            )
+        )
+        self.assertFalse(second.isVisible())
+
+    def test_user_close_saves_geometry_and_forgets_window(self):
+        with tempfile.TemporaryDirectory() as d:
+            layout = WindowService(Path(d) / "layout.json")
+            manager = ModuleWindowManager(layout=layout)
+            window = QWidget()
+            window.resize(360, 240)
+            manager.show(
+                "demo.window",
+                window,
+                owner="demo",
+                state_key="demo.state",
+            )
+            window.close()
+            self.assertNotIn("demo.window", manager._windows)
+            entry = layout.load_dock("demo.window")
+            self.assertEqual(entry, {})
+            self.assertIn("demo.window", layout.module_window_keys())
+            self.assertEqual(
+                layout._data["windows"]["demo.window"]["state_key"],
+                "demo.state",
+            )
+            self.assertTrue(
+                layout.restore_module_window(
+                    "demo.window",
+                    QWidget(),
+                )
+            )
 
 
 if __name__ == "__main__":

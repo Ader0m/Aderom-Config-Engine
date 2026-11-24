@@ -15,7 +15,7 @@ from typing import Dict, Optional
 
 from PyQt5.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 
-from sdk import ModuleBase, ModuleManifest
+from sdk import ModuleBase, ModuleManifest, TabSpec, WindowSpec
 from sdk.features.projects import ProjectAssetType, ProjectSetting, ProjectSettingChoice
 from sdk.contracts.events import Events
 
@@ -123,6 +123,34 @@ class OggEditorModule(ModuleBase):
         self._subs.append(
             ctx.events.subscribe(Events.UI_TAB_CLOSED, self._on_tab_closed)
         )
+        self._subs.append(
+            ctx.events.subscribe(
+                Events.UI_THEME_CHANGED,
+                self._on_theme_changed,
+            )
+        )
+
+    def _on_theme_changed(self, _payload=None):
+        try:
+            configure_sound_type_theme(self.ctx.ui.theme_color)
+        except Exception:
+            ctx_log = getattr(self.ctx, "log", None)
+            if callable(ctx_log):
+                ctx_log("ogg_editor: не удалось обновить тему звуковых типов")
+        if self._window is not None:
+            try:
+                self._window.refresh_theme()
+            except Exception:
+                ctx_log = getattr(self.ctx, "log", None)
+                if callable(ctx_log):
+                    ctx_log("ogg_editor: не удалось обновить тему окна")
+        for tab in list(self._tabs.values()):
+            try:
+                tab.refresh_theme()
+            except Exception:
+                ctx_log = getattr(self.ctx, "log", None)
+                if callable(ctx_log):
+                    ctx_log("ogg_editor: не удалось обновить тему вкладки")
 
     def register(self, ctx):
         self._asset_type_registered = ctx.projects.register_project_asset_type(
@@ -256,7 +284,15 @@ class OggEditorModule(ModuleBase):
                 on_open_section=self.open_section,
             )
         self._window.set_game_root(self._game_root())
-        self.ctx.ui.show_module_window(self.WINDOW_KEY, self._window)
+        self.ctx.ui.open_window(
+            WindowSpec(
+                key=self.WINDOW_KEY,
+                title="Редактор звуков",
+                kind="floating",
+                state_key="ogg_editor.main",
+            ),
+            self._window,
+        )
 
     def _game_root(self) -> Optional[Path]:
         forest = self.ctx.ui.workspace_forest()
@@ -284,12 +320,30 @@ class OggEditorModule(ModuleBase):
 
         existing = self._tabs.get(tab_id)
         if existing is not None:
-            self.ctx.ui.open_editor_tab(tab_id, path.name, existing)
+            self.ctx.ui.open_tab(
+                TabSpec(
+                    id=tab_id,
+                    title=path.name,
+                    kind="document_tab",
+                    source_path=path,
+                    close_policy="ask_if_dirty",
+                ),
+                existing,
+            )
             return
 
         widget = OggEditorTab(self.ctx, tab_id, path)
         self._tabs[tab_id] = widget
-        self.ctx.ui.open_editor_tab(tab_id, path.name, widget)
+        self.ctx.ui.open_tab(
+            TabSpec(
+                id=tab_id,
+                title=path.name,
+                kind="document_tab",
+                source_path=path,
+                close_policy="ask_if_dirty",
+            ),
+            widget,
+        )
 
     def _on_tab_closed(self, tab_id):
         widget = self._tabs.pop(str(tab_id), None)
