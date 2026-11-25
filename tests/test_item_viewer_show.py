@@ -9,7 +9,7 @@ from tests.support import SRC  # noqa: F401
 from tests.qt_support import qapp
 from sdk.features.items import ItemCatalog, ItemEntry, ItemField, ItemSection
 from sdk.features.projects import ProjectChanged
-from modules.base_module.item_viewer import ItemViewerFeature
+from modules.item_browser.item_viewer import ItemViewerFeature
 
 from sdk.contracts.events import Events
 from ui.bus import EventBus

@@ -15,7 +15,7 @@ from typing import Dict, Optional
 
 from PyQt5.QtWidgets import QFileDialog, QInputDialog, QMessageBox
 
-from sdk import ModuleBase, ModuleManifest, TabSpec, WindowSpec
+from sdk import ModuleBase, TabSpec, WindowSpec
 from sdk.features.projects import ProjectAssetType, ProjectSetting, ProjectSettingChoice
 from sdk.contracts.events import Events
 
@@ -76,18 +76,20 @@ def _is_ogg(path) -> bool:
         return False
 
 
-class OggEditorModule(ModuleBase):
-    manifest = ModuleManifest(
-        name="ogg_editor",
-        version="0.1.0",
-        sdk_min="0.1.0",
-        description=(
-            "Просмотр и правка Vorbis-комментариев .ogg (параметры звука "
-            "X-Ray) с прослушиванием."
-        ),
-        requires=("base",),
-    )
+class _OggEditorProvider:
+    """``audio.ogg.editor`` capability поверхности модуля."""
 
+    def __init__(self, module):
+        self._module = module
+
+    def open_file(self, path) -> None:
+        self._module.open_file(path)
+
+    def add_file(self) -> None:
+        self._module.add_file()
+
+
+class OggEditorModule(ModuleBase):
     WINDOW_KEY = "ogg_editor.window"
     WINDOW_COMMAND = "ogg_editor.window"
     OPEN_COMMAND = "ogg_editor.open"
@@ -106,6 +108,9 @@ class OggEditorModule(ModuleBase):
         self._setting_registered = False
         self._file_reader_sub = None
         self._section_graph_contributor = None
+        self._section_graph_api = None
+        self._section_graph_handle = None
+        self._dragdrop_enabled = False
         self._suspend_refresh = False
 
         self._subs.append(
@@ -153,6 +158,18 @@ class OggEditorModule(ModuleBase):
                     ctx_log("ogg_editor: не удалось обновить тему вкладки")
 
     def register(self, ctx):
+        ctx.capabilities.provide(
+            "audio.ogg.editor",
+            "1.0.0",
+            _OggEditorProvider(self),
+        )
+        self._dragdrop_enabled = (
+            ctx.capabilities.optional(
+                "item.section.dragdrop",
+                "1.0.0",
+            )
+            is not None
+        )
         self._asset_type_registered = ctx.projects.register_project_asset_type(
             ASSET_TYPE
         )
@@ -186,15 +203,15 @@ class OggEditorModule(ModuleBase):
         )
 
         self._section_graph_contributor = OggSectionGraphContributor(ctx)
-        try:
-            ctx.services.register_section_graph_contributor(
+        self._section_graph_api = ctx.capabilities.require(
+            "section.graph",
+            "1.0.0",
+        )
+        self._section_graph_handle = (
+            self._section_graph_api.register_contributor(
                 self._section_graph_contributor
             )
-        except Exception as exc:
-            ctx.log(
-                "ogg_editor: не удалось подключить связи секции: %s" % exc
-            )
-            self._section_graph_contributor = None
+        )
 
         ctx.ui.register_menu(
             "Инструменты",
@@ -217,13 +234,15 @@ class OggEditorModule(ModuleBase):
         ctx.log("Модуль редактора .ogg активирован.")
 
     def deactivate(self, ctx):
-        if self._section_graph_contributor is not None:
+        if self._section_graph_handle is not None:
             try:
-                ctx.services.unregister_section_graph_contributor(
-                    self._section_graph_contributor
+                self._section_graph_api.unregister_contributor(
+                    self._section_graph_handle
                 )
             except Exception:
                 pass
+            self._section_graph_handle = None
+            self._section_graph_api = None
             self._section_graph_contributor = None
 
         if self._file_reader_sub is not None:
@@ -282,6 +301,7 @@ class OggEditorModule(ModuleBase):
                 on_multi_edit=self.multi_edit,
                 on_edit_field=self.edit_file_params,
                 on_open_section=self.open_section,
+                dragdrop_enabled=self._dragdrop_enabled,
             )
         self._window.set_game_root(self._game_root())
         self.ctx.ui.open_window(

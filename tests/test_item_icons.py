@@ -8,7 +8,11 @@ from tempfile import TemporaryDirectory
 
 from tests.support import SRC  # noqa: F401
 
-from core.items.icons import ItemIconService
+from app.features.items.icons import (
+    ITEM_ICON_BUNDLE_NAMESPACE,
+    ItemIconService,
+)
+from core.cache.service import CacheService
 
 
 def _dds_rgba(width, height, pixels):
@@ -31,6 +35,14 @@ def _dds_rgba(width, height, pixels):
     return bytes(header) + bytes(pixels)
 
 
+_ICON_SERVICE = ItemIconService
+
+
+def _service(**kwargs):
+    kwargs.setdefault("cache_service", CacheService())
+    return _ICON_SERVICE(**kwargs)
+
+
 class ItemIconTest(unittest.TestCase):
     def setUp(self):
         self._tmp = TemporaryDirectory()
@@ -50,7 +62,7 @@ class ItemIconTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_loads_regions_in_request_order(self):
-        service = ItemIconService(workers=1)
+        service = _service(workers=1)
         requests = [
             ("first", self.dds, 0, 0, 1, 1),
             ("second", self.dds, 1, 0, 1, 1),
@@ -63,7 +75,7 @@ class ItemIconTest(unittest.TestCase):
         self.assertEqual(result[1][1].rgba, b"\0\xff\0\xff")
 
     def test_memory_cache_avoids_second_decode(self):
-        service = ItemIconService(workers=1)
+        service = _service(workers=1)
         requests = [("first", self.dds, 0, 0, 1, 1)]
 
         service.load("catalog", requests)
@@ -79,14 +91,85 @@ class ItemIconTest(unittest.TestCase):
             ("second", self.dds, 1, 0, 1, 1),
         ]
 
-        first = ItemIconService(cache_dir=cache_dir, workers=1)
+        first = _service(cache_dir=cache_dir, workers=1)
         first.load("catalog", requests)
 
-        second = ItemIconService(cache_dir=cache_dir, workers=1)
+        second = _service(cache_dir=cache_dir, workers=1)
         result = second.load("catalog", requests)
 
         self.assertEqual(len(result), 2)
         self.assertGreaterEqual(second._bundles.disk_hits, 1)
+
+
+    def test_region_cache_uses_injected_cache_service(self):
+        cache = CacheService()
+        service = _service(cache_service=cache, workers=1)
+
+        first = service.read_region(self.dds, 0, 0, 1, 1)
+        second = service.read_region(self.dds, 0, 0, 1, 1)
+
+        self.assertEqual(first.rgba, second.rgba)
+        stats = cache.stats()["namespaces"]["item.icons.region"]
+        self.assertEqual(stats["computes"], 1)
+        self.assertEqual(stats["hits"], 1)
+
+    def test_bundle_cache_is_single_flight_and_counted(self):
+        cache = CacheService()
+        service = _service(cache_service=cache, workers=1)
+        requests = [
+            ("first", self.dds, 0, 0, 1, 1),
+            ("second", self.dds, 1, 0, 1, 1),
+        ]
+
+        service.load("catalog", requests)
+        service.clear_memory()
+        service.load("catalog", requests)
+
+        stats = cache.stats()["namespaces"]["item.icons.bundle"]
+        self.assertEqual(stats["computes"], 1)
+        self.assertEqual(stats["hits"], 1)
+
+    def test_bundle_hit_loads_regions_added_to_request(self):
+        cache = CacheService()
+        service = _service(cache_service=cache, workers=1)
+        first = [
+            ("first", self.dds, 0, 0, 1, 1),
+        ]
+        both = [
+            ("first", self.dds, 0, 0, 1, 1),
+            ("second", self.dds, 1, 0, 1, 1),
+        ]
+
+        self.assertEqual(
+            [section for section, _ in service.load("catalog", first)],
+            ["first"],
+        )
+        result = service.load("catalog", both)
+
+        self.assertEqual(
+            [section for section, _ in result],
+            ["first", "second"],
+        )
+        self.assertEqual(result[1][1].rgba, b"\0\xff\0\xff")
+
+    def test_non_dict_bundle_is_ignored(self):
+        cache = CacheService()
+        service = _service(cache_service=cache, workers=1)
+        requests = [("first", self.dds, 0, 0, 1, 1)]
+        bundle_key = service._bundle_key("catalog", requests, {})
+        cache.set(
+            ITEM_ICON_BUNDLE_NAMESPACE,
+            bundle_key,
+            "broken",
+            snapshot_id=service._key_snapshot(bundle_key),
+        )
+
+        result = service.load("catalog", requests)
+
+        self.assertEqual(
+            [section for section, _ in result],
+            ["first"],
+        )
 
 
 if __name__ == "__main__":

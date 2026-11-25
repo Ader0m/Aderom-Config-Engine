@@ -131,13 +131,21 @@ def main():
     )
     from core.tree.builder import TreeBuilder
     from core.tree.query import TreeQueryService
-    from core.tree.graph import ReferenceGraphBuilder, DisabledCache
+    from core.tree.graph import ReferenceGraphBuilder
     from core.resolver.service import ResolverService
     from core.resolver.assembly import AssemblyService
     from core.xml.service import XmlResolveService
 
+    from app.features.items import ItemFeatureService
     from sdk import SDK_VERSION, AppPaths
     from ui.module_loader import ModuleLoader
+    from ui.platform.common_actions import CommonActions
+    from ui.platform.module_config import ModuleConfigStore
+    from ui.platform.module_trust import (
+        REQUIRED_MODULE_IDS,
+        SHIPPED_MODULE_IDS,
+    )
+    from ui.platform.workspace_actions import WorkspaceActions
     from ui.platform.sdk_bridge import build_module_context
     from sdk.contracts.events import Events
     from ui.bus import CommandBus, EventBus
@@ -212,8 +220,8 @@ def main():
     )
     tree_query = TreeQueryService()
 
-    # Граф связей
-    graph_builder = ReferenceGraphBuilder(cache=DisabledCache())
+    # Граф связей: file/result cache через общий CacheService.
+    graph_builder = ReferenceGraphBuilder(cache_service=cache_service)
 
     # Резолвер и сборка
     resolver_service = ResolverService(
@@ -246,6 +254,7 @@ def main():
     services.patch_commit.audit = PatchAuditLog.for_session(
         generated_dir,
     )
+    item_features = ItemFeatureService(services)
 
     # 2) Сервисы платформы.
     events = EventBus()
@@ -304,6 +313,71 @@ def main():
         hints.register(provider_type(hints.catalogs))
     api.hints = hints
 
+    # 2.1) Платформенные workspace и общие действия (ADR-33).
+    workspace_actions = WorkspaceActions(api, services, tasks, events)
+    workspace_actions.config_dir = workspace_actions.detect_config_dir()
+    if workspace_actions.config_dir:
+        api.log(
+            "Каталог конфигов (VFS игры): %s"
+            % workspace_actions.config_dir
+        )
+    else:
+        api.log(
+            "Каталог конфигов не найден — будет запрошен при запуске."
+        )
+
+    common_actions = CommonActions(api, services, tasks)
+    api.register_menu(
+        "Файл", "Открыть папку...",
+        workspace_actions.choose_directory, "Ctrl+O",
+    )
+    api.register_menu(
+        "Файл", "Пересобрать VFS",
+        workspace_actions.run, "Ctrl+Shift+R",
+    )
+    api.register_menu(
+        "Вид", "Сортировать по убыванию (Файлов в дереве)",
+        common_actions.sort_tree_by_files_desc,
+    )
+    api.register_menu("Правка", "Отменить", common_actions.undo)
+    api.register_menu("Правка", "Повторить", common_actions.redo)
+    api.register_menu("Правка", "Найти в файле", common_actions.find)
+    api.register_tree_context_action(
+        "Открыть исходный файл",
+        common_actions.open_raw,
+    )
+    api.register_tree_context_action(
+        "Открыть в Notepad++",
+        common_actions.open_in_external_editor,
+    )
+    api.register_tree_context_action(
+        "Копировать относительный путь",
+        common_actions.copy_relative_path,
+    )
+    api.register_file_action(
+        "Открыть в Notepad++",
+        common_actions.open_in_external_editor,
+    )
+    commands.register("workspace.choose_dir", workspace_actions.choose_directory)
+    commands.register("workspace.rebuild", workspace_actions.run)
+    commands.register("common.open_raw", common_actions.open_raw)
+    commands.register(
+        "common.open_notepad",
+        common_actions.open_in_external_editor,
+    )
+    commands.register("common.assemble_open", common_actions.assemble_and_open)
+    commands.register(
+        "common.copy_rel_path",
+        common_actions.copy_relative_path,
+    )
+    commands.register(
+        "common.sort_tree_files_desc",
+        common_actions.sort_tree_by_files_desc,
+    )
+    commands.register("common.edit_undo", common_actions.undo)
+    commands.register("common.edit_redo", common_actions.redo)
+    commands.register("common.edit_find", common_actions.find)
+
     # 3) Загрузка модулей (до построения окна, чтобы регистрации попали в меню).
     def make_context(manifest):
         return build_module_context(
@@ -315,10 +389,28 @@ def main():
             tasks=tasks,
             services=services,
             paths=paths,
+            items=item_features,
         )
 
-    loader = ModuleLoader(make_context)
+    loader = ModuleLoader(
+        make_context,
+        trusted_ids=SHIPPED_MODULE_IDS,
+        required_ids=REQUIRED_MODULE_IDS,
+        config=ModuleConfigStore(
+            app_root / "config" / "modules.json",
+            log=api.log,
+        ),
+    )
     loader.discover_and_load(log=api.log)
+    for module_id, info in sorted(loader.describe().items()):
+        details = info["state"]
+        if info["phase"]:
+            details += " (%s)" % info["phase"]
+        if info["error"]:
+            details += ": %s" % info["error"]
+        elif info["skipped"]:
+            details += ": %s" % ", ".join(info["skipped"])
+        api.log("Модуль %s: %s" % (module_id, details))
 
     # 4) Главное окно. Сразу разворачиваем: рабочая среда рассчитана
     # на широкий экран (дерево + редактор + диагностика).

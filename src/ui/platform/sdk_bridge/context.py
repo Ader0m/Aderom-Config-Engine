@@ -11,7 +11,7 @@ from .commands import CommandApiAdapter
 from .core import CoreApiAdapter
 from .documents import DocumentApiAdapter
 from .events import EventApiAdapter
-from .items import ItemApiAdapter
+from .items import ItemCatalogApiAdapter
 from .patch import PatchApiAdapter
 from .projects import ProjectApiAdapter
 from .tasks import TaskApiAdapter
@@ -30,9 +30,10 @@ def build_module_context(
     paths,
     capabilities=None,
     section_graph_contributors=None,
+    items=None,
 ):
     """Создать контекст модуля с явными адаптерами."""
-    module_id = str(getattr(manifest, "name", "") or "")
+    module_id = str(manifest.id or "")
     scope = RegistrationScope(module_id)
 
     events_api = EventApiAdapter.wrap(events)
@@ -61,7 +62,7 @@ def build_module_context(
     projects_api = ProjectApiAdapter(ui)
     projects_api.bind_owner(module_id, scope)
 
-    items_api = ItemApiAdapter(services, ui)
+    items_api = ItemCatalogApiAdapter(items, ui)
 
     if capabilities is None:
         capabilities = CapabilityScope(

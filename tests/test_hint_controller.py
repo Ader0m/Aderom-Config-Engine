@@ -16,7 +16,7 @@ from sdk.ui.hints import HintItem, HintResult, HintTargetInfo
 from ui.hints.controller import create_controller
 from ui.platform.hints import HintService
 from ui.platform.hints.providers.colors import ColorTagProvider
-from modules.base_module.item_viewer import LocalizedDescriptionEdit
+from modules.item_browser.item_viewer import LocalizedDescriptionEdit
 
 
 class _Provider:

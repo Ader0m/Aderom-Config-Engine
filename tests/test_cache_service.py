@@ -10,7 +10,7 @@ from tests.support import SRC  # noqa: F401
 
 from core.cache.service import CacheService
 from core.resolver.service import ResolverService
-from core.tools.cache import FileCacheSystem, ResolvedCache
+from core.tools.cache import FileCacheSystem, ObjectCache, ResolvedCache
 
 
 class CacheServiceTest(unittest.TestCase):
@@ -283,6 +283,197 @@ class CacheServiceTest(unittest.TestCase):
             self.assertIsNone(
                 ResolvedCache(cache_dir=cache_dir).get(key)
             )
+
+    def test_clear_namespace_keeps_other_namespaces(self):
+        cache = CacheService()
+        first = ObjectCache(max_entries=4)
+        second = ObjectCache(max_entries=4)
+        cache.register_backend("items", first)
+        cache.register_backend("hints", second)
+        cache.set("items", "a", "A", snapshot_id="s")
+        cache.set("hints", "b", "B", snapshot_id="s")
+
+        cache.clear_namespace("items")
+
+        self.assertIsNone(cache.get("items", "a", snapshot_id="s"))
+        self.assertEqual(cache.get("hints", "b", snapshot_id="s"), "B")
+
+    def test_clear_also_clears_registered_backends(self):
+        cache = CacheService()
+        backend = ObjectCache(max_entries=4)
+        cache.register_backend("items", backend)
+        cache.set("items", "a", "A", snapshot_id="s")
+
+        cache.clear()
+
+        self.assertIsNone(cache.get("items", "a", snapshot_id="s"))
+
+    def test_clear_namespace_preserves_disk_backend(self):
+        with tempfile.TemporaryDirectory() as d:
+            cache_dir = Path(d)
+            cache = CacheService()
+            cache.register_backend(
+                "items",
+                ObjectCache(cache_dir=cache_dir),
+            )
+            cache.set("items", "a", "A", snapshot_id="s")
+
+            cache.clear_namespace("items")
+
+            fresh = CacheService()
+            fresh.register_backend(
+                "items",
+                ObjectCache(cache_dir=cache_dir),
+            )
+            self.assertEqual(
+                fresh.get("items", "a", snapshot_id="s"),
+                "A",
+            )
+
+    def test_backend_stats_include_registered_namespaces(self):
+        cache = CacheService()
+        backend = ObjectCache(max_entries=4)
+        cache.register_backend("items", backend)
+        cache.set("items", "a", "A", snapshot_id="s")
+
+        self.assertIn("items", cache.backend_stats())
+        self.assertEqual(
+            cache.backend_stats()["items"]["entries"],
+            1,
+        )
+
+    def test_clear_disk_clears_registered_backend(self):
+        with tempfile.TemporaryDirectory() as d:
+            cache_dir = Path(d)
+            cache = CacheService()
+            cache.register_backend(
+                "items",
+                ObjectCache(cache_dir=cache_dir),
+            )
+            cache.set("items", "a", "A", snapshot_id="s")
+
+            cache.clear_disk()
+
+            fresh = CacheService()
+            fresh.register_backend(
+                "items",
+                ObjectCache(cache_dir=cache_dir),
+            )
+            self.assertIsNone(
+                fresh.get("items", "a", snapshot_id="s")
+            )
+
+    def test_clear_namespace_does_not_repopulate_from_inflight(self):
+        cache = CacheService()
+        cache.register_backend("items", ObjectCache(max_entries=4))
+        started = threading.Event()
+        release = threading.Event()
+        results = []
+
+        def compute():
+            started.set()
+            release.wait(5)
+            return "value"
+
+        def worker():
+            results.append(
+                cache.get_or_compute(
+                    "items",
+                    "key",
+                    compute,
+                    snapshot_id="s",
+                )
+            )
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        self.assertTrue(started.wait(5))
+        cache.clear_namespace("items")
+        release.set()
+        thread.join(5)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(results, ["value"])
+        self.assertFalse(cache.has("items", "key", snapshot_id="s"))
+
+    def test_clear_namespace_wakes_waiters_with_error(self):
+        cache = CacheService()
+        cache.register_backend("items", ObjectCache(max_entries=4))
+        started = threading.Event()
+        release = threading.Event()
+        owner_result = []
+        waiter_errors = []
+
+        def compute():
+            started.set()
+            release.wait(5)
+            return "value"
+
+        def owner():
+            owner_result.append(
+                cache.get_or_compute(
+                    "items",
+                    "key",
+                    compute,
+                    snapshot_id="s",
+                )
+            )
+
+        def waiter():
+            try:
+                cache.get_or_compute(
+                    "items",
+                    "key",
+                    compute,
+                    snapshot_id="s",
+                )
+            except RuntimeError as exc:
+                waiter_errors.append(exc)
+
+        owner_thread = threading.Thread(target=owner)
+        owner_thread.start()
+        self.assertTrue(started.wait(5))
+        waiter_thread = threading.Thread(target=waiter)
+        waiter_thread.start()
+        cache.clear_namespace("items")
+        release.set()
+        owner_thread.join(5)
+        waiter_thread.join(5)
+
+        self.assertFalse(owner_thread.is_alive())
+        self.assertFalse(waiter_thread.is_alive())
+        self.assertEqual(owner_result, ["value"])
+        self.assertEqual(len(waiter_errors), 1)
+        self.assertFalse(cache.has("items", "key", snapshot_id="s"))
+
+    def test_uncacheable_result_is_not_stored(self):
+        cache = CacheService()
+        cache.register_backend("items", ObjectCache(max_entries=4))
+        calls = []
+
+        def compute():
+            calls.append(1)
+            return "value"
+
+        first = cache.get_or_compute(
+            "items",
+            "key",
+            compute,
+            snapshot_id="s",
+            cacheable=lambda _value: False,
+        )
+        second = cache.get_or_compute(
+            "items",
+            "key",
+            compute,
+            snapshot_id="s",
+            cacheable=lambda _value: False,
+        )
+
+        self.assertEqual(first, "value")
+        self.assertEqual(second, "value")
+        self.assertEqual(calls, [1, 1])
+        self.assertFalse(cache.has("items", "key", snapshot_id="s"))
 
     def test_disk_format_version_is_not_migrated(self):
         with tempfile.TemporaryDirectory() as d:

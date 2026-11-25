@@ -15,13 +15,14 @@ from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QLineEdit
 from sdk.features.items import ItemEntry, ItemField, LocalizationString
 from sdk.contracts import ProjectOverlay
-from core.items.catalog import ItemCatalogService
-from core.items.localization import (
+from app.features.items.catalog import ItemCatalogService
+from core.cache.service import CacheService
+from core.localization import (
     LocalizationService,
     edit_localization_text,
 )
-from ui.platform.sdk_bridge import ItemApiAdapter
-from modules.base_module.item_viewer import ItemCardView, ItemViewerFeature
+from ui.platform.sdk_bridge import ItemCatalogApiAdapter
+from modules.item_browser.item_viewer import ItemCardView, ItemViewerFeature
 
 _app = qapp()
 
@@ -153,9 +154,13 @@ class LocalizationOverlayTest(unittest.TestCase):
         overlay = ProjectOverlay(source_files={self.ru: edited})
         forest = _Forest(self.configs)
 
+        cache = CacheService()
         entry = ItemCatalogService(
             _Resolver(),
-            localization_service=LocalizationService(),
+            localization_service=LocalizationService(
+                cache_service=cache,
+            ),
+            cache_service=cache,
         ).build_entry(
             forest,
             ITEMS,
@@ -646,7 +651,7 @@ class _Ctx:
         self.ui = ui
         self.services = _Services()
         self.documents = ui
-        self.items = ItemApiAdapter(self.services, ui)
+        self.items = ItemCatalogApiAdapter(self.services, ui)
         self.projects = ui
         self.paths = SimpleNamespace(
             key=lambda path: str(Path(path)).lower(),

@@ -8,7 +8,7 @@ from pathlib import Path
 from tests.support import SRC  # noqa: F401
 
 from core.tools.fs import detect_config_dir
-from modules.base_module.settings import config_dir_candidates
+from ui.platform.workspace_actions import config_dir_candidates
 
 
 class ConfigCandidatesTest(unittest.TestCase):

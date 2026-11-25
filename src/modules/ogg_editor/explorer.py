@@ -463,6 +463,7 @@ class OggExplorerWindow(QWidget):
         on_multi_edit=None,
         on_edit_field=None,
         on_open_section=None,
+        dragdrop_enabled=True,
         parent=None,
     ):
         super().__init__(parent)
@@ -472,6 +473,7 @@ class OggExplorerWindow(QWidget):
         self._on_multi_edit = on_multi_edit
         self._on_edit_field = on_edit_field
         self._on_open_section = on_open_section
+        self._dragdrop_enabled = bool(dragdrop_enabled)
 
         self._pinned_keys = set()
         self.setAcceptDrops(True)
@@ -993,7 +995,11 @@ class OggExplorerWindow(QWidget):
         super().dropEvent(event)
 
     def can_accept_drop(self, mime) -> bool:
-        return mime is not None and mime.hasFormat(ITEM_SECTION_MIME)
+        return (
+            self._dragdrop_enabled
+            and mime is not None
+            and mime.hasFormat(ITEM_SECTION_MIME)
+        )
 
     def handle_item_drop(self, mime) -> bool:
         if not self.can_accept_drop(mime):

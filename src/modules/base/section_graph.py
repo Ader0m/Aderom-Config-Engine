@@ -36,6 +36,19 @@ EDGE_STYLES = {
     "visual_reference": ("Модель", "graph_visual"),
 }
 
+CONFIDENCE_LABELS = {
+    "exact": "Точная",
+    "probable": "Вероятная",
+    "heuristic": "Эвристика",
+}
+
+
+def _confidence_label(node) -> str:
+    value = str(
+        getattr(node, "primary_confidence", "") or "probable"
+    )
+    return CONFIDENCE_LABELS.get(value, value)
+
 
 def _edge_style(edge_type, color_fn=None, styles=None):
     """(маркер, QColor|None) для типа связи."""
@@ -452,8 +465,10 @@ class SectionGraphWindow(QDialog):
     def _make_tree(self):
         """Плоский список связей с колонками совпадений и первой строки."""
         tree = GraphTree()
-        tree.setColumnCount(3)
-        tree.setHeaderLabels(["Файл / связь", "Совпадений", "Строка"])
+        tree.setColumnCount(4)
+        tree.setHeaderLabels(
+            ["Файл / связь", "Совпадений", "Строка", "Уверенность"]
+        )
         tree.setRootIsDecorated(False)
         tree.setAlternatingRowColors(True)
         tree.setUniformRowHeights(True)
@@ -463,6 +478,7 @@ class SectionGraphWindow(QDialog):
         header.setSectionResizeMode(0, QHeaderView.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
 
         tree.itemDoubleClicked.connect(self._on_item_double_clicked)
         tree.itemClicked.connect(
@@ -594,6 +610,7 @@ class SectionGraphWindow(QDialog):
         item.setText(0, "[%s] %s" % (label, _node_file_name(node)))
         item.setText(1, str(getattr(node, "matches_count", 1) or 1))
         item.setText(2, str(node.first_match_line))
+        item.setText(3, _confidence_label(node))
         if color is not None:
             item.setForeground(0, color)
         item.setData(0, Qt.UserRole, node)
@@ -621,6 +638,7 @@ class SectionGraphWindow(QDialog):
         item.setText(0, "[%s] %s" % (label, _node_file_name(node)))
         item.setText(1, str(node.matches_count))
         item.setText(2, str(node.first_match_line))
+        item.setText(3, _confidence_label(node))
         if color is not None:
             item.setForeground(0, color)
 

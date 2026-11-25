@@ -34,6 +34,7 @@ class _Flight:
     event: threading.Event = field(default_factory=threading.Event)
     value: object = None
     error: BaseException | None = None
+    cancelled: bool = False
 
 
 class CacheService:
@@ -75,7 +76,12 @@ class CacheService:
 
     # -------------------------------------------------- backend'ы
     def register_backend(self, namespace, backend):
-        """Назначить бэкенд пространству имён явно."""
+        """Назначить бэкенд пространству имён явно.
+
+        Backend должен поддерживать ``get``/``set``/``delete``/``clear``,
+        ``clear_disk`` и ``stats``: ``CacheService`` делегирует ему
+        глобальные операции очистки и диагностику.
+        """
         with self._lock:
             self._backends[str(namespace)] = backend
 
@@ -91,11 +97,16 @@ class CacheService:
         return self._memory
 
     def backend_stats(self):
-        return {
+        with self._lock:
+            registered = dict(self._backends)
+        stats = {
             "memory": self._memory.stats(),
             "resolved": self._resolved.stats(),
             "semantic": self._semantic.stats(),
         }
+        for namespace, backend in registered.items():
+            stats[namespace] = backend.stats()
+        return stats
 
     # -------------------------------------------------- публичный API
     def get_or_compute(
@@ -105,12 +116,18 @@ class CacheService:
         compute,
         deps=(),
         snapshot_id="",
+        cacheable=None,
     ):
         """Вернуть значение или вычислить его ровно один раз.
 
         ``key`` — логический ключ без namespace и снимка. Снимок хранится
         рядом с записью и проверяется при чтении; старые записи не
         возвращаются даже при совпадении логического ключа.
+
+        ``cacheable`` — необязательный предикат: если он вернул ``False``,
+        результат возвращается вызывающему, но не сохраняется в backend.
+        Нужен для fallback/partial-результатов, которые нельзя считать
+        полноценным снимком.
         """
         namespace = str(namespace)
         snapshot_id = str(snapshot_id or "")
@@ -172,7 +189,10 @@ class CacheService:
 
         try:
             value = compute()
-            if value is not None:
+            can_store = value is not None and not flight.cancelled
+            if can_store and cacheable is not None:
+                can_store = bool(cacheable(value))
+            if can_store:
                 backend.set(entry_key, value)
                 self._remember(
                     entry_key,
@@ -260,21 +280,72 @@ class CacheService:
             with self._lock:
                 self._forget_locked(entry_key)
 
+    def clear_namespace(self, namespace):
+        """Очистить память зарегистрированного backend'а; диск сохраняется.
+
+        Нужен владельцам namespace'ов для их локального ``clear_memory``,
+        не затрагивающего остальные кэши общего ``CacheService``.
+        Метаданные снимаются без ``backend.delete``: иначе вместе с
+        памятью удалялась бы и дисковая запись. In-flight вычисления
+        этого namespace помечаются отменёнными: ожидающие получают
+        ошибку, а owner не записывает результат обратно в кэш.
+        """
+        namespace = str(namespace)
+        with self._lock:
+            backend = self._backends.get(namespace)
+            if backend is None:
+                raise KeyError(
+                    "namespace %r не зарегистрирован" % namespace
+                )
+            keys = [
+                entry_key
+                for entry_key in self._meta
+                if entry_key[0] == namespace
+            ]
+            for entry_key, flight in self._inflight.items():
+                if entry_key[0] != namespace:
+                    continue
+                flight.cancelled = True
+                flight.error = RuntimeError(
+                    "namespace %r очищен во время вычисления"
+                    % namespace
+                )
+                flight.event.set()
+        for entry_key in keys:
+            with self._lock:
+                self._drop_metadata_locked(entry_key)
+        backend.clear()
+
     def clear(self):
         with self._lock:
             self._meta.clear()
             self._snapshot_keys.clear()
             self._dep_keys.clear()
             for flight in self._inflight.values():
+                flight.cancelled = True
                 flight.error = RuntimeError("кэш очищен во время вычисления")
                 flight.event.set()
             self._inflight.clear()
+            backends = list({
+                id(backend): backend
+                for backend in self._backends.values()
+            }.values())
         self._memory.clear()
         self._resolved.clear()
         self._semantic.clear()
+        for backend in backends:
+            backend.clear()
 
     def clear_disk(self):
         self._resolved.clear_disk()
+        with self._lock:
+            backends = list({
+                id(backend): backend
+                for backend in self._backends.values()
+                if backend is not self._resolved
+            }.values())
+        for backend in backends:
+            backend.clear_disk()
 
     def stats(self):
         with self._lock:

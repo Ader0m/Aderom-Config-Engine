@@ -19,17 +19,19 @@ import hashlib
 import logging
 import multiprocessing as mp
 
-from core.items.dds import TextureRegion, read_dds_region
-from core.tools.cache import ObjectCache
-from core.tools.parallel import can_spawn_processes, default_workers
-from core.tools.cache import file_stamp
-from core.tools.paths import path_key
+from core.api.graphics import TextureRegion, read_dds_region
+from core.api.cache import ObjectCache, file_stamp
+from core.api.parallel import can_spawn_processes, default_workers
+from core.api.paths import path_key
 
 
 logger = logging.getLogger(__name__)
 
 # Меняется при изменении правил/формата кэша иконок.
 ICON_CACHE_VERSION = 2
+
+ITEM_ICON_REGION_NAMESPACE = "item.icons.region"
+ITEM_ICON_BUNDLE_NAMESPACE = "item.icons.bundle"
 
 _MEMORY_ENTRIES = 4096
 _MEMORY_BYTES = 128 * 1024 * 1024
@@ -69,8 +71,14 @@ class ItemIconService:
         cache_dir=None,
         workers=None,
         max_disk_bytes=None,
+        cache_service=None,
     ):
         self._workers = workers
+        if cache_service is None:
+            raise ValueError(
+                "ItemIconService требует общий CacheService"
+            )
+        self._cache_service = cache_service
         self._memory = ObjectCache(
             max_entries=_MEMORY_ENTRIES,
             max_bytes=_MEMORY_BYTES,
@@ -81,18 +89,25 @@ class ItemIconService:
             max_entries=2,
             max_disk_bytes=max_disk_bytes,
         )
+        self._cache_service.register_backend(
+            ITEM_ICON_REGION_NAMESPACE,
+            self._memory,
+        )
+        self._cache_service.register_backend(
+            ITEM_ICON_BUNDLE_NAMESPACE,
+            self._bundles,
+        )
 
     # -------------------------------------------------- одиночная иконка
     def read_region(self, path, x, y, width, height):
         """Регион из памяти или декодирование одного DDS-прямоугольника."""
         key = self._icon_key(path, x, y, width, height)
-        cached = self._memory.get(key)
-        if cached is not None:
-            return cached
-
-        region = read_dds_region(path, x, y, width, height)
-        self._memory.set(key, region)
-        return region
+        return self._cache_service.get_or_compute(
+            ITEM_ICON_REGION_NAMESPACE,
+            key,
+            lambda: read_dds_region(path, x, y, width, height),
+            snapshot_id=self._key_snapshot(key),
+        )
 
     # -------------------------------------------------- пакетная загрузка
     def load(self, catalog_key, requests, log=None):
@@ -119,7 +134,11 @@ class ItemIconService:
                 height,
                 stamps=stamps,
             )
-            cached = self._memory.get(key)
+            cached = self._cache_service.get(
+                ITEM_ICON_REGION_NAMESPACE,
+                key,
+                snapshot_id=self._key_snapshot(key),
+            )
             if cached is not None:
                 result[section] = cached
             else:
@@ -138,9 +157,29 @@ class ItemIconService:
 
         if missing:
             bundle_key = self._bundle_key(catalog_key, requests, stamps)
-            loaded = self._bundles.get(bundle_key)
-            if isinstance(loaded, dict):
-                bundle = loaded
+            if log and result:
+                log("Предметы: иконки из кэша: %d" % len(result))
+
+            computed_here = False
+
+            def compute_bundle():
+                nonlocal computed_here
+                computed_here = True
+                decoded = self._decode_missing(missing, log)
+                if not decoded:
+                    return None
+                return {
+                    key: region
+                    for _section, key, region in decoded
+                }
+
+            loaded = self._cache_service.get_or_compute(
+                ITEM_ICON_BUNDLE_NAMESPACE,
+                bundle_key,
+                compute_bundle,
+                snapshot_id=self._key_snapshot(bundle_key),
+            )
+            bundle = loaded if isinstance(loaded, dict) else {}
 
             still_missing = []
             for job in missing:
@@ -148,44 +187,59 @@ class ItemIconService:
                 region = bundle.get(key)
                 if region is None:
                     still_missing.append(job)
-                else:
-                    self._memory.set(key, region)
-                    result[section] = region
-            missing = still_missing
-
-        if missing and log and result:
-            log("Предметы: иконки из кэша: %d" % len(result))
-
-        if missing:
-            if log:
-                workers = self._workers or _default_workers()
-                if not can_spawn_processes():
-                    workers = 1
-                log(
-                    "Предметы: декодирование иконок %d (процессов: %d)…"
-                    % (len(missing), workers)
+                    continue
+                self._cache_service.set(
+                    ITEM_ICON_REGION_NAMESPACE,
+                    key,
+                    region,
+                    snapshot_id=self._key_snapshot(key),
                 )
-
-            decoded, errors = self._decode(missing, log)
-            for section, key, region in decoded:
-                self._memory.set(key, region)
                 result[section] = region
-                bundle[key] = region
 
-            if bundle_key is not None and decoded:
-                self._bundles.set(bundle_key, bundle)
-
-            if errors and log:
-                log(
-                    "Предметы: не удалось декодировать иконок: %d"
-                    % errors
-                )
+            # Bundle — ускоритель, а не полный набор: если в нём нет
+            # запрошенных регионов (старый частичный bundle или новый
+            # предмет на том же атласе), догружаем их.
+            if still_missing and not computed_here:
+                decoded = self._decode_missing(still_missing, log)
+                for section, key, region in decoded:
+                    bundle[key] = region
+                    self._cache_service.set(
+                        ITEM_ICON_REGION_NAMESPACE,
+                        key,
+                        region,
+                        snapshot_id=self._key_snapshot(key),
+                    )
+                    result[section] = region
+                if decoded:
+                    self._cache_service.set(
+                        ITEM_ICON_BUNDLE_NAMESPACE,
+                        bundle_key,
+                        bundle,
+                        snapshot_id=self._key_snapshot(bundle_key),
+                    )
 
         return tuple(
             (section, result[section])
             for section, _path, _x, _y, _w, _h in requests
             if section in result
         )
+
+    def _decode_missing(self, jobs, log):
+        if log:
+            workers = self._workers or _default_workers()
+            if not can_spawn_processes():
+                workers = 1
+            log(
+                "Предметы: декодирование иконок %d (процессов: %d)…"
+                % (len(jobs), workers)
+            )
+        decoded, errors = self._decode(jobs, log)
+        if errors and log:
+            log(
+                "Предметы: не удалось декодировать иконок: %d"
+                % errors
+            )
+        return decoded
 
     # -------------------------------------------------- декодирование
     def _decode(self, jobs, log):
@@ -334,8 +388,15 @@ class ItemIconService:
 
         return ("item_icons", digest)
 
+    @staticmethod
+    def _key_snapshot(key):
+        # В ключе уже есть file stamp (регион) или digest DDS-набора
+        # (пакет); версия правил входит в снимок, а не только в формат
+        # backend'а.
+        return "v%d:%s" % (ICON_CACHE_VERSION, key[1])
+
     def clear_memory(self):
-        self._memory.clear()
+        self._cache_service.clear_namespace(ITEM_ICON_REGION_NAMESPACE)
 
 
 # ---------------------------------------------------------------- утилиты

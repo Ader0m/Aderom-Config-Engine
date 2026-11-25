@@ -7,7 +7,7 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from modules.base_module.ltx_open import LtxFileOpener
+from modules.base.ltx_open import LtxFileOpener
 
 
 class _Session:

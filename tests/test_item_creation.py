@@ -11,7 +11,7 @@ from tests.support import SRC  # noqa: F401
 from tests.qt_support import qapp
 from sdk.features.items import ItemCatalog, ItemEntry, ItemField, ItemSection
 from sdk.contracts import ProjectOverlay
-from modules.base_module.item_viewer import (
+from modules.item_browser.item_viewer import (
     CreateItemDialog,
     ItemViewerFeature,
     ItemViewerWindow,
@@ -63,6 +63,26 @@ class _Ui:
 
     def theme_color(self, name, fallback=None):
         return fallback
+
+    def project_tag(self, name):
+        from app.features.items.creation import project_tag
+
+        return project_tag(name)
+
+    def creation_paths(self, scan_dir, project_name):
+        from app.features.items.creation import creation_paths
+
+        return creation_paths(scan_dir, project_name)
+
+    def parent_fields(self, catalog, parent):
+        from app.features.items.creation import parent_fields
+
+        return parent_fields(catalog, parent)
+
+    def plan_item_creation(self, *args, **kwargs):
+        from app.features.items.creation import plan_item_creation
+
+        return plan_item_creation(*args, **kwargs)
 
 
 class _Services:

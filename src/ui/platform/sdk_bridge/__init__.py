@@ -9,7 +9,7 @@ from .context import build_module_context
 from .core import CoreApiAdapter
 from .documents import DocumentApiAdapter
 from .events import EventApiAdapter
-from .items import ItemApiAdapter
+from .items import ItemCatalogApiAdapter
 from .patch import PatchApiAdapter
 from .projects import ProjectApiAdapter
 from .tasks import TaskApiAdapter
@@ -20,7 +20,7 @@ __all__ = [
     "CoreApiAdapter",
     "DocumentApiAdapter",
     "EventApiAdapter",
-    "ItemApiAdapter",
+    "ItemCatalogApiAdapter",
     "PatchApiAdapter",
     "ProjectApiAdapter",
     "TaskApiAdapter",

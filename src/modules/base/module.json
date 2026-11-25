@@ -1,0 +1,35 @@
+{
+  "manifest_version": 1,
+  "id": "base",
+  "name": "Базовый модуль",
+  "version": "0.4.0",
+  "description": "LTX/XML-просмотр и резолв, граф связей секции и LTX/XML-действия.",
+  "author": "ACE",
+  "entrypoint": "module:MODULE",
+  "sdk": {
+    "min": "0.12.0"
+  },
+  "requires": [],
+  "optional_requires": [],
+  "needs": [],
+  "optional_needs": [],
+  "provides": [
+    {
+      "name": "document.viewer.ltx",
+      "version": "1.0.0"
+    },
+    {
+      "name": "document.viewer.xml",
+      "version": "1.0.0"
+    },
+    {
+      "name": "section.graph",
+      "version": "1.0.0"
+    }
+  ],
+  "trust": "trusted",
+  "enabled_by_default": true,
+  "platforms": [
+    "windows"
+  ]
+}

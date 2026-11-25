@@ -82,8 +82,8 @@ resolved-модели и реализации адаптеров. `ModuleContext
 - `ctx.items`/`ctx.projects`/`ctx.documents` — переходные feature-API.
   Доменный `items.catalog` как capability и вынос в модуль закрываются
   на Этапе 7.
-- `ogg_editor.requires=("base",)` не меняется: MOD-2 закрывается на
-  Этапе 7.
+- `ogg_editor.requires=("base",)` не меняется; по ADR-35 это намеренная
+  зависимость от обязательного `base`.
 - Легаси-импорты `ui → core` остаются в карантине до Этапов 3/6.
 
 ## Срок и условия выхода

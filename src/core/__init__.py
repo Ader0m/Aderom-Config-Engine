@@ -9,8 +9,11 @@ core — ядро приложения.
 - ``tree`` — дерево, запросы, граф, include/DLTX-модели;
 - ``resolver`` — LTX-резолвер, сборка, предсборка, атрибуция;
 - ``xml`` — SLAXML, DXML и XML-резолв;
-- ``items`` — DDS, каталог предметов, иконки, локализация;
+- ``graphics`` — декодирование DDS-текстур;
 - ``patching/ltx`` и ``patching/xml`` — симметричные патч-конвейеры.
+
+Доменные предметы, иконки и локализация живут в ``app.features.items``;
+``core`` не знает слов «предмет», «иконка», «инвентарь».
 """
 
 from core.models import LtxForest, LineSource
@@ -45,25 +48,7 @@ from core.tools.vfs import (
     resolve_asset_path,
     resolve_physical_path,
 )
-from core.items.dds import DdsError, DdsInfo, TextureRegion, read_dds_info, read_dds_region
-from core.items.catalog import (
-    DEFAULT_ICON_TEXTURE,
-    ITEM_CATALOG_VERSION,
-    GRID_SIZE,
-    ItemCatalog,
-    ItemCatalogService,
-    ItemField,
-    ItemRecord,
-    ItemSection,
-)
-from core.items.icons import ICON_CACHE_VERSION, ItemIconService
-from core.items.localization import (
-    LOCALIZATION_VERSION,
-    LocalizationEntry,
-    LocalizationService,
-    LocalizationTable,
-    edit_localization_text,
-)
+from core.graphics.dds import DdsError, DdsInfo, TextureRegion, read_dds_info, read_dds_region
 from core.catalogs import (
     ColorCatalog,
     ColorDef,
@@ -250,22 +235,7 @@ __all__ = [
     "resolve_asset_path",
     "resolve_physical_path",
 
-    # items / dds
-    "DEFAULT_ICON_TEXTURE",
-    "ITEM_CATALOG_VERSION",
-    "GRID_SIZE",
-    "ItemCatalog",
-    "ItemCatalogService",
-    "ItemField",
-    "ItemRecord",
-    "ItemSection",
-    "ICON_CACHE_VERSION",
-    "ItemIconService",
-    "LOCALIZATION_VERSION",
-    "LocalizationEntry",
-    "LocalizationService",
-    "LocalizationTable",
-    "edit_localization_text",
+    # dds
     "ColorCatalog",
     "ColorDef",
     "ColorSet",

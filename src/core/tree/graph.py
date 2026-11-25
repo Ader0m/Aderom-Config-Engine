@@ -1,22 +1,36 @@
 # -*- coding: utf-8 -*-
 """ReferenceGraphBuilder — построение графа связей по имени секции."""
 
+from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+from core.tools.cache import ObjectCache, file_stamp
 from core.tools.fs import (
     TEXT_FILE_SUFFIXES,
     normalize_path,
     read_text_safe,
     scan_files,
 )
+from core.tools.paths import path_key
 from core.tools.vfs import (
     is_materialized_path,
     resolve_asset_path,
     resolve_physical_path,
 )
+
+
+# Меняется при изменении правил построения графа/формата кэша.
+# 2 — confidence связей.
+GRAPH_CACHE_VERSION = 2
+
+GRAPH_FILE_NAMESPACE = "graph.file"
+GRAPH_SECTION_NAMESPACE = "graph.section"
+
+_GRAPH_READ_ERRORS = ContextVar("graph_read_errors", default=None)
 
 
 # ------------------------------------------------------------ типы
@@ -31,6 +45,27 @@ class EdgeType(Enum):
     VISUAL_REFERENCE = "visual_reference"
 
 
+_EDGE_CONFIDENCE = {
+    EdgeType.DECLARATION: "exact",
+    EdgeType.INHERITANCE: "exact",
+    EdgeType.TEXTURE_REFERENCE: "exact",
+    EdgeType.VISUAL_REFERENCE: "exact",
+    EdgeType.LTX_REFERENCE: "probable",
+    EdgeType.XML_REFERENCE: "probable",
+    EdgeType.SCRIPT_REFERENCE: "heuristic",
+}
+
+
+def edge_confidence(edge_type) -> str:
+    """Уверенность связи по её типу: exact/probable/heuristic."""
+    if isinstance(edge_type, EdgeType):
+        return _EDGE_CONFIDENCE.get(edge_type, "probable")
+    try:
+        return _EDGE_CONFIDENCE[EdgeType(str(edge_type))]
+    except (TypeError, ValueError):
+        return "probable"
+
+
 @dataclass
 class MatchInfo:
     edge_type: EdgeType
@@ -43,6 +78,12 @@ class MatchInfo:
     # True — related является родителем искомой секции, поэтому
     # двойной клик должен открыть объявление родителя.
     related_is_parent: bool = False
+    # exact/probable/heuristic; пустое значение выводится из edge_type.
+    confidence: str = ""
+
+    def __post_init__(self):
+        if not self.confidence:
+            self.confidence = edge_confidence(self.edge_type)
 
 
 @dataclass
@@ -87,6 +128,16 @@ class GraphNode:
             return self.matches[0].edge_type.value
         return "declaration"
 
+    @property
+    def primary_confidence(self) -> str:
+        """Уверенность основной связи: exact/probable/heuristic."""
+        if self.matches:
+            return str(
+                getattr(self.matches[0], "confidence", "")
+                or edge_confidence(self.matches[0].edge_type)
+            )
+        return "probable"
+
 @dataclass
 class SectionGraph:
     section_name: str
@@ -94,6 +145,12 @@ class SectionGraph:
     children: list[GraphNode] = field(default_factory=list)
     # Только для режима VFS: связи, которых нет в итоговом дереве.
     lost_children: list[GraphNode] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _GraphBuild:
+    graph: SectionGraph
+    cacheable: bool
 
 
 # ------------------------------------------------------------ заглушка кэша
@@ -125,10 +182,39 @@ class ReferenceGraphBuilder:
     Режим ``vfs_mode`` игнорирует фильтр LtxForest и сканирует все
     текстовые файлы под ``forest.scan_dir``. Это диагностический режим:
     он не запускает резолвер, а сравнивает сырое дерево с сырым.
+
+    ``cache_service`` — production-кэш графа (``graph.file`` и
+    ``graph.section``). ``cache`` оставлен для standalone/тестовых
+    сценариев без общего ``CacheService``.
     """
 
-    def __init__(self, cache=None):
+    def __init__(self, cache=None, cache_service=None):
         self.cache = cache or DisabledCache()
+        self._cache_service = cache_service
+        if cache_service is not None:
+            # Файловый кэш графа — отдельный backend общего CacheService:
+            # ключи включают file stamp, поэтому смена файла не требует
+            # ручной инвалидации.
+            self._graph_file_cache = ObjectCache(max_entries=512)
+            cache_service.register_backend(
+                GRAPH_FILE_NAMESPACE,
+                self._graph_file_cache,
+            )
+            self._graph_cache = ObjectCache(max_entries=64)
+            cache_service.register_backend(
+                GRAPH_SECTION_NAMESPACE,
+                self._graph_cache,
+            )
+        else:
+            self._graph_file_cache = None
+            self._graph_cache = None
+
+    def clear_cache(self):
+        """Сбросить кэш построенных графов; file-cache остаётся по stamp."""
+        if self._cache_service is not None:
+            self._cache_service.clear_namespace(
+                GRAPH_SECTION_NAMESPACE,
+            )
 
     def build_for_section(
         self,
@@ -138,21 +224,111 @@ class ReferenceGraphBuilder:
         resolved_provider=None,
         xml_provider=None,
         log=None,
+        snapshot_id=None,
+        provider_id=None,
     ) -> SectionGraph:
+        """Построить граф секции с кэшем по снимку.
+
+        ``snapshot_id`` должен описывать состояние forest/overlay и набор
+        providers; если он не передан, используется ``forest.cache_id``.
+        ``provider_id`` — стабильный идентификатор набора providers для
+        прямых вызовов; production передаёт ``core``.
+        Без снимка результат не кэшируется, но file-cache продолжает
+        работать по file stamps.
+        """
+        section = section_name.lower().strip()
+        snapshot = str(
+            snapshot_id or getattr(forest, "cache_id", "") or ""
+        )
+
+        if self._cache_service is not None and snapshot:
+            key = (
+                GRAPH_CACHE_VERSION,
+                section,
+                bool(vfs_mode),
+                str(provider_id or ""),
+                bool(resolved_provider),
+                bool(xml_provider),
+            )
+
+            def compute():
+                return self._build_graph(
+                    forest,
+                    section,
+                    vfs_mode,
+                    resolved_provider,
+                    xml_provider,
+                    log,
+                )
+
+            result = self._cache_service.get_or_compute(
+                GRAPH_SECTION_NAMESPACE,
+                key,
+                compute,
+                snapshot_id=snapshot,
+                cacheable=lambda value: value.cacheable,
+            )
+            return deepcopy(result.graph)
+
+        return deepcopy(
+            self._build_graph(
+                forest,
+                section,
+                vfs_mode,
+                resolved_provider,
+                xml_provider,
+                log,
+            ).graph
+        )
+
+    def _build_graph(
+        self,
+        forest,
+        section,
+        vfs_mode,
+        resolved_provider,
+        xml_provider,
+        log,
+    ) -> _GraphBuild:
+        errors = []
+        token = _GRAPH_READ_ERRORS.set(errors)
+        try:
+            graph, complete = self._build_for_section(
+                forest,
+                section,
+                vfs_mode,
+                resolved_provider,
+                xml_provider,
+                log,
+            )
+        finally:
+            _GRAPH_READ_ERRORS.reset(token)
+        return _GraphBuild(graph, bool(complete and not errors))
+
+    def _build_for_section(
+        self,
+        forest,
+        section,
+        vfs_mode,
+        resolved_provider,
+        xml_provider,
+        log,
+    ):
         if vfs_mode:
             # VFS-режим — диагностический: сравниваем сырое дерево с
             # сырым деревом, не запуская резолв.
-            return self.build_for_section_vfs(
-                forest,
-                section_name,
-                log=log,
+            return (
+                self.build_for_section_vfs(
+                    forest,
+                    section,
+                    log=log,
+                ),
+                True,
             )
-
-        section = section_name.lower().strip()
 
         # Основной режим — поиск по финальным файлам резолвера.
         if resolved_provider is not None:
-            graph = self._build_resolved(
+            graph, complete = self._build_resolved(
                 forest,
                 section,
                 resolved_provider,
@@ -160,11 +336,14 @@ class ReferenceGraphBuilder:
                 log=log,
             )
             if graph is not None:
-                return graph
+                return graph, complete
             if log:
                 log("resolved graph недоступен — fallback на исходные файлы")
+            # Fallback на сырые файлы не считается полноценным снимком:
+            # временная ошибка провайдера не должна отравлять кэш.
+            return self._build_raw(forest, section, log=log), False
 
-        return self._build_raw(forest, section, log=log)
+        return self._build_raw(forest, section, log=log), True
 
     def _build_raw(self, forest, section: str, log=None) -> SectionGraph:
         """Старый режим: поиск по исходным .ltx + .script файлам."""
@@ -242,20 +421,23 @@ class ReferenceGraphBuilder:
 
         roots = resolved_ltx_roots(forest)
         if not roots and xml_provider is None:
-            return None
+            return None, False
 
         items = []
+        complete = True
         total = len(roots)
 
         for i, root in enumerate(roots, 1):
             try:
                 result = resolved_provider(root)
             except Exception as exc:
+                complete = False
                 if log:
                     log("resolved graph: %s: %s" % (root.name, exc))
                 continue
 
             if result is None:
+                complete = False
                 continue
 
             if isinstance(result, tuple):
@@ -266,6 +448,7 @@ class ReferenceGraphBuilder:
                 line_sources = []
 
             if not text:
+                complete = False
                 continue
 
             items.append((root, text, line_sources or []))
@@ -273,7 +456,7 @@ class ReferenceGraphBuilder:
                 log("resolved graph: %d/%d" % (i, total))
 
         if not items and xml_provider is None:
-            return None
+            return None, False
 
         root_node, assets = self._find_declaration_in_items(
             [(path, text) for path, text, _sources in items],
@@ -345,12 +528,15 @@ class ReferenceGraphBuilder:
 
         # XML проходит через XmlResolver (include + DXML).
         if xml_provider is not None:
-            self._append_xml_resolved_children(
-                children,
-                forest,
-                section,
-                xml_provider,
-                log=log,
+            complete = (
+                self._append_xml_resolved_children(
+                    children,
+                    forest,
+                    section,
+                    xml_provider,
+                    log=log,
+                )
+                and complete
             )
 
         if root_node is None:
@@ -369,28 +555,31 @@ class ReferenceGraphBuilder:
                     break
 
         if root_node is None:
-            return None
+            return None, complete
 
         return SectionGraph(
             section_name=section,
             root=root_node,
             children=children,
-        )
+        ), complete
 
     def _append_xml_resolved_children(self, children, forest, section,
                                       provider, log=None):
         paths = list(getattr(forest, "xml_files", ()) or ())
         total = len(paths)
+        complete = True
 
         for i, path in enumerate(paths, 1):
             try:
                 result = provider(path)
             except Exception as exc:
+                complete = False
                 if log:
                     log("resolved xml: %s: %s" % (Path(path).name, exc))
                 continue
 
             if result is None:
+                complete = False
                 continue
 
             if isinstance(result, tuple):
@@ -418,6 +607,8 @@ class ReferenceGraphBuilder:
 
             if log and total and (i == 1 or i == total or i % 50 == 0):
                 log("resolved xml: %d/%d" % (i, total))
+
+        return complete
 
     def _append_xml_raw_children(self, children, forest, section):
         for path in (getattr(forest, "xml_files", ()) or ()):
@@ -986,18 +1177,48 @@ class ReferenceGraphBuilder:
     # ------------------------------------------------------------ чтение файлов
 
     def _read_file(self, file_path: Path) -> str:
-        """Читает файл. Кэш отключён — всегда читаем напрямую."""
+        """Прочитать файл через content-addressed кэш графа."""
+        if self._cache_service is not None:
+            stamp = file_stamp(file_path)
+            key = (
+                GRAPH_CACHE_VERSION,
+                path_key(file_path),
+                stamp,
+            )
+            text = self._cache_service.get_or_compute(
+                GRAPH_FILE_NAMESPACE,
+                key,
+                lambda: self._read_file_uncached(file_path),
+                snapshot_id=stamp,
+            )
+            if text is None:
+                self._note_read_error(file_path)
+                return ""
+            return text
+
         cached = self.cache.get(("file", str(file_path)))
         if cached is not None:
             return cached
 
-        try:
-            text = read_text_safe(file_path)
-        except Exception:
-            text = ""
-
+        text = self._read_file_uncached(file_path)
+        if text is None:
+            self._note_read_error(file_path)
+            return ""
         self.cache.set(("file", str(file_path)), text)
         return text
+
+    @staticmethod
+    def _note_read_error(file_path: Path) -> None:
+        errors = _GRAPH_READ_ERRORS.get()
+        if errors is not None:
+            errors.append(file_path)
+
+    @staticmethod
+    def _read_file_uncached(file_path: Path):
+        try:
+            return read_text_safe(file_path)
+        except Exception:
+            return None
 
 
 # ------------------------------------------------------------ совместимость

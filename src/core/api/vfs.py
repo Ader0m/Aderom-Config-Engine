@@ -8,6 +8,7 @@ from core.tools.fs import (
     read_text_safe,
     read_xml_text,
 )
+from core.tools.vfs import resolve_asset_path
 
 __all__ = [
     "file_index_signature",
@@ -15,4 +16,5 @@ __all__ = [
     "normalize_path",
     "read_text_safe",
     "read_xml_text",
+    "resolve_asset_path",
 ]

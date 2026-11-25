@@ -16,7 +16,7 @@
 ``CXml::ParseFile``). DXML для текстовых таблиц не применяется: это
 строковые ресурсы, а не UI-описания.
 
-Для карточки предмета сервис также умеет читать XML из overlay проекта
+Для потребителей сервис также умеет читать XML из overlay проекта
 (черновики ещё не записаны на диск) и сообщать, какой файл дал
 победившую строку. По этому адресу ``edit_localization_text`` меняет
 только ``<text>`` нужного ``<string id>``.
@@ -33,15 +33,17 @@ from typing import Optional, Tuple
 
 from core.patching.ltx.document import parse_ltx_document
 from core.tools.fs import read_text_safe, read_xml_text
+from core.cache.service import CacheService
 from core.tools.cache import ObjectCache
 from core.tools.cache import file_stamp
 from core.tools.paths import path_key
 
 
 LOCALIZATION_VERSION = 4
+LOCALIZATION_NAMESPACE = "localization"
+LOCALIZATION_OVERLAY_NAMESPACE = "localization.overlay"
 
-# Предпочтительный язык карточки предметов: интерфейс приложения русский,
-# а пользователь просит показывать текст из text/rus.
+# Предпочтительный язык интерфейса: русский, с fallback на английский.
 PREFERRED_LANGUAGE = "rus"
 FALLBACK_LANGUAGE = "eng"
 
@@ -70,8 +72,8 @@ class LocalizationEntry:
     """Победившее объявление строки: откуда взят текст.
 
     ``path`` указывает на реальный XML-файл (включая ``#include``-
-    фрагмент), поэтому карточка предмета может изменить именно тот
-    документ, который сейчас формирует отображаемый текст.
+    фрагмент), поэтому потребитель может изменить именно тот документ,
+    который сейчас формирует отображаемый текст.
     """
 
     key: str
@@ -122,8 +124,12 @@ class LocalizationService:
 
     ``overlay`` — ``ProjectOverlay`` (или плоская карта
     ``{path: text}``): текст берётся из черновиков проекта. Это важно для
-    карточки предмета: отображаемое название/описание должно совпадать с
-    тем XML, который будет сохранён, ещё до сборки патча.
+    UI: отображаемый текст должен совпадать с тем XML, который будет
+    сохранён, ещё до сборки патча.
+
+    ``cache_service=None`` создаёт изолированный ``CacheService`` для
+    standalone-использования и тестов. Production-композиция
+    (``CoreServices``) обязана передать общий ``CacheService``.
     """
 
     def __init__(
@@ -131,8 +137,12 @@ class LocalizationService:
         cache_dir=None,
         preferred_language=PREFERRED_LANGUAGE,
         max_disk_bytes=None,
+        cache_service=None,
     ):
         self._preferred = str(preferred_language or PREFERRED_LANGUAGE).lower()
+        # None — только standalone/тесты; production передаёт общий
+        # CacheService из композиционного корня.
+        self._cache_service = cache_service or CacheService()
         self._cache = ObjectCache(
             cache_dir=cache_dir,
             max_entries=4,
@@ -140,7 +150,15 @@ class LocalizationService:
         )
         # Черновик проекта меняется после каждой правки: такие снимки
         # держим только в памяти, иначе получим поток 40-МБ файлов.
-        self._memory_cache = ObjectCache(max_entries=8)
+        self._overlay_cache = ObjectCache(max_entries=8)
+        self._cache_service.register_backend(
+            LOCALIZATION_NAMESPACE,
+            self._cache,
+        )
+        self._cache_service.register_backend(
+            LOCALIZATION_OVERLAY_NAMESPACE,
+            self._overlay_cache,
+        )
 
     # -------------------------------------------------- план загрузки
 
@@ -256,13 +274,29 @@ class LocalizationService:
         plan = self._plan(forest, config_dir, overlay)
         signature = self.signature(forest, config_dir, overlay)
         cache_key = ("localization", signature)
-        cache = self._memory_cache if overlay is not None else self._cache
-
-        cached = cache.get(cache_key)
-        if cached is not None:
-            return cached
-
+        namespace = (
+            LOCALIZATION_OVERLAY_NAMESPACE
+            if overlay is not None
+            else LOCALIZATION_NAMESPACE
+        )
         overlay_files = _overlay_source_files(overlay)
+
+        def compute():
+            return self._build_table(
+                plan,
+                signature,
+                overlay_files,
+                log,
+            )
+
+        return self._cache_service.get_or_compute(
+            namespace,
+            cache_key,
+            compute,
+            snapshot_id=signature,
+        )
+
+    def _build_table(self, plan, signature, overlay_files, log):
         strings = {}
         entries = {}
         loaded_files = []
@@ -302,7 +336,6 @@ class LocalizationService:
             warnings=tuple(warnings),
             entries=entries,
         )
-        cache.set(cache_key, table)
 
         if log:
             log(
@@ -315,8 +348,10 @@ class LocalizationService:
         return table
 
     def clear_memory(self):
-        self._cache.clear()
-        self._memory_cache.clear()
+        self._cache_service.clear_namespace(LOCALIZATION_NAMESPACE)
+        self._cache_service.clear_namespace(
+            LOCALIZATION_OVERLAY_NAMESPACE
+        )
 
 
 # ---------------------------------------------------------------- файлы и язык

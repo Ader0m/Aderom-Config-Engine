@@ -2,6 +2,7 @@
 """Жизненный цикл модулей: версии, optional/capabilities, unload/reload."""
 
 import importlib
+import json
 import sys
 import tempfile
 import textwrap
@@ -25,32 +26,14 @@ from ui.module_loader import (
 from ui.platform_api import PlatformApi
 
 
-class _Manifest:
-    def __init__(
-        self,
-        name,
-        version="0.1.0",
-        requires=(),
-        optional_requires=(),
-        provides=(),
-        needs=(),
-        optional_needs=(),
-        package=None,
-    ):
-        self.name = name
-        self.version = version
-        self.sdk_min = "0.1.0"
-        self.requires = tuple(requires)
-        self.optional_requires = tuple(optional_requires)
-        self.provides = tuple(provides)
-        self.needs = tuple(needs)
-        self.optional_needs = tuple(optional_needs)
-        self.package = package or name
-
-
 class _Entry:
-    def __init__(self, name, package=None, **kwargs):
-        self.manifest = _Manifest(name, package=package, **kwargs)
+    def __init__(self, name, package=None, version="0.1.0", **kwargs):
+        self.manifest = ModuleManifest(
+            id=name,
+            name=name,
+            version=version,
+            **kwargs
+        )
         self.instance = object()
         self.ctx = None
         self.package = package or name
@@ -117,12 +100,12 @@ class ManifestResolutionTest(unittest.TestCase):
         ordered = loader._dependency_order(candidates, lambda message: None)
 
         self.assertEqual(
-            [entry.manifest.name for entry in ordered],
+            [entry.manifest.id for entry in ordered],
             ["base", "needs_cap", "optional"],
         )
         self.assertEqual(
             loader.skipped["too_new"][0].kind,
-            "version_conflict",
+            "missing_required_module",
         )
         self.assertEqual(
             loader.skipped["no_cap"][0].kind,
@@ -157,13 +140,21 @@ class ManifestResolutionTest(unittest.TestCase):
             set(loader.capability_conflicts["shared.cap"]),
             {"first", "second"},
         )
+        self.assertEqual(
+            {skip.kind for skip in loader.skipped["first"]},
+            {"capability_conflict"},
+        )
+        self.assertEqual(
+            {skip.kind for skip in loader.skipped["second"]},
+            {"capability_conflict"},
+        )
         self.assertNotIn(
             "consumer",
-            [entry.manifest.name for entry in ordered],
+            [entry.manifest.id for entry in ordered],
         )
         self.assertEqual(
             loader.skipped["consumer"][0].kind,
-            "missing_capability",
+            "capability_conflict",
         )
         self.assertTrue(
             any("Конфликт capability" in message for message in logs)
@@ -187,10 +178,10 @@ class ManifestResolutionTest(unittest.TestCase):
 
         ordered = loader._dependency_order(candidates, lambda message: None)
 
-        self.assertEqual([entry.manifest.name for entry in ordered], ["base"])
+        self.assertEqual([entry.manifest.id for entry in ordered], ["base"])
         self.assertEqual(
             loader.skipped["middle"][0].kind,
-            "missing_required",
+            "missing_required_module",
         )
         self.assertEqual(
             loader.skipped["top"][0].kind,
@@ -200,7 +191,11 @@ class ManifestResolutionTest(unittest.TestCase):
 
 class ActivateFailureTest(unittest.TestCase):
     def _record(self, name, calls, fail=False, dependencies=(), provides=()):
-        manifest = ModuleManifest(name=name, provides=tuple(provides))
+        manifest = ModuleManifest(
+            id=name,
+            name=name,
+            provides=tuple(provides),
+        )
         instance = _Instance(fail_activate=fail)
         record = ModuleRecord(
             manifest=manifest,
@@ -212,7 +207,7 @@ class ActivateFailureTest(unittest.TestCase):
         )
         return record
 
-    def test_failed_activate_is_deactivated_and_removed(self):
+    def test_failed_activate_is_deactivated_and_kept_for_diagnostics(self):
         calls = []
         loader = ModuleLoader(lambda manifest: None)
         record = self._record("bad", calls, fail=True)
@@ -223,10 +218,14 @@ class ActivateFailureTest(unittest.TestCase):
 
         self.assertTrue(record.instance.deactivated)
         self.assertTrue(record.ctx.registrations.closed)
-        self.assertIsNone(loader.records.get("bad"))
+        kept = loader.records.get("bad")
+        self.assertIs(kept, record)
+        self.assertEqual(record.state, ModuleState.FAILED)
+        self.assertEqual(record.phase, "activate")
+        self.assertIn("activate failed", record.error)
         self.assertIn("bad", calls)
 
-    def test_dependent_of_failed_module_is_rolled_back(self):
+    def test_dependent_of_failed_module_is_skipped(self):
         calls = []
         loader = ModuleLoader(lambda manifest: None)
         bad = self._record("bad", calls, fail=True)
@@ -243,7 +242,14 @@ class ActivateFailureTest(unittest.TestCase):
 
         self.assertTrue(dependent.instance.deactivated)
         self.assertTrue(dependent.ctx.registrations.closed)
-        self.assertEqual(loader.records, {})
+        self.assertEqual(bad.state, ModuleState.FAILED)
+        self.assertEqual(bad.phase, "activate")
+        self.assertEqual(dependent.state, ModuleState.SKIPPED)
+        self.assertEqual(
+            loader.skipped["dependent"][0].kind,
+            "dependency_skipped",
+        )
+        self.assertEqual(set(loader.records), {"bad", "dependent"})
 
     def test_failed_activate_removes_own_capability(self):
         calls = []
@@ -322,7 +328,8 @@ class PackageLifecycleTest(unittest.TestCase):
             if name == prefix or name.startswith(prefix + "."):
                 sys.modules.pop(name, None)
 
-    def _make_package(self, modules):
+    def _make_package(self, modules, manifests=None):
+        manifests = manifests or {}
         package_dir = self.root / self.package_name
         package_dir.mkdir()
         (package_dir / "__init__.py").write_text("", encoding="utf-8")
@@ -337,7 +344,29 @@ class PackageLifecycleTest(unittest.TestCase):
                 textwrap.dedent(source),
                 encoding="utf-8",
             )
+            manifest = manifests.get(module_name)
+            if manifest is None:
+                manifest = self._manifest(module_name)
+            (module_dir / "module.json").write_text(
+                json.dumps(manifest, ensure_ascii=False),
+                encoding="utf-8",
+            )
         return importlib.import_module(self.package_name)
+
+    @staticmethod
+    def _manifest(module_id, **overrides):
+        data = {
+            "manifest_version": 1,
+            "id": module_id,
+            "name": module_id,
+            "version": "0.1.0",
+            "entrypoint": "module:MODULE",
+            "sdk": {"min": "0.11.0"},
+            "trust": "trusted",
+            "enabled_by_default": True,
+        }
+        data.update(overrides)
+        return data
 
     def _make_context(self):
         events = EventBus()
@@ -364,17 +393,11 @@ class PackageLifecycleTest(unittest.TestCase):
 
     def _demo_source(self):
         return """
-        from sdk.kernel import ModuleBase, ModuleManifest
+        from sdk.kernel import ModuleBase
         from sdk.ui import WindowSpec
         from PyQt5.QtWidgets import QWidget
 
         class DemoModule(ModuleBase):
-            manifest = ModuleManifest(
-                name="demo",
-                version="1.0.0",
-                provides=("demo.cap",),
-            )
-
             def init(self, ctx):
                 super().init(ctx)
                 self.activated = False
@@ -407,14 +430,9 @@ class PackageLifecycleTest(unittest.TestCase):
 
     def _dependent_source(self):
         return """
-        from sdk.kernel import ModuleBase, ModuleManifest
+        from sdk.kernel import ModuleBase
 
         class DependentModule(ModuleBase):
-            manifest = ModuleManifest(
-                name="dependent",
-                requires=("demo",),
-            )
-
             def init(self, ctx):
                 super().init(ctx)
                 self.deactivated = False
@@ -462,9 +480,12 @@ class PackageLifecycleTest(unittest.TestCase):
             sys.modules,
         )
 
+        window = new_record.instance.window
         self.assertTrue(loader.unload("demo", log=lambda message: None))
-        self.assertFalse(new_record.instance.window.isVisible())
-        self.assertNotIn("demo", loader.records)
+        self.assertFalse(window.isVisible())
+        unloaded = loader.records["demo"]
+        self.assertEqual(unloaded.state, ModuleState.UNLOADED)
+        self.assertIsNone(unloaded.instance)
         self.assertFalse(commands.has("demo.run"))
         self.assertEqual(api.menu_registrations, [])
         self.assertNotIn(
@@ -473,10 +494,18 @@ class PackageLifecycleTest(unittest.TestCase):
         )
 
     def test_unload_refuses_until_dependent_is_forced(self):
-        package = self._make_package({
-            "demo": self._demo_source(),
-            "dependent": self._dependent_source(),
-        })
+        package = self._make_package(
+            {
+                "demo": self._demo_source(),
+                "dependent": self._dependent_source(),
+            },
+            manifests={
+                "dependent": self._manifest(
+                    "dependent",
+                    requires=[{"id": "demo"}],
+                ),
+            },
+        )
         _api, _events, commands, make_context = self._make_context()
         loader = ModuleLoader(make_context, package=package)
 
@@ -490,8 +519,16 @@ class PackageLifecycleTest(unittest.TestCase):
         self.assertTrue(
             loader.unload("demo", log=lambda message: None, force=True)
         )
-        self.assertNotIn("demo", loader.records)
-        self.assertNotIn("dependent", loader.records)
+        self.assertEqual(
+            loader.records["demo"].state,
+            ModuleState.UNLOADED,
+        )
+        dependent = loader.records["dependent"]
+        self.assertEqual(dependent.state, ModuleState.SKIPPED)
+        self.assertEqual(
+            loader.skipped["dependent"][0].kind,
+            "provider_unloaded",
+        )
         self.assertFalse(commands.has("demo.run"))
         self.assertFalse(commands.has("dependent.run"))
 
@@ -515,7 +552,7 @@ class ReleaseRuntimeTest(unittest.TestCase):
         )
         ctx = SimpleNamespace(ui=ui, tasks=_Tasks())
         entry = SimpleNamespace(
-            manifest=SimpleNamespace(name="demo"),
+            manifest=SimpleNamespace(id="demo"),
         )
         logs = []
 

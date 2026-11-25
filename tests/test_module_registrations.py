@@ -26,7 +26,7 @@ from ui.platform_api import PlatformApi
 
 def _make_context(api, events, commands, paths, services, module_name="demo"):
     return build_module_context(
-        SimpleNamespace(name=module_name),
+        SimpleNamespace(id=module_name, name=module_name),
         sdk_version="0.1.0",
         events=events,
         commands=commands,
@@ -317,8 +317,6 @@ class _ContextMixin:
             return None
 
     class DemoModule(ModuleBase):
-        manifest = ModuleManifest(name="demo")
-
         def __init__(self):
             self.deactivated = False
 
@@ -490,16 +488,16 @@ class ModuleContextCleanupTest(_ContextMixin, unittest.TestCase):
     def test_loader_disposes_scope_after_deactivate(self):
         api, _events, _commands, ctx = self._context()
         module = self.DemoModule()
-        manifest = module.manifest
+        manifest = ModuleManifest(id="demo", name="Демо")
         loader = ModuleLoader(lambda _manifest: ctx)
-        loader.records[manifest.name] = ModuleRecord(
+        loader.records[manifest.id] = ModuleRecord(
             manifest=manifest,
             instance=module,
             package="demo",
             ctx=ctx,
             state=ModuleState.REGISTERED,
         )
-        loader._order.append(manifest.name)
+        loader._order.append(manifest.id)
 
         ctx.ui.register_menu("Инструменты", "Демо", lambda: None)
         ctx.ui.register_tree_context_action(
@@ -573,6 +571,20 @@ class OggModuleCleanupTest(_ContextMixin, unittest.TestCase):
         from modules.ogg_editor.module import OggEditorModule
 
         api, events, commands, ctx = self._context("ogg_editor")
+
+        class GraphApi:
+            def register_contributor(self, contributor):
+                self.contributor = contributor
+                return SimpleNamespace(unsubscribe=lambda: None)
+
+            def unregister_contributor(self, handle):
+                pass
+
+        ctx.capabilities.provide(
+            "section.graph",
+            "1.0.0",
+            GraphApi(),
+        )
         module = OggEditorModule()
         module.init(ctx)
         module.register(ctx)

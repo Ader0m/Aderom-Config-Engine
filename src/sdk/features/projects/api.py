@@ -84,3 +84,32 @@ class ProjectApi(Protocol):
 
     def project_asset_drafts(self) -> tuple[AssetDraftInfo, ...]:
         """Двоичные черновики активного проекта."""
+
+
+class ProjectAssetsApi(Protocol):
+    """Capability ``project.assets``: asset-типы и черновики проекта."""
+
+    def register_project_asset_type(
+        self,
+        asset_type: ProjectAssetType,
+    ) -> bool:
+        """Зарегистрировать тип двоичного ресурса проекта."""
+
+    def unregister_project_asset_type(self, key: str) -> bool:
+        """Убрать тип ресурса, зарегистрированный модулем."""
+
+    def project_asset_types(self) -> tuple[ProjectAssetType, ...]:
+        """Все зарегистрированные типы ресурсов."""
+
+    def read_project_asset(self, path: Path) -> Optional[bytes]:
+        """Текущие байты двоичного черновика или ``None``."""
+
+    def update_project_asset(self, path: Path, data: bytes) -> bool:
+        """Обновить двоичный черновик в памяти."""
+
+    def save_project_asset(
+        self,
+        path: Path,
+        data: Optional[bytes] = None,
+    ) -> bool:
+        """Записать двоичный черновик в каталог проекта."""

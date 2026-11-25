@@ -185,6 +185,7 @@ class OggSectionGraphContributor:
                     line_number=item.line_number,
                     line_text=item.line_text,
                     related=item.field,
+                    confidence="exact",
                 )
                 for item in items
             )

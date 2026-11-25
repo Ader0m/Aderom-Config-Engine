@@ -123,10 +123,19 @@
 - [ADR-32](ADR-32-capabilities-and-public-sdk.md) — типизированные
   capability-протоколы, версии, конфликт провайдеров как ошибка
   валидации, `CapabilitiesApi` вместо публичных registry/scope,
-  `ModuleManifest.id` и SDK `0.12.0`.
-- [ADR-33](ADR-33-base-item-browser-domain.md) — `base` как обычный
-  модуль, `item_browser`, домен items/ogg, default-set и закрытие
-  MOD-1…MOD-4.
+  `ModuleManifest.id` и SDK `0.12.0` (позже повышен до `0.13.0`
+  шагом 7.10, ADR-36).
+- [ADR-33](ADR-33-base-item-browser-domain.md) — `item_browser`, домен
+  items/ogg, default-set и закрытие MOD-1…MOD-4; в части `base`/`ogg_editor`
+  заменён ADR-35.
 - [ADR-34](ADR-34-module-data-and-settings.md) — настройки модулей,
   `config/modules.json`, `layout.json`, перенос DATA-4 на Этап 9 и
   закрытие P1 `needs_confirmation`.
+- [ADR-35](ADR-35-base-required-module.md) — `base` как обязательный
+  встроенный модуль, `ogg_editor.requires base` и отмена критерия
+  запуска без `base`.
+
+Решение шага 7.10:
+
+- [ADR-36](ADR-36-graph-confidence.md) — `confidence` связей графа,
+  правила `exact/probable/heuristic`, отображение в UI и SDK `0.13.0`.

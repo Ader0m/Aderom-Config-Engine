@@ -10,14 +10,15 @@ from sdk.contracts.forest import ForestRef
 from sdk.contracts.models import ProjectOverlay
 from sdk.features.items.models import (
     ItemCatalog,
+    ItemCreationPlan,
     ItemEntry,
     ItemIcon,
     TextureRegion,
 )
 
 
-class ItemApi(Protocol):
-    """Возможности каталога предметов: сборка и проекции."""
+class ItemCatalogApi(Protocol):
+    """Доменный контракт каталога предметов (capability ``items.catalog``)."""
 
     def item_catalog_root(self, forest: ForestRef) -> Optional[Path]:
         """Корень каталога предметов: ``system.ltx`` или fallback-файл."""
@@ -106,5 +107,24 @@ class ItemApi(Protocol):
     def item_entry(self, tab_id: str, section: str):
         """Текущая проекция предмета из документа или ``None``."""
 
-    def open_item_card_at_cursor(self) -> bool:
-        """Открыть карточку предмета для секции под курсором."""
+    def plan_item_creation(
+        self,
+        item_text: str,
+        xml_text: str,
+        known_sections,
+        section: str,
+        parent,
+        parent_fields,
+        project_name,
+    ) -> ItemCreationPlan:
+        """Спланировать новый предмет без записи файлов.
+
+        Возвращает готовые тексты секции и XML-локализации; запись в
+        проект выполняет вызывающая сторона.
+        """
+
+    def creation_paths(self, scan_dir, project_name):
+        """Пути файлов проекта для нового предмета."""
+
+    def parent_fields(self, catalog, parent):
+        """Поля родительской секции/предмета для новой секции."""

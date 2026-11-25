@@ -5,7 +5,7 @@ from pathlib import Path
 from tests.support import SRC  # noqa: F401
 
 from tests.qt_support import qapp
-from modules.base_module.section_graph import (
+from modules.base.section_graph import (
     SectionGraphWindow,
     _live_graph_state,
     _lost_from_raw,
@@ -19,6 +19,27 @@ _app = qapp()
 
 def _key(path):
     return str(Path(path)).lower()
+
+
+_GRAPH_MATCH = GraphMatch
+_CONFIDENCE_BY_EDGE = {
+    "declaration": "exact",
+    "inheritance": "exact",
+    "texture_reference": "exact",
+    "visual_reference": "exact",
+    "ltx_reference": "probable",
+    "xml_reference": "probable",
+    "script_reference": "heuristic",
+    "sound_reference": "exact",
+}
+
+
+def _gm(edge_type, line_number, line_text="", **kwargs):
+    kwargs.setdefault(
+        "confidence",
+        _CONFIDENCE_BY_EDGE.get(edge_type, "probable"),
+    )
+    return _GRAPH_MATCH(edge_type, line_number, line_text, **kwargs)
 
 
 class SectionGraphWindowTest(unittest.TestCase):
@@ -38,21 +59,21 @@ class SectionGraphWindowTest(unittest.TestCase):
             display_name="test",
             file_path=Path("a.ltx"),
             first_match_line=1,
-            matches=(GraphMatch("declaration", 1, "[test]"),),
+            matches=(_gm("declaration", 1, "[test]"),),
             resolved=True,
         )
         resolved_child = GraphNode(
             display_name="b.ltx",
             file_path=Path("b.ltx"),
             first_match_line=2,
-            matches=(GraphMatch("ltx_reference", 2, "test"),),
+            matches=(_gm("ltx_reference", 2, "test"),),
             resolved=True,
         )
         raw_child = GraphNode(
             display_name="c.ltx",
             file_path=Path("c.ltx"),
             first_match_line=3,
-            matches=(GraphMatch("ltx_reference", 3, "test"),),
+            matches=(_gm("ltx_reference", 3, "test"),),
         )
 
         window.update_graph(
@@ -78,6 +99,102 @@ class SectionGraphWindowTest(unittest.TestCase):
         )
         window.close()
 
+    def test_confidence_column_labels(self):
+        calls = []
+        window = self._window(calls)
+        root = GraphNode(
+            display_name="test",
+            file_path=Path("a.ltx"),
+            first_match_line=1,
+            matches=(
+                _gm(
+                    "declaration",
+                    1,
+                    "[test]",
+                    confidence="exact",
+                ),
+            ),
+        )
+        probable = GraphNode(
+            display_name="b.ltx",
+            file_path=Path("b.ltx"),
+            first_match_line=2,
+            matches=(
+                _gm(
+                    "ltx_reference",
+                    2,
+                    "test",
+                    confidence="probable",
+                ),
+            ),
+        )
+        heuristic = GraphNode(
+            display_name="test.script",
+            file_path=Path("test.script"),
+            first_match_line=3,
+            matches=(
+                _gm(
+                    "script_reference",
+                    3,
+                    "test",
+                    confidence="heuristic",
+                ),
+            ),
+        )
+        unknown = GraphNode(
+            display_name="custom",
+            file_path=Path("custom.bin"),
+            first_match_line=4,
+            matches=(
+                _gm(
+                    "custom_reference",
+                    4,
+                    "test",
+                    confidence="custom",
+                ),
+            ),
+        )
+
+        window.update_graph(
+            SectionGraph(
+                section_name="test",
+                root=root,
+                children=(probable, heuristic, unknown),
+            )
+        )
+
+        self.assertEqual(window.list_widget.topLevelItem(0).text(3), "Точная")
+        self.assertEqual(
+            window.list_widget.topLevelItem(1).text(3),
+            "Вероятная",
+        )
+        self.assertEqual(
+            window.list_widget.topLevelItem(2).text(3),
+            "Эвристика",
+        )
+        self.assertEqual(
+            window.list_widget.topLevelItem(3).text(3),
+            "custom",
+        )
+        window.close()
+
+    def test_sdk_node_primary_confidence(self):
+        exact = GraphNode(
+            display_name="test",
+            file_path=None,
+            first_match_line=1,
+            matches=(_gm("declaration", 1, "[test]"),),
+        )
+        heuristic = GraphNode(
+            display_name="test.script",
+            file_path=None,
+            first_match_line=2,
+            matches=(_gm("script_reference", 2, "test"),),
+        )
+
+        self.assertEqual(exact.primary_confidence, "exact")
+        self.assertEqual(heuristic.primary_confidence, "heuristic")
+
     def test_sound_rows_open_in_ogg_editor(self):
         opened = []
         window = SectionGraphWindow(
@@ -90,14 +207,14 @@ class SectionGraphWindowTest(unittest.TestCase):
             display_name="wpn",
             file_path=ltx_path,
             first_match_line=10,
-            matches=(GraphMatch("declaration", 10, "[wpn]"),),
+            matches=(_gm("declaration", 10, "[wpn]"),),
         )
         sound = GraphNode(
             display_name="shot.ogg",
             file_path=ltx_path,
             first_match_line=12,
             matches=(
-                GraphMatch(
+                _gm(
                     "sound_reference",
                     12,
                     "snd_shoot = weapon\\shot",
@@ -158,14 +275,14 @@ class SectionGraphWindowTest(unittest.TestCase):
             display_name="weapon",
             file_path=ltx_path,
             first_match_line=10,
-            matches=(GraphMatch("declaration", 10, "[weapon]"),),
+            matches=(_gm("declaration", 10, "[weapon]"),),
         )
         texture = GraphNode(
             display_name="ui_icon.dds",
             file_path=ltx_path,
             first_match_line=12,
             matches=(
-                GraphMatch(
+                _gm(
                     "texture_reference",
                     12,
                     "icons_texture = ui\\ui_icon",
@@ -193,6 +310,8 @@ class SectionGraphWindowTest(unittest.TestCase):
         self.assertEqual(texture_item.text(2), "12")
         self.assertEqual(root_item.text(1), "1")
         self.assertEqual(root_item.text(2), "10")
+        self.assertEqual(root_item.text(3), "Точная")
+        self.assertEqual(texture_item.text(3), "Точная")
         self.assertIn(str(texture_path), texture_item.toolTip(0))
         self.assertIn(str(physical_texture), texture_item.toolTip(0))
 
@@ -218,14 +337,14 @@ class SectionGraphWindowTest(unittest.TestCase):
             display_name="test",
             file_path=ltx_path,
             first_match_line=1,
-            matches=(GraphMatch("declaration", 1, "[test]"),),
+            matches=(_gm("declaration", 1, "[test]"),),
         )
         visual = GraphNode(
             display_name="model.ogf",
             file_path=ltx_path,
             first_match_line=3,
             matches=(
-                GraphMatch(
+                _gm(
                     "visual_reference",
                     3,
                     "visual = trade\\model.ogf",
@@ -267,14 +386,14 @@ class SectionGraphWindowTest(unittest.TestCase):
             display_name="weapon",
             file_path=ltx_path,
             first_match_line=10,
-            matches=(GraphMatch("declaration", 10, "[weapon]"),),
+            matches=(_gm("declaration", 10, "[weapon]"),),
         )
         parent = GraphNode(
             display_name="base_weapon",
             file_path=ltx_path,
             first_match_line=10,
             matches=(
-                GraphMatch(
+                _gm(
                     "inheritance",
                     10,
                     "[weapon]:base_weapon,weapon_common",
@@ -318,14 +437,14 @@ class SectionGraphWindowTest(unittest.TestCase):
             display_name="weapon",
             file_path=ltx_path,
             first_match_line=10,
-            matches=(GraphMatch("declaration", 10, "[weapon]"),),
+            matches=(_gm("declaration", 10, "[weapon]"),),
         )
         child = GraphNode(
             display_name="wpn_ak74",
             file_path=ltx_path,
             first_match_line=20,
             matches=(
-                GraphMatch(
+                _gm(
                     "inheritance",
                     20,
                     "[wpn_ak74]:weapon",
@@ -353,13 +472,13 @@ class SectionGraphWindowTest(unittest.TestCase):
             display_name="weapon",
             file_path=ltx_path,
             first_match_line=1,
-            matches=(GraphMatch("declaration", 1, "[weapon]"),),
+            matches=(_gm("declaration", 1, "[weapon]"),),
         )
         sound = GraphNode(
             display_name="shot.ogg",
             file_path=ltx_path,
             first_match_line=2,
-            matches=(GraphMatch("sound_reference", 2, "snd_shoot"),),
+            matches=(_gm("sound_reference", 2, "snd_shoot"),),
             target_path=Path("C:/game/gamedata/sounds/weapon/shot.ogg"),
         )
         lost_parent = GraphNode(
@@ -367,7 +486,7 @@ class SectionGraphWindowTest(unittest.TestCase):
             file_path=ltx_path,
             first_match_line=3,
             matches=(
-                GraphMatch(
+                _gm(
                     "inheritance",
                     3,
                     "[other]:old_parent",
@@ -412,14 +531,14 @@ class SectionGraphWindowTest(unittest.TestCase):
             display_name="weapon",
             file_path=Path("C:/game/configs/system.ltx"),
             first_match_line=1,
-            matches=(GraphMatch("declaration", 1, "[weapon]"),),
+            matches=(_gm("declaration", 1, "[weapon]"),),
         )
         live_parent = GraphNode(
             display_name="base",
             file_path=Path("C:/game/configs/system.ltx"),
             first_match_line=10,
             matches=(
-                GraphMatch(
+                _gm(
                     "inheritance",
                     10,
                     "[weapon]:base",
@@ -433,7 +552,7 @@ class SectionGraphWindowTest(unittest.TestCase):
             file_path=Path("C:/mods/override.ltx"),
             first_match_line=99,
             matches=(
-                GraphMatch(
+                _gm(
                     "inheritance",
                     99,
                     "[weapon]:base",
@@ -467,14 +586,14 @@ class SectionGraphWindowTest(unittest.TestCase):
             display_name="weapon",
             file_path=ltx_path,
             first_match_line=1,
-            matches=(GraphMatch("declaration", 1, "[weapon]"),),
+            matches=(_gm("declaration", 1, "[weapon]"),),
         )
         live_texture = GraphNode(
             display_name="icon.dds",
             file_path=ltx_path,
             first_match_line=5,
             matches=(
-                GraphMatch(
+                _gm(
                     "texture_reference",
                     5,
                     "icons_texture = old\\icon",
@@ -488,7 +607,7 @@ class SectionGraphWindowTest(unittest.TestCase):
             file_path=Path("C:/mods/override.ltx"),
             first_match_line=50,
             matches=(
-                GraphMatch(
+                _gm(
                     "texture_reference",
                     50,
                     "icons_texture = new\\icon",
@@ -532,14 +651,14 @@ class SectionGraphWindowTest(unittest.TestCase):
             display_name="test",
             file_path=ltx_path,
             first_match_line=1,
-            matches=(GraphMatch("declaration", 1, "[test]"),),
+            matches=(_gm("declaration", 1, "[test]"),),
         )
         texture = GraphNode(
             display_name="ui_icon.dds",
             file_path=ltx_path,
             first_match_line=3,
             matches=(
-                GraphMatch(
+                _gm(
                     "texture_reference",
                     3,
                     "icons_texture = no\\such\\icon",

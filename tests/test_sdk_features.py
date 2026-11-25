@@ -7,8 +7,16 @@ from pathlib import Path
 from tests.support import SRC  # noqa: F401
 
 from sdk.contracts.events import Events
-from sdk.features.documents import ResolvedLineEdit
+from sdk.features.documents import DocumentViewerApi, ResolvedLineEdit
+from sdk.features.graph import SectionGraphApi
+from sdk.features.items import (
+    ItemCatalogApi,
+    ItemSectionDropApi,
+)
+from sdk.features.ogg import OggEditorApi
 from sdk.features.patches import PatchRequest, PatchUnavailableError
+from sdk.features.projects import ProjectAssetsApi
+from sdk.kernel.levels import ApiLevel, api_level
 from ui.bus import EventBus
 from ui.platform.sdk_bridge import (
     DocumentApiAdapter,
@@ -78,6 +86,41 @@ class PatchApiAdapterTest(unittest.TestCase):
         adapter = PatchApiAdapter()
         with self.assertRaises(PatchUnavailableError):
             adapter.propose(PatchRequest(target=Path("a.ltx")))
+
+
+class CapabilityProtocolsTest(unittest.TestCase):
+    def test_domain_capability_protocols_are_importable(self):
+        for protocol in (
+            DocumentViewerApi,
+            SectionGraphApi,
+            ItemCatalogApi,
+            ItemSectionDropApi,
+            ProjectAssetsApi,
+            OggEditorApi,
+        ):
+            self.assertTrue(hasattr(protocol, "__mro__"))
+
+    def test_item_api_is_not_kept_as_alias(self):
+        import sdk.features.items as items
+
+        self.assertFalse(hasattr(items, "ItemApi"))
+        self.assertTrue(hasattr(items, "ItemCatalogApi"))
+
+    def test_capability_protocols_have_explicit_api_levels(self):
+        for name in (
+            "DocumentViewerApi",
+            "SectionGraphApi",
+            "ItemCatalogApi",
+            "ItemSectionDropApi",
+            "ProjectAssetsApi",
+            "OggEditorApi",
+        ):
+            self.assertIs(
+                api_level(name),
+                ApiLevel.EXPERIMENTAL,
+                name,
+            )
+        self.assertIs(api_level("CapabilitiesApi"), ApiLevel.STABLE)
 
 
 if __name__ == "__main__":

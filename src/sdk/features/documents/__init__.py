@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Документы: DTO, разбор текста движка и контракт DocumentApi."""
 
-from .api import DocumentApi
+from .api import DocumentApi, DocumentViewerApi
 from .engine_text import (
     EngineTextRun,
     engine_source_text,
@@ -20,6 +20,7 @@ from .models import (
 
 __all__ = [
     "DocumentApi",
+    "DocumentViewerApi",
     "FileView",
     "LineSource",
     "ResolvedDocumentChange",

@@ -11,7 +11,7 @@ from PyQt5.QtGui import QMouseEvent, QStandardItem, QStandardItemModel
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QApplication
 
-from modules.base_module.item_viewer import ENTRY_ROLE, ItemGalleryView
+from modules.item_browser.item_viewer import ENTRY_ROLE, ItemGalleryView
 
 _app = qapp()
 

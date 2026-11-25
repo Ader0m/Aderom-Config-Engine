@@ -10,7 +10,7 @@ from sdk.features.items import ItemEntry, ItemField
 from ui.bus import EventBus
 from app.documents import ResolvedDocumentSession
 from ui.editor_tabs import EditorTabs
-from modules.base_module.item_viewer import ItemCardView, ItemViewerFeature
+from modules.item_browser.item_viewer import ItemCardView, ItemViewerFeature
 
 _app = qapp()
 

@@ -3,11 +3,10 @@
 
 from .api import CommandApi, EventApi, TaskApi
 from .capabilities import (
+    CapabilitiesApi,
     Capability,
     CapabilityConflictError,
     CapabilityError,
-    CapabilityRegistry,
-    CapabilityScope,
     CapabilityUnavailable,
     CapabilityVersionError,
     MissingCapability,
@@ -15,6 +14,9 @@ from .capabilities import (
 from .context import KernelApi, ModuleContext
 from .levels import ApiLevel, api_level, is_stable
 from .module import (
+    MODULE_MANIFEST_VERSION,
+    CapabilityDeclaration,
+    CapabilityRequirement,
     ModuleBase,
     ModuleManifest,
     ModuleRequirement,
@@ -30,8 +32,11 @@ __all__ = [
     "parse_version",
     "is_compatible",
     "version_at_least",
+    "MODULE_MANIFEST_VERSION",
     "ModuleManifest",
     "ModuleRequirement",
+    "CapabilityDeclaration",
+    "CapabilityRequirement",
     "ModuleBase",
     "ModuleContext",
     "KernelApi",
@@ -42,11 +47,10 @@ __all__ = [
     "Capability",
     "CapabilityConflictError",
     "CapabilityError",
-    "CapabilityRegistry",
-    "CapabilityScope",
     "CapabilityUnavailable",
     "CapabilityVersionError",
     "MissingCapability",
+    "CapabilitiesApi",
     "ApiLevel",
     "api_level",
     "is_stable",

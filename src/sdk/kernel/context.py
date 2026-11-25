@@ -6,7 +6,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .capabilities import CapabilityRegistry, CapabilityScope
+from .capabilities import (
+    CapabilitiesApi,
+    CapabilityRegistry,
+    CapabilityScope,
+)
 from .registrations import RegistrationScope
 from .version import version_at_least
 
@@ -17,7 +21,7 @@ class KernelApi:
 
     sdk_version: str
     available_modules: dict = field(default_factory=dict)
-    capabilities: Optional[CapabilityScope] = None
+    capabilities: Optional[CapabilitiesApi] = None
 
 
 class ModuleContext:

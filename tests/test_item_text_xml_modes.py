@@ -8,7 +8,7 @@ from pathlib import Path
 from tests.support import SRC  # noqa: F401
 
 from app.projects import ProjectService
-from core.items.localization import edit_localization_text
+from core.localization import edit_localization_text
 from tests.test_project_xml_patches import ForkServices, Forest, Services
 
 

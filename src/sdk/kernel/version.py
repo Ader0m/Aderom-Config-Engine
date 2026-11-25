@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Версия SDK и проверка совместимости."""
 
-SDK_VERSION = "0.11.0"
+SDK_VERSION = "0.13.0"
 
 
 def parse_version(v):

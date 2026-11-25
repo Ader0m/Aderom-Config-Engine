@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Protocol
 
 ITEM_SECTION_MIME = "application/x-ace-item-section+json"
 
@@ -84,3 +84,10 @@ def decode_item_section(data: bytes) -> Optional[ItemSectionData]:
             fields.append((key, value))
 
     return ItemSectionData(section=section, fields=tuple(fields))
+
+
+class ItemSectionDropApi(Protocol):
+    """Capability ``item.section.dragdrop``: приём предметной секции."""
+
+    def accept_item_section(self, data: ItemSectionData) -> bool:
+        """Принять предметную секцию; ``False`` — операция отклонена."""

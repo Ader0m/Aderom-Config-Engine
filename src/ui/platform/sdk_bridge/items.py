@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""ItemApiAdapter: каталог предметов и item-проекции."""
+"""ItemCatalogApiAdapter: каталог предметов и item-проекции."""
 
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ from sdk.features.items.models import (
 from .common import _to_item_entry
 
 
-class ItemApiAdapter:
-    """Реализация :class:`sdk.features.items.ItemApi`."""
+class ItemCatalogApiAdapter:
+    """Реализация :class:`sdk.features.items.ItemCatalogApi`."""
 
     def __init__(self, core_provider, platform=None):
         self._provider = core_provider
@@ -171,5 +171,28 @@ class ItemApiAdapter:
             return None
         return _to_item_entry(raw)
 
-    def open_item_card_at_cursor(self):
-        return self._platform.open_item_card_at_cursor()
+    def plan_item_creation(
+        self,
+        item_text,
+        xml_text,
+        known_sections,
+        section,
+        parent,
+        parent_fields,
+        project_name,
+    ):
+        return self._provider.plan_item_creation(
+            item_text,
+            xml_text,
+            known_sections,
+            section,
+            parent,
+            parent_fields,
+            project_name,
+        )
+
+    def creation_paths(self, scan_dir, project_name):
+        return self._provider.creation_paths(scan_dir, project_name)
+
+    def parent_fields(self, catalog, parent):
+        return self._provider.parent_fields(catalog, parent)

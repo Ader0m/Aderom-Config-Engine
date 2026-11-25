@@ -6,7 +6,7 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from modules.base_module.xml_open import XmlFileOpener
+from modules.base.xml_open import XmlFileOpener
 
 
 class _Session:

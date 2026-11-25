@@ -5,10 +5,11 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from tests.helpers import write_text
+from tests.helpers import touch_after, write_text
 from tests.support import SRC  # noqa: F401
 
-from core.items.catalog import DEFAULT_ICON_TEXTURE, ItemCatalogService
+from app.features.items.catalog import DEFAULT_ICON_TEXTURE, ItemCatalogService
+from core.cache.service import CacheService
 
 
 class _FakeResolver:
@@ -46,6 +47,14 @@ class _FakeForest:
             Path(path): rel
             for path, rel in (rel_paths or {}).items()
         }
+
+
+_CATALOG_SERVICE = ItemCatalogService
+
+
+def _service(resolver, **kwargs):
+    kwargs.setdefault("cache_service", CacheService())
+    return _CATALOG_SERVICE(resolver, **kwargs)
 
 
 ITEMS_TEXT = """
@@ -101,7 +110,7 @@ class ItemCatalogTest(unittest.TestCase):
 
     def test_parses_items_and_applies_defaults(self):
         forest = self._forest()
-        service = ItemCatalogService(_FakeResolver(ITEMS_TEXT))
+        service = _service(_FakeResolver(ITEMS_TEXT))
 
         catalog = service.build(forest)
 
@@ -127,7 +136,7 @@ class ItemCatalogTest(unittest.TestCase):
 
     def test_fields_point_to_resolved_lines(self):
         forest = self._forest()
-        catalog = ItemCatalogService(
+        catalog = _service(
             _FakeResolver(ITEMS_TEXT)
         ).build(forest)
         base = next(
@@ -153,7 +162,7 @@ class ItemCatalogTest(unittest.TestCase):
             def assemble_resolved(self, *args, **kwargs):
                 raise AssertionError("resolver must not be called")
 
-        catalog = ItemCatalogService(
+        catalog = _service(
             _NoResolve("")
         ).build(
             forest,
@@ -173,7 +182,7 @@ class ItemCatalogTest(unittest.TestCase):
             "inv_name = AlphaChanged",
         )
 
-        catalog = ItemCatalogService(
+        catalog = _service(
             _FakeResolver("")
         ).build(forest, resolved_text=overlay)
 
@@ -186,7 +195,7 @@ class ItemCatalogTest(unittest.TestCase):
 
     def test_item_gets_localized_name_and_description(self):
         forest = self._forest()
-        service = ItemCatalogService(
+        service = _service(
             _FakeResolver(ITEMS_TEXT),
             localization_service=_FakeLocalization(),
         )
@@ -213,7 +222,7 @@ class ItemCatalogTest(unittest.TestCase):
             rel_paths={root: "items/items.ltx"},
         )
 
-        catalog = ItemCatalogService(_FakeResolver(text)).build(forest)
+        catalog = _service(_FakeResolver(text)).build(forest)
         sections = {section.name: section for section in catalog.sections}
 
         self.assertIn("base_item", sections)
@@ -229,7 +238,7 @@ class ItemCatalogTest(unittest.TestCase):
 
     def test_service_sections_are_skipped(self):
         forest = self._forest()
-        catalog = ItemCatalogService(_FakeResolver(ITEMS_TEXT)).build(forest)
+        catalog = _service(_FakeResolver(ITEMS_TEXT)).build(forest)
         self.assertNotIn(
             "tch_hidden",
             [item.section for item in catalog.items],
@@ -250,19 +259,19 @@ class ItemCatalogTest(unittest.TestCase):
             },
         )
 
-        catalog = ItemCatalogService(_FakeResolver(ITEMS_TEXT)).build(forest)
+        catalog = _service(_FakeResolver(ITEMS_TEXT)).build(forest)
         self.assertEqual(catalog.source_path, items_root)
 
     def test_missing_root_returns_warning(self):
         forest = _FakeForest(self.configs, [])
-        catalog = ItemCatalogService(_FakeResolver("")).build(forest)
+        catalog = _service(_FakeResolver("")).build(forest)
         self.assertIsNone(catalog.source_path)
         self.assertEqual(catalog.items, ())
         self.assertTrue(catalog.warnings)
 
     def test_falls_back_to_raw_file_when_resolver_fails(self):
         forest = self._forest()
-        service = ItemCatalogService(_FakeResolver("", fail=True))
+        service = _service(_FakeResolver("", fail=True))
 
         catalog = service.build(forest)
 
@@ -274,7 +283,7 @@ class ItemCatalogTest(unittest.TestCase):
     def test_catalog_is_cached_by_snapshot(self):
         forest = self._forest()
         resolver = _FakeResolver(ITEMS_TEXT)
-        service = ItemCatalogService(resolver)
+        service = _service(resolver)
 
         first = service.build(forest)
         second = service.build(forest)
@@ -283,12 +292,70 @@ class ItemCatalogTest(unittest.TestCase):
         self.assertEqual(len(resolver.calls), 1)
         self.assertTrue(first.cache_key)
 
+    def test_catalog_uses_injected_cache_service(self):
+        forest = self._forest()
+        cache = CacheService()
+        service = _service(
+            _FakeResolver(ITEMS_TEXT),
+            cache_service=cache,
+        )
+
+        first = service.build(forest)
+        service.clear_memory()
+        second = service.build(forest)
+
+        self.assertIsNot(first, second)
+        self.assertEqual(
+            [item.section for item in second.items],
+            [item.section for item in first.items],
+        )
+        self.assertIs(service._cache_service, cache)
+
+    def test_catalog_cache_counts_hits(self):
+        forest = self._forest()
+        cache = CacheService()
+        service = _service(
+            _FakeResolver(ITEMS_TEXT),
+            cache_service=cache,
+        )
+
+        service.build(forest)
+        service.build(forest)
+
+        stats = cache.stats()["namespaces"]["item.catalog"]
+        self.assertEqual(stats["computes"], 1)
+        self.assertEqual(stats["hits"], 1)
+
+    def test_catalog_rebuilds_after_root_change(self):
+        forest = self._forest()
+        resolver = _FakeResolver(ITEMS_TEXT)
+        service = _service(resolver)
+        first = service.build(forest)
+
+        edited = ITEMS_TEXT.replace(
+            "inv_name = Alpha",
+            "inv_name = Omega",
+        )
+        root = forest.files[0]
+        write_text(root, edited)
+        touch_after(root)
+        resolver.text = edited
+
+        second = service.build(forest)
+
+        self.assertIsNot(first, second)
+        alpha = next(
+            item for item in second.items
+            if item.section == "alpha_item"
+        )
+        self.assertEqual(alpha.field("inv_name"), "Omega")
+
     def test_catalog_cache_survives_new_service(self):
         forest = self._forest()
         cache_dir = self.root / "cache"
         resolver = _FakeResolver(ITEMS_TEXT)
 
-        first = ItemCatalogService(
+        first = _service(
             resolver,
             cache_dir=cache_dir,
         ).build(forest)
@@ -297,7 +364,7 @@ class ItemCatalogTest(unittest.TestCase):
             def assemble_resolved(self, *args, **kwargs):
                 raise AssertionError("resolver must not be called")
 
-        second = ItemCatalogService(
+        second = _service(
             _NoResolve(""),
             cache_dir=cache_dir,
         ).build(forest)
@@ -311,7 +378,7 @@ class ItemCatalogTest(unittest.TestCase):
     # -------------------------------------------------- один предмет
     def test_build_entry_uses_global_line_numbers(self):
         forest = self._forest()
-        service = ItemCatalogService(_FakeResolver(ITEMS_TEXT))
+        service = _service(_FakeResolver(ITEMS_TEXT))
 
         alpha = service.build_entry(forest, ITEMS_TEXT, "alpha_item")
 
@@ -332,7 +399,7 @@ class ItemCatalogTest(unittest.TestCase):
 
     def test_build_entry_returns_none_for_unknown_or_service(self):
         forest = self._forest()
-        service = ItemCatalogService(_FakeResolver(ITEMS_TEXT))
+        service = _service(_FakeResolver(ITEMS_TEXT))
         self.assertIsNone(service.build_entry(forest, ITEMS_TEXT, "nope"))
         self.assertIsNone(
             service.build_entry(forest, ITEMS_TEXT, "tch_hidden")
@@ -340,7 +407,7 @@ class ItemCatalogTest(unittest.TestCase):
 
     def test_build_entry_reflects_edited_resolved_text(self):
         forest = self._forest()
-        service = ItemCatalogService(_FakeResolver(ITEMS_TEXT))
+        service = _service(_FakeResolver(ITEMS_TEXT))
         edited = ITEMS_TEXT.replace("kind = i_misc\ncost = 10", "kind = i_med\ncost = 10")
 
         alpha = service.build_entry(forest, edited, "alpha_item")
@@ -361,7 +428,7 @@ class ItemCatalogTest(unittest.TestCase):
             "[dup]\ninv_name = Last\n"
         )
         forest = self._forest()
-        service = ItemCatalogService(_FakeResolver(text))
+        service = _service(_FakeResolver(text))
 
         entry = service.build_entry(forest, text, "dup")
 
@@ -369,7 +436,7 @@ class ItemCatalogTest(unittest.TestCase):
 
     def test_build_entry_from_block_offsets_lines(self):
         forest = self._forest()
-        service = ItemCatalogService(_FakeResolver(""))
+        service = _service(_FakeResolver(""))
         block = (
             "[alpha_item]\n"
             "inv_name = Alpha\n"

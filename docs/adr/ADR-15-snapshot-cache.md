@@ -138,12 +138,46 @@
 - Этап 4: семантические кэши получают `snapshot_id` в ключе.
 - Этап 6: `CacheService` и `PrebuildService` регистрируются в общем
   центре операций; `PrebuildPanel` заменяется общей очередью.
-- Этап 7: item-кэши (`catalog`, `icons`, `localization`) переводятся на
-  `CacheService`. Их текущие ключи уже включают file stamps и overlay,
-  поэтому снимки не смешиваются; это переходное состояние, а не новый
-  кэш.
+- Этап 7: item-кэши (`catalog`, `icons`, `localization`) переведены на
+  `CacheService` шагом 7.8. Их ключи включают file stamps/overlay и
+  `snapshot_id`; один `LocalizationService` обслуживает подсказки и
+  карточки предметов; дисковые backend'ы остаются на LRU-вытеснении до
+  Этапа 9.
+- Этап 7.9: graph-кэш переведён на `CacheService`. `graph.file`
+  использует content-addressed file stamp, `graph.section` — канонический
+  `forest.cache_id` + overlay signature. Production больше не передаёт
+  `DisabledCache`.
 - Прямой путь `XmlResolveService` через `ResolvedCache` остаётся только
   при `cache_service=None` (изолированные тесты/standalone). В
   production-композиции XML-резолв идёт через `CacheService`.
 - Этап 9: переходные `CoreServices` и широкая поверхность `core`
   сужаются до явных портов.
+
+### Content-addressed snapshot для item-кэшей
+
+Для item-кэшей `CacheService.snapshot_id` — **content-addressed**, а не
+канонический `SnapshotService.snapshot_id`. Это осознанное решение шага
+7.8:
+
+- каталог использует digest ключа, включающего версию правил, путь
+  корня, подпись include/DLTX-дерева, signature локализации и
+  overlay-ревизию;
+- иконки — file stamp DDS-файла или digest набора DDS плюс версия
+  декодера;
+- локализация — signature, включающий язык, file stamps и overlay.
+
+Канонический VFS `snapshot_id` используется tree/resolved-кэшами. Для
+item-данных content-addressed снимок достаточен: изменение любого
+входа меняет ключ/снимок, а правка `system.ltx` не заставляет заново
+декодировать неизменившиеся DDS. Смешения данных разных снимков нет.
+
+### Graph-кэш
+
+`graph.section` привязан к `forest.cache_id` (канонический VFS snapshot)
+и overlay signature; ключ дополнительно включает секцию, `vfs_mode`,
+`provider_id`, наличие resolved/XML providers и версию правил.
+`graph.file` использует content-addressed ключ из `path_key` и file
+stamp, поэтому изменённый файл не возвращает старый текст. Оба backend'а
+memory-only, наружу отдаётся копия графа. Fallback на raw, частичный
+resolved-граф и ошибки чтения файлов не кэшируются: временная ошибка
+провайдера не должна отравлять снимок.

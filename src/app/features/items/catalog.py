@@ -29,19 +29,19 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional, Tuple
 
-from core.patching.ltx.document import (
+from core.api.documents import (
     parse_ltx_document,
     parse_section_header,
 )
-from core.items.localization import LocalizationEntry
-from core.tools.fs import read_text_safe, strip_comments
-from core.tools.cache import ObjectCache
-from core.tools.cache import (
+from core.api.localization import LocalizationEntry
+from core.api.vfs import read_text_safe, resolve_asset_path
+from core.api.documents import strip_comments
+from core.api.cache import (
+    ObjectCache,
     file_subtree_signature,
     project_overlay_signature,
 )
-from core.tools.paths import path_key
-from core.tools.vfs import resolve_asset_path
+from core.api.paths import path_key
 
 
 # Меняется при изменении правил разбора: старый кэш станет недоступен.
@@ -51,6 +51,9 @@ from core.tools.vfs import resolve_asset_path
 # 5 — имена родителей из исходных LTX (resolved-текст уже без наследования).
 # 6 — источник строки локализации для правки XML из карточки.
 ITEM_CATALOG_VERSION = 7
+
+ITEM_CATALOG_NAMESPACE = "item.catalog"
+ITEM_CATALOG_TEXT_NAMESPACE = "item.catalog.text"
 
 DEFAULT_ICON_TEXTURE = r"ui\ui_icon_equipment"
 GRID_SIZE = 50
@@ -169,17 +172,31 @@ class ItemCatalogService:
         max_entries=4,
         localization_service=None,
         max_disk_bytes=None,
+        cache_service=None,
     ):
         self._resolver = resolver_service
         self._localization = localization_service
-        self._cache = ObjectCache(
+        if cache_service is None:
+            raise ValueError(
+                "ItemCatalogService требует общий CacheService"
+            )
+        self._cache_service = cache_service
+        self._catalog_backend = ObjectCache(
             cache_dir=cache_dir,
             max_entries=max_entries,
             max_disk_bytes=max_disk_bytes,
         )
         # Черновик проекта меняется после каждой правки: его кэшируем
         # только в памяти, иначе на диске появятся сотни 40-МБ снимков.
-        self._text_cache = ObjectCache(max_entries=1)
+        self._text_backend = ObjectCache(max_entries=1)
+        self._cache_service.register_backend(
+            ITEM_CATALOG_NAMESPACE,
+            self._catalog_backend,
+        )
+        self._cache_service.register_backend(
+            ITEM_CATALOG_TEXT_NAMESPACE,
+            self._text_backend,
+        )
 
     # -------------------------------------------------- корневой файл
 
@@ -266,6 +283,14 @@ class ItemCatalogService:
         digest = hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()
         return ("item_catalog", digest), digest
 
+    @staticmethod
+    def _digest(parts):
+        digest = hashlib.sha1()
+        for part in parts:
+            digest.update(str(part).encode("utf-8", "replace"))
+            digest.update(b"\0")
+        return digest.hexdigest()
+
     def _localization_signature(self, forest, overlay=None):
         if self._localization is None:
             return ""
@@ -283,8 +308,10 @@ class ItemCatalogService:
 
     def clear_memory(self):
         """Сбросить каталоги в памяти (диск остаётся до смены снимка)."""
-        self._cache.clear()
-        self._text_cache.clear()
+        self._cache_service.clear_namespace(ITEM_CATALOG_NAMESPACE)
+        self._cache_service.clear_namespace(
+            ITEM_CATALOG_TEXT_NAMESPACE
+        )
 
     @staticmethod
     def _effective_overlay(overlay):
@@ -330,10 +357,6 @@ class ItemCatalogService:
         loc_signature = self._localization_signature(forest, overlay)
         overlay_key = project_overlay_signature(overlay)
 
-        cache_target = self._cache
-        if overlay is not None:
-            cache_target = self._text_cache
-
         if resolved_text is None:
             if root is None:
                 return ItemCatalog(
@@ -344,18 +367,73 @@ class ItemCatalogService:
                         "или item_base.ltx.",
                     ),
                 )
-
             cache_key, catalog_key = self._snapshot_key(
                 forest,
                 root,
                 overlay,
             )
-            cached = cache_target.get(cache_key)
-            if cached is not None:
-                if log:
-                    log("Предметы: кэш снимка %s" % root.name)
-                return cached
+            cache_namespace = (
+                ITEM_CATALOG_TEXT_NAMESPACE
+                if overlay is not None
+                else ITEM_CATALOG_NAMESPACE
+            )
+            snapshot_id = catalog_key
+            text = None
+        else:
+            text = str(resolved_text)
+            if (
+                reuse_snapshot_cache
+                and root is not None
+                and overlay is None
+            ):
+                cache_key, catalog_key = self._snapshot_key(forest, root)
+                cache_namespace = ITEM_CATALOG_NAMESPACE
+                snapshot_id = catalog_key
+            else:
+                text_digest = hashlib.sha1(
+                    text.encode("utf-8", "replace")
+                ).hexdigest()
+                cache_key = (
+                    "item_catalog_text",
+                    ITEM_CATALOG_VERSION,
+                    text_digest,
+                    path_key(root) if root is not None else "",
+                    loc_signature,
+                    overlay_key,
+                )
+                catalog_key = text_digest
+                cache_namespace = ITEM_CATALOG_TEXT_NAMESPACE
+                snapshot_id = self._digest(cache_key)
 
+        def compute():
+            return self._build_catalog(
+                forest,
+                root,
+                cfg,
+                log,
+                overlay,
+                text,
+                catalog_key,
+            )
+
+        return self._cache_service.get_or_compute(
+            cache_namespace,
+            cache_key,
+            compute,
+            snapshot_id=snapshot_id,
+        )
+
+    def _build_catalog(
+        self,
+        forest,
+        root,
+        cfg,
+        log,
+        overlay,
+        resolved_text,
+        catalog_key,
+    ):
+        if resolved_text is None:
             text = None
             if log:
                 log("Предметы: корневой файл %s" % root)
@@ -387,41 +465,6 @@ class ItemCatalogService:
                     )
         else:
             text = str(resolved_text)
-
-            if (
-                reuse_snapshot_cache
-                and root is not None
-                and overlay is None
-            ):
-                cache_key, catalog_key = self._snapshot_key(forest, root)
-                cache_target = self._cache
-
-                cached = self._cache.get(cache_key)
-                if cached is not None:
-                    if log:
-                        log("Предметы: кэш снимка %s" % root.name)
-                    return cached
-            else:
-                text_digest = hashlib.sha1(
-                    text.encode("utf-8", "replace")
-                ).hexdigest()
-                cache_key = (
-                    "item_catalog_text",
-                    ITEM_CATALOG_VERSION,
-                    text_digest,
-                    path_key(root) if root is not None else "",
-                    loc_signature,
-                    overlay_key,
-                )
-                catalog_key = text_digest
-                cache_target = self._text_cache
-
-                cached = cache_target.get(cache_key)
-                if cached is not None:
-                    if log:
-                        log("Предметы: кэш текста проекта")
-                    return cached
-
             if log:
                 log(
                     "Предметы: готовый resolved-текст, строк: %d"
@@ -458,7 +501,7 @@ class ItemCatalogService:
                 % (root.name if root is not None else "тексте")
             )
 
-        catalog = ItemCatalog(
+        return ItemCatalog(
             source_path=root,
             items=tuple(items),
             warnings=tuple(warnings),
@@ -466,8 +509,6 @@ class ItemCatalogService:
             sections=tuple(sections),
             parent_names=parent_names,
         )
-        cache_target.set(cache_key, catalog)
-        return catalog
 
     # -------------------------------------------------- предметы
 

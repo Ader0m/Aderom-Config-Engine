@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""Просмотр игровых предметов.
+"""Просмотр игровых предметов (модуль ``item_browser``).
 
-Возможность базового модуля:
+Возможность модуля:
 
 - ``Инструменты → Просмотр игровых предметов``;
 - каталог собирается ядром из резолва ``system.ltx`` (с учётом
@@ -9,9 +9,9 @@
 - иконки вырезаются из атласа ``icons_texture`` по ``inv_grid_*``;
 - если текстура не найдена, показывается серый зачёркнутый круг 50×50.
 
-Модуль не импортирует ``core`` и ``ui``: только SDK и PyQt для своего
-окна. Тяжёлая работа (резолв, разбор LTX, декодирование DDS) выполняется
-в ``ctx.tasks``.
+Модуль не импортирует ``core``, ``ui`` и другие модули: только SDK и
+PyQt для своего окна. Тяжёлая работа (резолв, разбор LTX, декодирование
+DDS) выполняется в ``ctx.tasks``.
 """
 
 from __future__ import annotations
@@ -92,10 +92,10 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from .ltx_open import resolved_tab_id
+from .session import resolved_tab_id
 
-WINDOW_KEY = "base.item_viewer"
-PROGRESS_KEY = "base.item_viewer.progress"
+WINDOW_KEY = "item_browser.item_viewer"
+PROGRESS_KEY = "item_browser.item_viewer.progress"
 GRID_SIZE = 50
 GALLERY_ICON_SIZE = 100
 PLACEHOLDER_SIZE = 50
@@ -289,125 +289,6 @@ def _call_async_text_save(
     if original_text is not None:
         kwargs["original_text"] = original_text
     return bool(writer(path, text, **kwargs))
-
-
-def _project_tag(name) -> str:
-    """Безопасный тег проекта для имён файлов и ключей локализации."""
-    value = str(name or "").strip().lower()
-    value = re.sub(r"[^\w.-]+", "_", value, flags=re.UNICODE)
-    return value.strip("._-") or "project"
-
-
-def _next_localization_base(base_key: str, existing_ids) -> str:
-    """Свободный префикс ключей локализации для нового предмета.
-
-    Первый предмет проекта получает ``st_ace_<проект>``; следующим
-    добавляется числовой id: ``st_ace_<проект>_2`` и т.д.
-    """
-    existing = {str(value).lower() for value in existing_ids or ()}
-
-    if (
-        (base_key + "_name").lower() not in existing
-        and (base_key + "_descr").lower() not in existing
-    ):
-        return base_key
-
-    index = 2
-    while True:
-        candidate = "%s_%d" % (base_key, index)
-        if (
-            (candidate + "_name").lower() not in existing
-            and (candidate + "_descr").lower() not in existing
-        ):
-            return candidate
-        index += 1
-
-
-def _build_item_section(
-    section: str,
-    parent,
-    parent_fields,
-    name_key: str,
-    description_key: str,
-    newline: str = "\n",
-) -> str:
-    """Текст новой секции предмета с пустыми полями родителя."""
-    header = "[%s]" % section
-    parent = str(parent or "").strip()
-    if parent:
-        header += ":%s" % parent
-
-    lines = [header]
-    seen = set()
-
-    for key in parent_fields or ():
-        key = str(key or "").strip()
-        if not key:
-            continue
-        lower = key.lower()
-        if lower in ("inv_name", "inv_name_short", "description"):
-            continue
-        if lower in seen:
-            continue
-        seen.add(lower)
-        lines.append("%s =" % key)
-
-    # Локализация нового предмета. У inv_name_short всегда тот же ключ,
-    # что и у inv_name.
-    lines.append("inv_name = %s" % name_key)
-    lines.append("inv_name_short = %s" % name_key)
-    lines.append("description = %s" % description_key)
-
-    return newline.join(lines)
-
-
-def _append_item_section(text: str, block: str, newline: str = "\n") -> str:
-    text = str(text or "")
-    if not text.strip():
-        return block + newline
-    return text.rstrip() + newline + newline + block + newline
-
-
-def _xml_string_entries(
-    name_key: str,
-    description_key: str,
-    newline: str = "\n",
-) -> str:
-    lines = []
-    for key in (name_key, description_key):
-        lines.extend((
-            '\t<string id="%s">' % key,
-            "\t\t<text></text>",
-            "\t</string>",
-        ))
-    return newline.join(lines)
-
-
-def _append_xml_strings(
-    text: str,
-    name_key: str,
-    description_key: str,
-    newline: str = "\n",
-) -> str:
-    block = _xml_string_entries(name_key, description_key, newline)
-    text = str(text or "")
-
-    if not text.strip():
-        return newline.join((
-            '<?xml version="1.0" encoding="windows-1251"?>',
-            "",
-            "<string_table>",
-            block,
-            "</string_table>",
-            "",
-        ))
-
-    marker = "</string_table>"
-    index = text.lower().rfind(marker)
-    if index == -1:
-        return text.rstrip() + newline + newline + block + newline
-
-    return text[:index].rstrip() + newline + block + newline + text[index:]
 
 
 class CreateItemDialog(QDialog):
@@ -604,6 +485,7 @@ class ItemViewerFeature:
         self._pending_cards = set()
         self._pending_full = False
         self._pending_focus_line = 0
+        self._pending_drop_section = ""
         self._refresh_timer = (
             QTimer() if QApplication.instance() is not None else None
         )
@@ -992,12 +874,19 @@ class ItemViewerFeature:
             )
 
         self._window.set_catalog(catalog, images)
+        pending = self._pending_drop_section
+        if pending:
+            self._pending_drop_section = ""
+            if self._window.select_section(pending):
+                self.ctx.ui.log(
+                    "Просмотр предметов: выбрана секция %s" % pending
+                )
         self.ctx.ui.open_window(
             WindowSpec(
                 key=self.WINDOW_KEY,
                 title="Просмотр предметов",
                 kind="floating",
-                state_key="base.item_viewer",
+                state_key="item_browser.item_viewer",
             ),
             self._window,
         )
@@ -1469,6 +1358,22 @@ class ItemViewerFeature:
             card,
         )
         card.refresh()
+
+    def accept_item_section(self, data) -> bool:
+        """Принять предметную секцию в viewer (capability dragdrop)."""
+        section = str(getattr(data, "section", "") or "").strip()
+        if not section:
+            return False
+        if not self.session.has_tree:
+            return False
+        self.show()
+        if self._tab_id:
+            self.open_card(self._tab_id, section)
+            return True
+        self._pending_drop_section = section
+        if self._window is not None and self._window.select_section(section):
+            self._pending_drop_section = ""
+        return True
 
     def _can_edit_tab(self, tab_id):
         if self.ctx.documents.has_resolved_document(tab_id):
@@ -2170,53 +2075,11 @@ class ItemViewerFeature:
             )
 
     # -------------------------------------------------- создание предмета
-    def _parent_fields(self, parent):
-        if not parent:
-            return ()
-
-        wanted = str(parent).strip().lower()
-        catalog = self._catalog
-        fields = []
-
-        # Поля самой секции в том порядке, как они записаны в документе.
-        for section in getattr(catalog, "sections", ()) or ():
-            if section.name.lower() == wanted:
-                fields.extend(section.fields or ())
-                break
-
-        # Эффективные поля предмета включают значения по умолчанию
-        # (иконка и сетка), даже если ключ не записан явно.
-        for entry in getattr(catalog, "items", ()) or ():
-            if entry.section.lower() == wanted:
-                fields.extend(field.key for field in entry.fields)
-                break
-
-        result = []
-        seen = set()
-        for key in fields:
-            key = str(key or "").strip()
-            if not key or key.lower() in seen:
-                continue
-            seen.add(key.lower())
-            result.append(key)
-        return tuple(result)
-
     def _create_item(self, section, parent):
         """Добавить новый предмет в файлы проекта."""
         if not self._can_edit():
             self.ctx.ui.show_error(
                 "Создайте проект, чтобы добавлять предметы."
-            )
-            return False
-
-        section = str(section or "").strip()
-        parent = str(parent or "").strip() or None
-        if not section:
-            self.ctx.ui.show_error("Не задано имя секции предмета.")
-            return False
-        if re.search(r"[\[\]:\r\n]", section):
-            self.ctx.ui.show_error(
-                "Имя секции не должно содержать [ ], : или перевод строки."
             )
             return False
 
@@ -2235,12 +2098,10 @@ class ItemViewerFeature:
             return False
 
         project_name = self.ctx.ui.project_name() or "project"
-        tag = _project_tag(project_name)
-
-        items_dir = Path(scan_dir) / "items"
-        text_dir = Path(scan_dir) / "text" / "rus"
-        item_path = items_dir / ("mod_item_base_~ace_%s.ltx" % tag)
-        xml_path = text_dir / ("st_ace_%s.xml" % tag)
+        item_path, xml_path = self.ctx.items.creation_paths(
+            scan_dir,
+            project_name,
+        )
 
         item_text = self.ctx.documents.read_project_text(item_path)
         xml_text = self.ctx.documents.read_project_text(xml_path)
@@ -2254,66 +2115,40 @@ class ItemViewerFeature:
                 getattr(self._catalog, "sections", ()) or ()
             )
         )
-        if section.lower() in known_sections:
-            self.ctx.ui.show_error(
-                "Секция [%s] уже существует." % section
+
+        try:
+            plan = self.ctx.items.plan_item_creation(
+                item_text,
+                xml_text,
+                known_sections,
+                section,
+                parent,
+                self.ctx.items.parent_fields(self._catalog, parent),
+                project_name,
             )
+        except ValueError as exc:
+            self.ctx.ui.show_error(str(exc))
             return False
-
-        parent_fields = self._parent_fields(parent)
-
-        item_newline = "\r\n" if "\r\n" in item_text else "\n"
-        xml_newline = "\r\n" if "\r\n" in xml_text else "\n"
-
-        base_key = "st_ace_%s" % tag
-        existing_ids = re.findall(
-            r'<string\s+id\s*=\s*"([^"]+)"',
-            xml_text,
-            flags=re.IGNORECASE,
-        )
-        key_base = _next_localization_base(base_key, existing_ids)
-        name_key = key_base + "_name"
-        description_key = key_base + "_descr"
-
-        section_block = _build_item_section(
-            section,
-            parent,
-            parent_fields,
-            name_key,
-            description_key,
-            newline=item_newline,
-        )
-        item_text = _append_item_section(
-            item_text,
-            section_block,
-            newline=item_newline,
-        )
-        xml_text = _append_xml_strings(
-            xml_text,
-            name_key,
-            description_key,
-            newline=xml_newline,
-        )
 
         if not self.ctx.documents.write_project_texts(
             (
-                (item_path, item_text),
-                (xml_path, xml_text),
+                (item_path, plan.item_text),
+                (xml_path, plan.xml_text),
             )
         ):
             return False
 
         self.ctx.ui.log(
             "Проект: создан предмет [%s] (%s, %s)"
-            % (section, item_path.name, xml_path.name)
+            % (plan.section, item_path.name, xml_path.name)
         )
         self.ctx.ui.set_status(
-            "Предмет [%s] добавлен в проект" % section,
+            "Предмет [%s] добавлен в проект" % plan.section,
             6000,
         )
         self._register_virtual_files(
-            (item_path, item_text),
-            (xml_path, xml_text),
+            (item_path, plan.item_text),
+            (xml_path, plan.xml_text),
         )
         return True
 
@@ -4205,6 +4040,20 @@ class ItemViewerWindow(QDialog):
             if entry.section.lower() == wanted:
                 return entry
         return None
+
+    def select_section(self, section) -> bool:
+        """Выбрать предмет в каталоге по имени секции."""
+        entry = self._entry_for_section(section)
+        if entry is None:
+            return False
+        for row in range(self.proxy.rowCount()):
+            index = self.proxy.index(row, 0)
+            candidate = self._entry_from_index(index)
+            if candidate is not None and candidate.section == entry.section:
+                self.list_view.setCurrentIndex(index)
+                self.list_view.scrollTo(index)
+                return True
+        return False
 
     def _image_for(self, section):
         return self._images.get(section)

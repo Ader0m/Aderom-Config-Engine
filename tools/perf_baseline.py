@@ -201,7 +201,7 @@ def _make_services(
     from core.facade import CoreServices
     from core.resolver.assembly import AssemblyService
     from core.tree.builder import TreeBuilder
-    from core.tree.graph import DisabledCache, ReferenceGraphBuilder
+    from core.tree.graph import ReferenceGraphBuilder
     from core.tree.query import TreeQueryService
     from core.xml.service import XmlResolveService
 
@@ -212,7 +212,9 @@ def _make_services(
             cache_service=cache_service,
         ),
         tree_query=TreeQueryService(),
-        graph_builder=ReferenceGraphBuilder(DisabledCache()),
+        graph_builder=ReferenceGraphBuilder(
+            cache_service=cache_service,
+        ),
         resolver_service=resolver,
         assembly_service=AssemblyService(resolver, generated_dir),
         generated_dir=generated_dir,

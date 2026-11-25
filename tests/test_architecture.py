@@ -32,7 +32,7 @@ KNOWN_FILES = {
     "core": ROOT / "core" / "facade.py",
     "ui": ROOT / "ui" / "module_loader.py",
     "sdk": ROOT / "sdk" / "kernel" / "context.py",
-    "modules": ROOT / "modules" / "base_module" / "section_graph.py",
+    "modules": ROOT / "modules" / "base" / "section_graph.py",
 }
 
 
@@ -528,6 +528,12 @@ class ArchitectureBoundaryTest(unittest.TestCase):
                         % (_rel(path), name.value)
                     )
 
+    def test_core_has_no_item_domain(self):
+        self.assertFalse((ROOT / "core" / "items").exists())
+        for path in _files("core"):
+            for name in _import_names(path):
+                self.assertNotEqual(name, "core.items", _rel(path))
+
     def test_app_imports_core_only_through_ports(self):
         for path in _files("app"):
             for name in _import_names(path):
@@ -565,8 +571,8 @@ class ArchitectureBoundaryTest(unittest.TestCase):
 
     def test_relative_import_resolution_catches_escape(self):
         # Проверяем сам алгоритм на искусственном пути: из
-        # modules/base_module/x.py уровень 3 выходит в корень src.
-        package_parts = ["modules", "base_module"]
+        # modules/base/x.py уровень 3 выходит в корень src.
+        package_parts = ["modules", "base"]
         self.assertEqual(
             _resolve_relative(package_parts, 3, "core"),
             ["core"],
@@ -579,13 +585,13 @@ class ArchitectureBoundaryTest(unittest.TestCase):
     def test_import_matrix_detects_artificial_violation(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d) / "src"
-            path = root / "modules" / "base_module" / "broken.py"
+            path = root / "modules" / "base" / "broken.py"
             path.parent.mkdir(parents=True)
             path.write_text("from core import demo\n", encoding="utf-8")
 
             self.assertIn("core", _imports(path, root=root))
 
-            clean = root / "modules" / "base_module" / "clean.py"
+            clean = root / "modules" / "base" / "clean.py"
             clean.write_text("from . import helper\n", encoding="utf-8")
             self.assertNotIn("core", _imports(clean, root=root))
 

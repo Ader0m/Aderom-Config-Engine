@@ -9,13 +9,17 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Optional, Protocol
 
 from .version import version_at_least
 
 
 class CapabilityError(RuntimeError):
     """Базовая ошибка capability."""
+
+    def __init__(self, message, kind=""):
+        super().__init__(message)
+        self.kind = str(kind or "")
 
 
 class MissingCapability(CapabilityError):
@@ -32,6 +36,39 @@ class CapabilityUnavailable(CapabilityError):
 
 class CapabilityConflictError(CapabilityError):
     """Конфликт владельцев одной возможности."""
+
+
+def capability_version_ok(provider_version, min_version) -> bool:
+    """Совместимость capability: major совпадает и версия не ниже."""
+    if not min_version or str(min_version) == "0.0.0":
+        return True
+    from .version import parse_version
+
+    provider = parse_version(provider_version or "0.0.0")
+    required = parse_version(min_version)
+    return provider[0] == required[0] and provider >= required
+
+
+class CapabilitiesApi(Protocol):
+    """Публичный контракт ``ctx.capabilities`` (ADR-32)."""
+
+    def provide(self, name: str, version: str, obj: object):
+        """Предоставить capability; разрешено только в ``register``."""
+
+    def require(self, name: str, min_version: str = "1.0.0"):
+        """Вернуть capability или выбросить ошибку."""
+
+    def optional(self, name: str, min_version: str = "1.0.0"):
+        """Вернуть capability или ``None`` в degraded mode."""
+
+    def has(self, name: str, min_version: str = "") -> bool:
+        """Проверить наличие совместимой capability."""
+
+    def version(self, name: str) -> Optional[str]:
+        """Версия capability или ``None``."""
+
+    def provider(self, name: str) -> Optional[str]:
+        """id модуля-провайдера или ``None``."""
 
 
 @dataclass
@@ -144,7 +181,10 @@ class CapabilityRegistry:
         item = self.get(name)
         if item is None:
             return False
-        if min_version and not version_at_least(item.version, min_version):
+        if min_version and not capability_version_ok(
+            item.version,
+            min_version,
+        ):
             return False
         return True
 
@@ -160,7 +200,10 @@ class CapabilityRegistry:
         item = self.get(name)
         if item is None:
             raise MissingCapability("Возможность не предоставлена: %s" % name)
-        if min_version and not version_at_least(item.version, min_version):
+        if min_version and not capability_version_ok(
+            item.version,
+            min_version,
+        ):
             raise CapabilityVersionError(
                 "Возможность %s: нужна версия >= %s, есть %s"
                 % (name, min_version, item.version)
@@ -175,7 +218,10 @@ class CapabilityRegistry:
         item = self.get(name)
         if item is None or item.obj is None:
             return None
-        if min_version and not version_at_least(item.version, min_version):
+        if min_version and not capability_version_ok(
+            item.version,
+            min_version,
+        ):
             return None
         return item.obj
 

@@ -10,8 +10,8 @@ from tests.support import SRC  # noqa: F401
 from tests.qt_support import qapp
 from sdk.features.items import ItemEntry, ItemField
 from sdk.features.documents import ResolvedDraftInfo
-from ui.platform.sdk_bridge import ItemApiAdapter
-from modules.base_module.item_viewer import ItemCardView, ItemViewerFeature
+from ui.platform.sdk_bridge import ItemCatalogApiAdapter
+from modules.item_browser.item_viewer import ItemCardView, ItemViewerFeature
 
 _app = qapp()
 
@@ -124,7 +124,7 @@ class _Ctx:
         self.services = _Services()
         self.events = None
         self.documents = ui
-        self.items = ItemApiAdapter(self.services, ui)
+        self.items = ItemCatalogApiAdapter(self.services, ui)
         self.projects = ui
 
 

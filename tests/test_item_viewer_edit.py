@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import QMenu
 from tests.qt_support import qapp
 from sdk.features.items import ItemCatalog, ItemEntry, ItemField
 from app.documents import ResolvedDocumentSession
-from modules.base_module.item_viewer import (
+from modules.item_browser.item_viewer import (
     ItemCardView,
     ItemViewerFeature,
     ItemViewerWindow,

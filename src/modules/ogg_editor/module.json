@@ -1,0 +1,41 @@
+{
+  "manifest_version": 1,
+  "id": "ogg_editor",
+  "name": "Редактор звуков (.ogg)",
+  "version": "0.1.0",
+  "description": "Просмотр и правка Vorbis-комментариев .ogg (параметры звука X-Ray) с прослушиванием.",
+  "author": "ACE",
+  "entrypoint": "module:MODULE",
+  "sdk": {
+    "min": "0.13.0"
+  },
+  "requires": [
+    {
+      "id": "base"
+    }
+  ],
+  "optional_requires": [],
+  "needs": [
+    {
+      "name": "section.graph",
+      "min_version": "1.0.0"
+    }
+  ],
+  "optional_needs": [
+    {
+      "name": "item.section.dragdrop",
+      "min_version": "1.0.0"
+    }
+  ],
+  "provides": [
+    {
+      "name": "audio.ogg.editor",
+      "version": "1.0.0"
+    }
+  ],
+  "trust": "trusted",
+  "enabled_by_default": true,
+  "platforms": [
+    "windows"
+  ]
+}

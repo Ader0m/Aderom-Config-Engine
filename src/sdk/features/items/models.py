@@ -131,3 +131,15 @@ class ItemCardRequest:
     tab_id: str
     section: str
     line_number: int = 0
+
+
+@dataclass(frozen=True)
+class ItemCreationPlan:
+    """Готовые тексты нового предмета для записи в проект."""
+
+    section: str
+    tag: str
+    item_text: str
+    xml_text: str
+    name_key: str = ""
+    description_key: str = ""

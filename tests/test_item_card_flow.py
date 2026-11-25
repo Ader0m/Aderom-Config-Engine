@@ -13,9 +13,9 @@ from sdk.features.items import ItemEntry, ItemField
 from ui.bus import EventBus
 from ui.editor import ResolvedView
 from ui.editor_tabs import EditorTabs
-from ui.platform.sdk_bridge import ItemApiAdapter
+from ui.platform.sdk_bridge import ItemCatalogApiAdapter
 from ui.platform_api import PlatformApi
-from modules.base_module.item_viewer import ItemCardView, ItemViewerFeature
+from modules.item_browser.item_viewer import ItemCardView, ItemViewerFeature
 
 _app = qapp()
 
@@ -80,7 +80,7 @@ class _Ctx:
         self.ui = ui
         self.services = _Services()
         self.documents = ui
-        self.items = ItemApiAdapter(self.services, ui)
+        self.items = ItemCatalogApiAdapter(self.services, ui)
         self.projects = ui
 
 

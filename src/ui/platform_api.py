@@ -226,6 +226,7 @@ class PlatformApi(
         commands.register("ui.editor_undo", self.request_editor_undo)
         commands.register("ui.editor_redo", self.request_editor_redo)
         commands.register("ui.editor_find", self.request_editor_find)
+        commands.register("ui.item_card_at_cursor", self.request_item_card_at_cursor)
         commands.register("ui.open_file_at_line", self.request_open_file_at_line)
         commands.register(
             "ui.open_file_raw_at_line",
@@ -1268,6 +1269,19 @@ class PlatformApi(
     def request_editor_find(self):
         if self.window is not None:
             self.window.editor.show_find()
+
+    def request_item_card_at_cursor(self):
+        """Открыть карточку предмета для resolved-вкладки под курсором."""
+        if self.window is None:
+            return False
+        tabs = getattr(self.window, "editor_tabs", None)
+        if tabs is None:
+            return False
+        widget = tabs.currentWidget()
+        opener = getattr(widget, "open_item_card_at_cursor", None)
+        if callable(opener):
+            return bool(opener())
+        return False
 
     def sort_file_tree_by_files_desc(self):
         """Платформенное действие над деревом, без знания SDK о виджете."""

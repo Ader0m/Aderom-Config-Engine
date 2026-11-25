@@ -215,6 +215,9 @@ class GraphMatch:
     # True — related является родителем (искомая секция от него
     # унаследована); False — related является дочерней секцией.
     related_is_parent: bool = False
+    # exact | probable | heuristic. Обязательное keyword-only поле:
+    # модуль должен явно указать уверенность своей связи.
+    confidence: str = field(kw_only=True)
 
 @dataclass(frozen=True)
 class GraphNode:
@@ -255,6 +258,16 @@ class GraphNode:
         if self.matches:
             return self.matches[0].edge_type
         return "declaration"
+
+    @property
+    def primary_confidence(self) -> str:
+        """Уверенность основной связи: exact/probable/heuristic."""
+        if self.matches:
+            return str(
+                getattr(self.matches[0], "confidence", "")
+                or "probable"
+            )
+        return "probable"
 
     @property
     def related_name(self) -> Optional[str]:

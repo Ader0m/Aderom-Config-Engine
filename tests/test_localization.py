@@ -8,7 +8,8 @@ from tempfile import TemporaryDirectory
 from tests.helpers import write_text, touch_after
 from tests.support import SRC  # noqa: F401
 
-from core.items.localization import LocalizationService, clean_text
+from core.cache.service import CacheService
+from core.localization import LocalizationService, clean_text
 
 
 ENGLISH = """<?xml version="1.0" encoding="windows-1251"?>
@@ -93,6 +94,23 @@ class LocalizationTest(unittest.TestCase):
         second = service.signature(config_dir=self.configs)
         self.assertNotEqual(first, second)
 
+    def test_load_reflects_changed_text_file(self):
+        cache = CacheService()
+        service = LocalizationService(cache_service=cache)
+        first = service.load(config_dir=self.configs)
+        self.assertEqual(first.translate("st_shared"), "Русское имя")
+
+        path = self.configs / "text" / "rus" / "ru.xml"
+        write_text(
+            path,
+            RUSSIAN.replace("Русское имя", "Новое имя"),
+        )
+        touch_after(path)
+
+        second = service.load(config_dir=self.configs)
+        self.assertEqual(second.translate("st_shared"), "Новое имя")
+        self.assertIsNot(first, second)
+
     def test_signature_ignores_unrelated_resolved_edits(self):
         from sdk.contracts import ProjectOverlay
 
@@ -129,6 +147,29 @@ class LocalizationTest(unittest.TestCase):
             service.signature(config_dir=self.configs, overlay=clean),
             service.signature(config_dir=self.configs, overlay=edited),
         )
+
+    def test_injected_cache_service_is_used(self):
+        cache = CacheService()
+        service = LocalizationService(cache_service=cache)
+
+        first = service.load(config_dir=self.configs)
+        second = service.load(config_dir=self.configs)
+
+        self.assertIs(first, second)
+        stats = cache.stats()["namespaces"]["localization"]
+        self.assertEqual(stats["computes"], 1)
+        self.assertEqual(stats["hits"], 1)
+
+    def test_clear_memory_recomputes_in_same_cache_service(self):
+        cache = CacheService()
+        service = LocalizationService(cache_service=cache)
+
+        service.load(config_dir=self.configs)
+        service.clear_memory()
+        service.load(config_dir=self.configs)
+
+        stats = cache.stats()["namespaces"]["localization"]
+        self.assertEqual(stats["computes"], 2)
 
     def test_clean_text_handles_escapes_and_colors(self):
         self.assertEqual(

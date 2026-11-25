@@ -3,6 +3,7 @@ import io
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
+from types import SimpleNamespace
 
 from tests.support import SRC  # noqa: F401
 
@@ -498,6 +499,52 @@ class CanonicalRedirectTest(unittest.TestCase):
                 "editor",
             ],
         )
+
+    def test_section_graph_conversion_keeps_confidence(self):
+        class Provider:
+            def build_section_graph(
+                self,
+                forest,
+                section_name,
+                vfs_mode=False,
+                log=None,
+                overlay=None,
+            ):
+                match = SimpleNamespace(
+                    edge_type="ltx_reference",
+                    line_number=2,
+                    line_text="test",
+                    related=None,
+                    related_is_parent=False,
+                    confidence="heuristic",
+                )
+                root = SimpleNamespace(
+                    display_name="test",
+                    file_path=Path("a.ltx"),
+                    first_match_line=1,
+                    matches=[match],
+                    raw_ref=None,
+                    resolved=True,
+                    target_path=None,
+                    physical_path=None,
+                    materialized=False,
+                    related_file_path=None,
+                    related_line=None,
+                    related_resolved=False,
+                )
+                return SimpleNamespace(
+                    section_name=section_name,
+                    root=root,
+                    children=[],
+                    lost_children=[],
+                )
+
+        graph = CoreApiAdapter(Provider()).build_section_graph(
+            object(),
+            "test",
+        )
+
+        self.assertEqual(graph.root.matches[0].confidence, "heuristic")
 
     def test_missing_canonical_method_is_not_replaced(self):
         adapter = CoreApiAdapter(object())

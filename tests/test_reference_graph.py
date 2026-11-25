@@ -2,21 +2,41 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from tests.support import SRC  # noqa: F401
 
+from core.cache.service import CacheService
+from core.facade import CoreServices
 from core.models import LineSource
-from core.tree.graph import ReferenceGraphBuilder
+from core.tools.cache import project_overlay_signature
+from core.tree.graph import (
+    EdgeType,
+    GraphNode,
+    MatchInfo,
+    ReferenceGraphBuilder,
+    _EDGE_CONFIDENCE,
+)
+from sdk.contracts import ProjectOverlay
 
 
 class FakeForest:
-    def __init__(self, roots, files, xml_files, scan_dir):
+    def __init__(
+        self,
+        roots,
+        files,
+        xml_files,
+        scan_dir,
+        cache_id="snapshot-1",
+    ):
         self.roots = roots
         self.files = files
         self.xml_files = xml_files
         self.scan_dir = str(scan_dir)
         self.display_children = {}
         self.rel_paths = {p: p.name for p in files + xml_files}
+        self.cache_id = cache_id
 
 
 class ReferenceGraphTest(unittest.TestCase):
@@ -69,6 +89,356 @@ class ReferenceGraphTest(unittest.TestCase):
         self.assertEqual(
             xml_nodes[0].matches[0].edge_type.value,
             "xml_reference",
+        )
+        self.assertEqual(xml_nodes[0].matches[0].confidence, "probable")
+
+    def test_edge_confidence_rules(self):
+        cases = {
+            EdgeType.DECLARATION: "exact",
+            EdgeType.INHERITANCE: "exact",
+            EdgeType.TEXTURE_REFERENCE: "exact",
+            EdgeType.VISUAL_REFERENCE: "exact",
+            EdgeType.LTX_REFERENCE: "probable",
+            EdgeType.XML_REFERENCE: "probable",
+            EdgeType.SCRIPT_REFERENCE: "heuristic",
+        }
+        for edge_type, expected in cases.items():
+            with self.subTest(edge_type=edge_type):
+                self.assertEqual(
+                    MatchInfo(edge_type, 1, "").confidence,
+                    expected,
+                )
+
+    def test_edge_confidence_table_covers_all_types(self):
+        self.assertEqual(set(EdgeType), set(_EDGE_CONFIDENCE))
+
+    def test_graph_node_primary_confidence(self):
+        exact = GraphNode(
+            display_name="test",
+            file_path=None,
+            first_match_line=1,
+            matches=[MatchInfo(EdgeType.DECLARATION, 1, "")],
+        )
+        probable = GraphNode(
+            display_name="test",
+            file_path=None,
+            first_match_line=2,
+            matches=[MatchInfo(EdgeType.LTX_REFERENCE, 2, "")],
+        )
+
+        self.assertEqual(exact.primary_confidence, "exact")
+        self.assertEqual(probable.primary_confidence, "probable")
+
+    def test_script_reference_is_heuristic(self):
+        self.system.write_text("[test]\nx=1\n", encoding="utf-8")
+        script = self.root / "test.script"
+        script.write_text("local value = test\n", encoding="utf-8")
+        forest = FakeForest(
+            roots=[self.system],
+            files=[self.system],
+            xml_files=[],
+            scan_dir=self.root,
+        )
+
+        graph = ReferenceGraphBuilder().build_for_section(
+            forest,
+            "test",
+            vfs_mode=True,
+        )
+
+        script_matches = [
+            match
+            for node in graph.children
+            if node.file_path == script
+            for match in node.matches
+            if match.edge_type.value == "script_reference"
+        ]
+        self.assertEqual(len(script_matches), 1)
+        self.assertEqual(script_matches[0].confidence, "heuristic")
+
+    def test_graph_result_is_cached_by_snapshot(self):
+        forest = FakeForest(
+            roots=[self.system],
+            files=[self.system],
+            xml_files=[],
+            scan_dir=self.root,
+        )
+        cache = CacheService()
+        builder = ReferenceGraphBuilder(cache_service=cache)
+        calls = []
+        text = "[test]\nx=1\n"
+        sources = [LineSource(kind="original") for _ in text.splitlines()]
+
+        def provider(_path):
+            calls.append(1)
+            return text, sources
+
+        first = builder.build_for_section(
+            forest,
+            "test",
+            resolved_provider=provider,
+        )
+        second = builder.build_for_section(
+            forest,
+            "test",
+            resolved_provider=provider,
+        )
+
+        self.assertIsNot(first, second)
+        self.assertEqual(first.section_name, second.section_name)
+        self.assertEqual(len(first.children), len(second.children))
+        self.assertEqual(calls, [1])
+        stats = cache.stats()["namespaces"]["graph.section"]
+        self.assertEqual(stats["computes"], 1)
+        self.assertEqual(stats["hits"], 1)
+
+        first.root.display_name = "mutated"
+        third = builder.build_for_section(
+            forest,
+            "test",
+            resolved_provider=provider,
+        )
+        self.assertNotEqual(third.root.display_name, "mutated")
+
+    def test_graph_result_cache_is_invalidated_by_snapshot(self):
+        first_forest = FakeForest(
+            roots=[self.system],
+            files=[self.system],
+            xml_files=[],
+            scan_dir=self.root,
+            cache_id="snapshot-1",
+        )
+        second_forest = FakeForest(
+            roots=[self.system],
+            files=[self.system],
+            xml_files=[],
+            scan_dir=self.root,
+            cache_id="snapshot-2",
+        )
+        builder = ReferenceGraphBuilder(cache_service=CacheService())
+        calls = []
+        text = "[test]\nx=1\n"
+        sources = [LineSource(kind="original") for _ in text.splitlines()]
+
+        def provider(_path):
+            calls.append(1)
+            return text, sources
+
+        first = builder.build_for_section(
+            first_forest,
+            "test",
+            resolved_provider=provider,
+        )
+        second = builder.build_for_section(
+            second_forest,
+            "test",
+            resolved_provider=provider,
+        )
+
+        self.assertIsNot(first, second)
+        self.assertEqual(calls, [1, 1])
+
+    def test_fallback_graph_is_not_cached(self):
+        self.system.write_text("[test]\nx=1\n", encoding="utf-8")
+        forest = FakeForest(
+            roots=[self.system],
+            files=[self.system],
+            xml_files=[],
+            scan_dir=self.root,
+        )
+        builder = ReferenceGraphBuilder(cache_service=CacheService())
+        calls = []
+        text = "[test]\nx=1\n"
+        sources = [LineSource(kind="original") for _ in text.splitlines()]
+
+        def failing(_path):
+            calls.append("fail")
+            raise RuntimeError("resolver unavailable")
+
+        first = builder.build_for_section(
+            forest,
+            "test",
+            resolved_provider=failing,
+        )
+
+        def working(_path):
+            calls.append("ok")
+            return text, sources
+
+        second = builder.build_for_section(
+            forest,
+            "test",
+            resolved_provider=working,
+        )
+
+        self.assertFalse(first.root.resolved)
+        self.assertTrue(second.root.resolved)
+        self.assertIsNot(first, second)
+        self.assertEqual(calls, ["fail", "ok"])
+
+    def test_partial_resolved_graph_is_not_cached(self):
+        extra = self.root / "extra.ltx"
+        self.system.write_text("[test]\nx=1\n", encoding="utf-8")
+        extra.write_text("[test]\ny=2\n", encoding="utf-8")
+        forest = FakeForest(
+            roots=[self.system, extra],
+            files=[self.system, extra],
+            xml_files=[],
+            scan_dir=self.root,
+        )
+        builder = ReferenceGraphBuilder(cache_service=CacheService())
+        calls = []
+        text = "[test]\nx=1\n"
+        sources = [LineSource(kind="original") for _ in text.splitlines()]
+
+        def partial(path):
+            calls.append(path)
+            if path == extra:
+                raise RuntimeError("root unavailable")
+            return text, sources
+
+        first = builder.build_for_section(
+            forest,
+            "test",
+            resolved_provider=partial,
+        )
+
+        def working(path):
+            calls.append(path)
+            return text, sources
+
+        second = builder.build_for_section(
+            forest,
+            "test",
+            resolved_provider=working,
+        )
+
+        self.assertTrue(first.root.resolved)
+        self.assertTrue(second.root.resolved)
+        self.assertIsNot(first, second)
+        self.assertEqual(len(calls), 4)
+
+    def test_file_cache_tracks_file_stamp(self):
+        builder = ReferenceGraphBuilder(cache_service=CacheService())
+        self.system.write_text("[first]\n", encoding="utf-8")
+        first = builder._read_file(self.system)
+
+        self.system.write_text("[second]\n", encoding="utf-8")
+        second = builder._read_file(self.system)
+
+        self.assertEqual(first.splitlines(), ["[first]"])
+        self.assertEqual(second.splitlines(), ["[second]"])
+
+    def test_read_error_is_not_cached(self):
+        builder = ReferenceGraphBuilder(cache_service=CacheService())
+        self.system.write_text("", encoding="utf-8")
+
+        with patch(
+            "core.tree.graph.read_text_safe",
+            side_effect=[OSError("busy"), "[ok]\n"],
+        ):
+            first = builder._read_file(self.system)
+            second = builder._read_file(self.system)
+
+        self.assertEqual(first, "")
+        self.assertEqual(second.splitlines(), ["[ok]"])
+
+    def test_clear_cache_forces_graph_rebuild(self):
+        forest = FakeForest(
+            roots=[self.system],
+            files=[self.system],
+            xml_files=[],
+            scan_dir=self.root,
+        )
+        builder = ReferenceGraphBuilder(cache_service=CacheService())
+        calls = []
+        text = "[test]\nx=1\n"
+        sources = [LineSource(kind="original") for _ in text.splitlines()]
+
+        def provider(_path):
+            calls.append(1)
+            return text, sources
+
+        builder.build_for_section(
+            forest,
+            "test",
+            resolved_provider=provider,
+        )
+        builder.clear_cache()
+        builder.build_for_section(
+            forest,
+            "test",
+            resolved_provider=provider,
+        )
+
+        self.assertEqual(calls, [1, 1])
+
+    def test_invalidate_paths_clears_graph_cache(self):
+        forest = FakeForest(
+            roots=[self.system],
+            files=[self.system],
+            xml_files=[],
+            scan_dir=self.root,
+        )
+        builder = ReferenceGraphBuilder(cache_service=CacheService())
+        calls = []
+        text = "[test]\nx=1\n"
+        sources = [LineSource(kind="original") for _ in text.splitlines()]
+
+        def provider(_path):
+            calls.append(1)
+            return text, sources
+
+        builder.build_for_section(
+            forest,
+            "test",
+            resolved_provider=provider,
+        )
+
+        services = CoreServices.__new__(CoreServices)
+        services.graph_builder = builder
+        services.resolver = SimpleNamespace(
+            invalidate_roots=lambda _roots: None,
+        )
+        services.invalidate_paths([self.system])
+
+        builder.build_for_section(
+            forest,
+            "test",
+            resolved_provider=provider,
+        )
+
+        self.assertEqual(calls, [1, 1])
+
+    def test_facade_graph_snapshot_includes_overlay(self):
+        class RecordingBuilder:
+            def __init__(self):
+                self.kwargs = None
+
+            def build_for_section(self, *args, **kwargs):
+                self.kwargs = kwargs
+                return object()
+
+        builder = RecordingBuilder()
+        services = CoreServices.__new__(CoreServices)
+        services.graph_builder = builder
+        forest = SimpleNamespace(
+            scan_dir=str(self.root),
+            cache_id="snapshot-1",
+        )
+        overlay = ProjectOverlay(
+            source_files={self.xml: "<root/>"},
+        )
+
+        services.build_section_graph(
+            forest,
+            "test",
+            overlay=overlay,
+        )
+
+        self.assertEqual(
+            builder.kwargs["snapshot_id"],
+            "snapshot-1|" + project_overlay_signature(overlay),
         )
 
     def test_xml_not_reported_as_lost_when_found_in_raw_graph(self):
@@ -249,12 +619,14 @@ class ReferenceGraphTest(unittest.TestCase):
         self.assertEqual(tex_node.target_path, texture)
         self.assertEqual(tex_node.physical_path, texture)
         self.assertEqual(tex_node.first_match_line, 2)
+        self.assertEqual(tex_node.matches[0].confidence, "exact")
 
         visual_node = by_type["visual_reference"]
         self.assertEqual(visual_node.display_name, "mili_maps.ogf")
         self.assertEqual(visual_node.target_path, model)
         self.assertIsNone(visual_node.physical_path)
         self.assertEqual(visual_node.first_match_line, 3)
+        self.assertEqual(visual_node.matches[0].confidence, "exact")
 
     def test_asset_without_disk_file_keeps_reference(self):
         self.system.write_text(
@@ -342,6 +714,7 @@ class ReferenceGraphTest(unittest.TestCase):
                 node.matches[0].edge_type.value,
                 "inheritance",
             )
+            self.assertEqual(node.matches[0].confidence, "exact")
             self.assertEqual(node.file_path, self.system)
             self.assertEqual(node.first_match_line, 1)
             self.assertEqual(node.related_file_path, parents_file)

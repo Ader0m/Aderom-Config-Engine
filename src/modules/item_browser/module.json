@@ -1,0 +1,31 @@
+{
+  "manifest_version": 1,
+  "id": "item_browser",
+  "name": "Просмотр предметов",
+  "version": "0.1.0",
+  "description": "Каталог игровых предметов, карточки, иконки и drag-and-drop предметных секций.",
+  "author": "ACE",
+  "entrypoint": "module:MODULE",
+  "sdk": {
+    "min": "0.13.0"
+  },
+  "requires": [],
+  "optional_requires": [],
+  "needs": [],
+  "optional_needs": [],
+  "provides": [
+    {
+      "name": "items.catalog",
+      "version": "1.0.0"
+    },
+    {
+      "name": "item.section.dragdrop",
+      "version": "1.0.0"
+    }
+  ],
+  "trust": "trusted",
+  "enabled_by_default": true,
+  "platforms": [
+    "windows"
+  ]
+}

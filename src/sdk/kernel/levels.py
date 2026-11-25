@@ -20,15 +20,21 @@ API_LEVELS = {
     "ModuleManifest": ApiLevel.STABLE,
     "ModuleRequirement": ApiLevel.STABLE,
     "ModuleContext": ApiLevel.STABLE,
-    "CapabilityRegistry": ApiLevel.STABLE,
+    "CapabilitiesApi": ApiLevel.STABLE,
+    "Capability": ApiLevel.STABLE,
     "CoreApi": ApiLevel.STABLE,
     "UiApi": ApiLevel.STABLE,
     "TaskApi": ApiLevel.STABLE,
     "EventApi": ApiLevel.STABLE,
     "CommandApi": ApiLevel.STABLE,
     "DocumentApi": ApiLevel.EXPERIMENTAL,
+    "DocumentViewerApi": ApiLevel.EXPERIMENTAL,
     "PatchApi": ApiLevel.EXPERIMENTAL,
-    "ItemApi": ApiLevel.EXPERIMENTAL,
+    "ItemCatalogApi": ApiLevel.EXPERIMENTAL,
+    "ItemSectionDropApi": ApiLevel.EXPERIMENTAL,
+    "SectionGraphApi": ApiLevel.EXPERIMENTAL,
+    "ProjectAssetsApi": ApiLevel.EXPERIMENTAL,
+    "OggEditorApi": ApiLevel.EXPERIMENTAL,
 }
 
 

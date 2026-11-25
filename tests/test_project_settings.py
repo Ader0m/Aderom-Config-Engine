@@ -259,6 +259,33 @@ class _OggCommands:
         pass
 
 
+class _OggGraphApi:
+    class _Handle:
+        def unsubscribe(self):
+            pass
+
+    def register_contributor(self, _contributor):
+        return self._Handle()
+
+    def unregister_contributor(self, _handle):
+        pass
+
+
+class _OggCapabilities:
+    def provide(self, *_args, **_kwargs):
+        pass
+
+    def require(self, name, min_version="1.0.0"):
+        if name == "section.graph":
+            return _OggGraphApi()
+        raise AssertionError("unexpected capability: %s" % name)
+
+    def optional(self, name, min_version="1.0.0"):
+        if name == "item.section.dragdrop":
+            return object()
+        return None
+
+
 class _OggServices:
     def register_section_graph_contributor(self, _contributor):
         pass
@@ -269,6 +296,7 @@ class _OggCtx:
         self.ui = _OggUi()
         self.commands = _OggCommands()
         self.services = _OggServices()
+        self.capabilities = _OggCapabilities()
         self.documents = self.ui
         self.items = self.services
         self.projects = self.ui
@@ -355,6 +383,9 @@ class OggProjectSettingTest(unittest.TestCase):
         module._suspend_refresh = False
 
         module.register(ctx)
+
+        self.assertTrue(module._dragdrop_enabled)
+        self.assertIsNotNone(module._section_graph_handle)
 
         self.assertEqual(
             [setting.key for setting in ctx.ui.settings],

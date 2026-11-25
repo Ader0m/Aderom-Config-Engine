@@ -18,6 +18,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from core.tools.external import open_in_notepad_pp, open_with_shell
+from core.tools.cache import project_overlay_signature
 from core.tools.fs import (
     detect_config_dir,
     find_system_ltx,
@@ -26,9 +27,9 @@ from core.tools.fs import (
 )
 from core.patching.targets import resolve_patch_target
 from core.tree.builder import add_virtual_file, remove_virtual_file
-from core.items.catalog import ItemCatalogService
-from core.items.icons import ItemIconService
-from core.items.localization import LocalizationService
+from core.localization import (  # noqa: F401
+    LocalizationService,
+)
 from core.catalogs import (
     ColorCatalog,
     IncludeCatalog,
@@ -71,6 +72,7 @@ class CoreServices:
     snapshot_service = None
     semantic_query = None
     patch_commit = None
+    graph_builder = None
 
     def __init__(
         self,
@@ -128,22 +130,14 @@ class CoreServices:
         # корень, а не SDK-адаптер: адаптер только передаёт ссылку.
         self.section_graph_contributors = []
 
-        # Кэш каталога и иконок переживает перезапуск приложения:
-        # ключи включают снимок LTX-поддерева и подписи DDS-атласов.
-        item_cache_dir = self.generated_dir / "cache-v2" / "items"
+        # Кэш локализации переживает перезапуск приложения.
+        localization_cache_dir = (
+            self.generated_dir / "cache-v2" / "localization"
+        )
         self.localization = LocalizationService(
-            cache_dir=item_cache_dir,
+            cache_dir=localization_cache_dir,
             max_disk_bytes=256_000_000,
-        )
-        self.items = ItemCatalogService(
-            resolver_service,
-            cache_dir=item_cache_dir,
-            localization_service=self.localization,
-            max_disk_bytes=256_000_000,
-        )
-        self.item_icons = ItemIconService(
-            cache_dir=item_cache_dir,
-            max_disk_bytes=256_000_000,
+            cache_service=cache_service,
         )
 
         # Каталоги для подсказок и других потребителей. Они не зависят
@@ -210,10 +204,8 @@ class CoreServices:
             self.resolver.invalidate_cache()
         if hasattr(self.xml, "clear"):
             self.xml.clear()
-        if hasattr(self.items, "clear_memory"):
-            self.items.clear_memory()
-        if hasattr(self.item_icons, "clear_memory"):
-            self.item_icons.clear_memory()
+        if self.graph_builder is not None:
+            self.graph_builder.clear_cache()
         if hasattr(self.localization, "clear_memory"):
             self.localization.clear_memory()
         for name in (
@@ -230,8 +222,8 @@ class CoreServices:
     def invalidate_resolver_cache(self):
         """Сбросить только резолвер/XML и пометить предсборку устаревшей.
 
-        Используется при правках файлов: предметный и локализационный
-        кеши при каждом изменении текста пересоздавать не нужно.
+        Используется при правках файлов: локализационный кеш при каждом
+        изменении текста пересоздавать не нужно.
         """
         with self._prebuild_guard():
             self._prebuild_stale = True
@@ -240,6 +232,8 @@ class CoreServices:
             self.resolver.invalidate_cache()
         if hasattr(self.xml, "clear"):
             self.xml.clear()
+        if self.graph_builder is not None:
+            self.graph_builder.clear_cache()
 
     def invalidate_paths(self, roots):
         """Инвалидировать кэш только для заданных корней."""
@@ -252,6 +246,8 @@ class CoreServices:
             invalidate_roots(roots)
         elif hasattr(self.resolver, "invalidate_cache"):
             self.resolver.invalidate_cache()
+        if self.graph_builder is not None:
+            self.graph_builder.clear_cache()
 
     # -------------------------------------------------- фоновая предсборка
 
@@ -593,83 +589,6 @@ class CoreServices:
         """
         return self.assembly.assemble_to_file(root_path, forest)
 
-    # -------------------------------------------------- предметы и иконки
-
-    def item_catalog_root(self, forest):
-        """Корень, из которого собирается каталог предметов."""
-        return self.items.find_root(forest)
-
-    def build_item_catalog(
-        self,
-        forest,
-        log=None,
-        resolved_text=None,
-        reuse_snapshot_cache=False,
-        overlay=None,
-    ):
-        """Разобрать корневой файл предметов и вернуть каталог."""
-        return self.items.build(
-            forest,
-            log=log,
-            resolved_text=resolved_text,
-            reuse_snapshot_cache=reuse_snapshot_cache,
-            overlay=overlay,
-        )
-
-    def build_item_entry(
-        self,
-        forest,
-        resolved_text,
-        section,
-        log=None,
-        overlay=None,
-    ):
-        """Собрать один предмет из текущего resolved-текста."""
-        return self.items.build_entry(
-            forest,
-            resolved_text,
-            section,
-            log=log,
-            overlay=overlay,
-        )
-
-    def build_item_entry_from_block(
-        self,
-        forest,
-        block_text,
-        section,
-        offset=0,
-        log=None,
-        overlay=None,
-    ):
-        """Собрать один предмет из готового блока секции."""
-        return self.items.build_entry_from_block(
-            forest,
-            block_text,
-            section,
-            offset=offset,
-            log=log,
-            overlay=overlay,
-        )
-
-    def edit_localization_text(self, text, key, value):
-        """Изменить текст строки локализации в XML-документе."""
-        from core.items.localization import edit_localization_text
-
-        return edit_localization_text(text, key, value)
-
-    def read_texture_region(self, path, x, y, width, height):
-        """Декодировать прямоугольник DDS в RGBA (с кэшем регионов)."""
-        return self.item_icons.read_region(path, x, y, width, height)
-
-    def load_item_icons(self, catalog_key, requests, log=None):
-        """Пакетно загрузить иконки: кэш + пул процессов."""
-        return self.item_icons.load(
-            catalog_key,
-            requests,
-            log=log,
-        )
-
     # -------------------------------------------------- граф связей
 
     def build_section_graph(
@@ -726,6 +645,14 @@ class CoreServices:
                     reported["error"] = True
                 return None
 
+        forest_snapshot = str(getattr(forest, "cache_id", "") or "")
+        snapshot_id = ""
+        if forest_snapshot:
+            snapshot_id = "%s|%s" % (
+                forest_snapshot,
+                project_overlay_signature(overlay),
+            )
+
         try:
             return self.graph_builder.build_for_section(
                 forest,
@@ -734,6 +661,8 @@ class CoreServices:
                 resolved_provider=resolved_provider,
                 xml_provider=xml_provider,
                 log=log,
+                snapshot_id=snapshot_id,
+                provider_id="core",
             )
         finally:
             if log:

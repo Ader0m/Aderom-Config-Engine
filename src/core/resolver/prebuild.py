@@ -290,7 +290,7 @@ class PrebuildService:
                     continue
                 seen.add(key)
                 # Виртуальный XML проекта может ещё не существовать на
-                # диске; его разрешение не нужно для каталога предметов.
+                # диске; его разрешение не нужно для каталога ресурсов.
                 if not path.is_file():
                     continue
                 xml_targets.append(path)

@@ -14,6 +14,19 @@ from sdk.features.documents.models import (
 )
 
 
+class DocumentViewerApi(Protocol):
+    """Capability просмотра документов конкретного формата."""
+
+    def open_document(self, path: Path, line_number=None) -> bool:
+        """Открыть документ в режиме просмотра/резолва."""
+
+    def open_raw_document(self, path: Path, line_number=None) -> bool:
+        """Открыть исходный текст документа."""
+
+    def open_resolved_document(self, path: Path, line_number=None) -> bool:
+        """Открыть resolved-представление документа."""
+
+
 class DocumentApi(Protocol):
     """Документы проекта и живые resolved-документы."""
 

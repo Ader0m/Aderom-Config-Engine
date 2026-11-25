@@ -69,7 +69,7 @@ class RegistrationHandle:
 class RegistrationScope:
     """Все регистрации одного модуля.
 
-    ``owner`` — имя модуля из ``manifest.name``. Scope создаёт
+    ``owner`` — id модуля из ``module.json``. Scope создаёт
     ``ModuleContext``; загрузчик вызывает :meth:`dispose` после
     ``module.deactivate()``.
     """

@@ -15,6 +15,7 @@ from tests.support import SRC  # noqa: F401
 
 from sdk.contracts.events import Events
 from sdk.features.items import ITEM_SECTION_MIME, encode_item_section
+from ui.platform.module_manifest import read_module_manifest
 from tests.test_ogg_comment import _make_file
 
 from modules.ogg_editor import editor_tab as editor_tab_module
@@ -229,10 +230,13 @@ class OggEditorUiTest(unittest.TestCase):
                 tab.dispose()
 
     def test_module_manifest_and_extension_filter(self):
-        module = OggEditorModule()
-        self.assertEqual(module.manifest.name, "ogg_editor")
-        self.assertEqual(module.manifest.sdk_min, "0.1.0")
-        self.assertEqual(module.manifest.requires, ("base",))
+        manifest = read_module_manifest(SRC / "modules" / "ogg_editor")
+        self.assertEqual(manifest.id, "ogg_editor")
+        self.assertEqual(manifest.sdk_min, "0.13.0")
+        self.assertEqual(
+            tuple(item.id for item in manifest.requires),
+            ("base",),
+        )
 
     def test_theme_event_refreshes_open_window_and_tabs(self):
         ctx = _Ctx()
@@ -1218,6 +1222,26 @@ snd_2_layer = weapons\\far
                 self.assertEqual(names, {"ambient", "click.ogg"})
             finally:
                 window.close()
+
+
+class DragdropCapabilityTest(unittest.TestCase):
+    def test_window_rejects_item_drop_without_capability(self):
+        window = OggExplorerWindow(
+            _Ctx(),
+            on_open=lambda path: None,
+            on_add=lambda: None,
+            dragdrop_enabled=False,
+        )
+        try:
+            mime = QMimeData()
+            mime.setData(ITEM_SECTION_MIME, b"{}")
+
+            self.assertFalse(window.can_accept_drop(mime))
+
+            window._dragdrop_enabled = True
+            self.assertTrue(window.can_accept_drop(mime))
+        finally:
+            window.close()
 
 
 if __name__ == "__main__":

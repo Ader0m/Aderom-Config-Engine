@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Проект: настройки, asset-типы, читатели файлов."""
 
-from .api import ProjectApi
+from .api import ProjectApi, ProjectAssetsApi
 from .models import (
     AssetDraftInfo,
     ProjectAssetType,
@@ -13,6 +13,7 @@ from .models import (
 
 __all__ = [
     "ProjectApi",
+    "ProjectAssetsApi",
     "AssetDraftInfo",
     "ProjectAssetType",
     "ProjectChanged",

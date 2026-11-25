@@ -141,6 +141,9 @@ def _to_graph_node_view(node) -> GraphNode:
             related_is_parent=bool(
                 getattr(match, "related_is_parent", False)
             ),
+            confidence=str(
+                getattr(match, "confidence", "") or "probable"
+            ),
         )
         for match in (getattr(node, "matches", ()) or ())
     )

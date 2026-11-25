@@ -93,23 +93,66 @@ class CapabilityRegistryTest(unittest.TestCase):
         self.assertFalse(registry.discard("demo.cap"))
 
 
+    def test_major_version_mismatch_is_incompatible(self):
+        registry = CapabilityRegistry()
+        provider = CapabilityScope(registry, "provider")
+        provider.provide("demo.cap", "2.0.0", {"value": 1})
+        consumer = CapabilityScope(registry, "consumer")
+
+        with self.assertRaises(CapabilityVersionError):
+            consumer.require("demo.cap", min_version="1.0.0")
+        self.assertIsNone(consumer.optional("demo.cap", "1.0.0"))
+        self.assertFalse(consumer.has("demo.cap", "1.0.0"))
+
+    def test_sdk_public_capability_api_has_no_registry(self):
+        import sdk
+
+        for name in (
+            "CapabilitiesApi",
+            "Capability",
+            "CapabilityError",
+            "MissingCapability",
+            "CapabilityVersionError",
+            "CapabilityUnavailable",
+            "CapabilityConflictError",
+            "MODULE_MANIFEST_VERSION",
+        ):
+            self.assertIn(name, sdk.__all__)
+        self.assertNotIn("CapabilityRegistry", sdk.__all__)
+        self.assertNotIn("CapabilityScope", sdk.__all__)
+
+
 class ManifestSdkMaxTest(unittest.TestCase):
     def test_sdk_max_is_checked(self):
         self.assertTrue(
             check_manifest(
-                ModuleManifest(name="demo", sdk_min="0.1.0", sdk_max="0.3.0"),
+                ModuleManifest(
+                    id="demo",
+                    name="Demo",
+                    sdk_min="0.1.0",
+                    sdk_max="0.3.0",
+                ),
                 "0.3.0",
             )
         )
         self.assertFalse(
             check_manifest(
-                ModuleManifest(name="demo", sdk_min="0.1.0", sdk_max="0.2.9"),
+                ModuleManifest(
+                    id="demo",
+                    name="Demo",
+                    sdk_min="0.1.0",
+                    sdk_max="0.2.9",
+                ),
                 "0.3.0",
             )
         )
         self.assertFalse(
             check_manifest(
-                ModuleManifest(name="demo", sdk_min="0.4.0"),
+                ModuleManifest(
+                    id="demo",
+                    name="Demo",
+                    sdk_min="0.4.0",
+                ),
                 "0.3.0",
             )
         )

@@ -57,10 +57,13 @@ class ModuleApiTest(unittest.TestCase):
         self.assertEqual(UI_SEARCH_DELAY_MS, DEFAULT_SEARCH_DELAY_MS)
 
     def test_manifest_defaults(self):
-        manifest = ModuleManifest(name="test_module")
+        manifest = ModuleManifest(id="test_module", name="Тестовый модуль")
 
-        self.assertEqual(manifest.name, "test_module")
+        self.assertEqual(manifest.id, "test_module")
+        self.assertEqual(manifest.name, "Тестовый модуль")
         self.assertEqual(manifest.version, "0.0.0")
+        self.assertEqual(manifest.manifest_version, 1)
+        self.assertEqual(manifest.entrypoint, "module:MODULE")
         self.assertEqual(manifest.sdk_min, "0.1.0")
         self.assertEqual(manifest.description, "")
         self.assertEqual(manifest.author, "")
@@ -69,6 +72,9 @@ class ModuleApiTest(unittest.TestCase):
         self.assertEqual(manifest.provides, ())
         self.assertEqual(manifest.needs, ())
         self.assertEqual(manifest.optional_needs, ())
+        self.assertEqual(manifest.trust, "trusted")
+        self.assertTrue(manifest.enabled_by_default)
+        self.assertEqual(manifest.platforms, ("windows",))
 
     def test_module_base_lifecycle_methods_are_callable(self):
         module = ModuleBase()
