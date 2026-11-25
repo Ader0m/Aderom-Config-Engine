@@ -10,8 +10,8 @@ from tests.support import SRC  # noqa: F401
 
 from sdk.contracts import ProjectOverlay
 
-from core.facade import CoreServices
 from core.resolver.service import ResolverService
+from core.services.prebuild import PrebuildServices
 from core.tools.cache import FileCacheSystem, ResolvedCache
 from core.tree.builder import TreeBuilder
 from ui.platform_api import PlatformApi
@@ -50,6 +50,12 @@ class _Services:
         self.invalidated = []
         self.full_invalidations = 0
         self.prebuild_starts = []
+        self.tree = self
+        self.cache_control = SimpleNamespace(
+            invalidate_paths=self.invalidate_paths,
+            invalidate_resolver_cache=self.invalidate_resolver_cache,
+        )
+        self.prebuild = SimpleNamespace(ensure=self.ensure_prebuild)
 
     def invalidate_paths(self, roots):
         self.invalidated.append(set(roots))
@@ -342,20 +348,37 @@ class SectionGraphPrebuildFlowTest(unittest.TestCase):
     """«Связи секции» после правки не должны запускать полную пересборку."""
 
     def _services(self, forest, config_dir):
-        services = CoreServices.__new__(CoreServices)
-        services.cache = _CoreCache()
-        services.resolver = _CoreResolver()
-        services.xml = _CoreXml()
-        services.items = _CoreItems()
-        services.item_icons = _CoreItems()
-        services.localization = _CoreItems()
-        services.prebuild = _FakePrebuild()
-        services._prebuild_forest = forest
-        services._prebuild_config_dir = config_dir
-        services._prebuild_overlay = {}
-        services._prebuild_stale = False
-        services._prebuild_roots = None
-        return services
+        prebuild = PrebuildServices(
+            None,
+            None,
+            service=_FakePrebuild(),
+        )
+        prebuild._forest = forest
+        prebuild._config_dir = config_dir
+        resolver = _CoreResolver()
+        cache_control = SimpleNamespace(
+            invalidate_paths=lambda roots: (
+                prebuild.mark_stale(roots),
+                resolver.invalidated_roots.append(set(roots)),
+            ),
+            invalidate_resolver_cache=prebuild.mark_stale,
+        )
+        return SimpleNamespace(
+            cache=_CoreCache(),
+            tree=SimpleNamespace(
+                add_virtual_file=lambda *args: False,
+                remove_virtual_file=lambda *args: False,
+            ),
+            resolver=resolver,
+            resolve=SimpleNamespace(
+                resolver=resolver,
+                invalidate_cache=lambda: None,
+                invalidate_roots=lambda roots: None,
+            ),
+            xml=_CoreXml(),
+            prebuild=prebuild,
+            cache_control=cache_control,
+        )
 
     def test_graph_flow_prebuilds_only_edited_root(self):
         with tempfile.TemporaryDirectory() as d:
@@ -386,15 +409,15 @@ class SectionGraphPrebuildFlowTest(unittest.TestCase):
 
             # Ровно так граф связей просит предсборку перед поиском.
             self.assertTrue(
-                services.ensure_prebuild(
+                services.prebuild.ensure(
                     forest,
                     config_dir,
                     overlay=api.project_overlay(),
                 )
             )
-            services.wait_prebuild(timeout=120)
+            services.prebuild.wait(timeout=120)
 
-            starts = services.prebuild.starts
+            starts = services.prebuild.prebuild.starts
             self.assertEqual(len(starts), 1)
             self.assertEqual(starts[-1][3], {root})
             self.assertEqual(services.resolver.invalidated_roots, [{root}])

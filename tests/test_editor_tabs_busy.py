@@ -29,6 +29,11 @@ class _Window(QMainWindow):
 
 
 class _Services:
+    def __init__(self):
+        self.tree = self
+        self.cache_control = self
+        self.resolve = self
+
     def invalidate_paths(self, _roots):
         pass
 

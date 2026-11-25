@@ -4,7 +4,6 @@
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 
 from tests.support import SRC  # noqa: F401
 from tests.helpers import write_text
@@ -24,21 +23,20 @@ class ItemFeatureCacheTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             cache = CacheService()
-            services = SimpleNamespace(
-                generated_dir=root / "generated",
+            localization = LocalizationService(cache_service=cache)
+            localization_index = LocalizationIndex()
+            resolver = object()
+
+            feature = ItemFeatureService(
                 cache_service=cache,
-                localization=LocalizationService(cache_service=cache),
-                localization_index=LocalizationIndex(),
-                resolver=object(),
+                generated_dir=root / "generated",
+                localization=localization,
+                localization_index=localization_index,
+                resolver=resolver,
             )
 
-            feature = ItemFeatureService(services)
-
-            self.assertIs(feature.localization, services.localization)
-            self.assertIs(
-                feature.localization_index,
-                services.localization_index,
-            )
+            self.assertIs(feature.localization, localization)
+            self.assertIs(feature.localization_index, localization_index)
             self.assertIs(feature.catalog._cache_service, cache)
             self.assertIs(feature.icons._cache_service, cache)
 
@@ -50,7 +48,7 @@ class ItemFeatureCacheTest(unittest.TestCase):
                 "</string_table>\n",
             )
             first = feature.localization.load(config_dir=configs)
-            second = services.localization.load(config_dir=configs)
+            second = localization.load(config_dir=configs)
 
             self.assertIs(first, second)
             self.assertEqual(first.translate("st_name"), "Name")

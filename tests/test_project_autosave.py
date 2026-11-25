@@ -7,7 +7,8 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from app.projects import PreviewItem, ProjectService
+from app.patching.models import PreviewItem
+from app.projects import ProjectService
 from app.projects.use_cases import rollback_preview_item
 
 

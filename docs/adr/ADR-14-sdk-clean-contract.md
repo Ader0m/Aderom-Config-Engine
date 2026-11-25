@@ -77,8 +77,9 @@ resolved-модели и реализации адаптеров. `ModuleContext
 - `app` больше не импортирует `core` напрямую и зависит только от
   `core.api.*`.
 - `core/facade.py` и `core/__init__.py` остаются переходными: их
-  публичная поверхность сужается на Этапе 9. `CoreServices` пока
-  доступен через порт `core.api.services`.
+  публичная поверхность сужается на Этапе 9. На момент ADR
+  `CoreServices` был доступен через порт `core.api.services`; в аудите
+  25.11.2026 порт удалён, см. обновление ниже.
 - `ctx.items`/`ctx.projects`/`ctx.documents` — переходные feature-API.
   Доменный `items.catalog` как capability и вынос в модуль закрываются
   на Этапе 7.
@@ -93,3 +94,10 @@ resolved-модели и реализации адаптеров. `ModuleContext
 - Этап 7: item-домен и capability `items.catalog` переезжают в модуль.
 - Этап 9: `CoreServices` и `core/__init__.py` сужаются до явных портов,
   transitional-адаптеры удаляются.
+
+### Обновление 25.11.2026
+
+`SDK-3`/`SDK-4` закрыты: `core/__init__.py` пуст, `core/api/services.py`
+удалён. `CoreServices` заменён внутренним `CoreComposition` в
+`core/composition.py`; composition root импортирует его напрямую, а
+`app`/`ui`/`modules`/`sdk` — нет.

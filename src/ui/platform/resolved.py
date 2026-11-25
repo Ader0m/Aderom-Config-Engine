@@ -150,14 +150,10 @@ class ResolvedDocumentMixin:
         }:
             return False
 
-        services = self.services
+        resolve = self.services.resolve
         is_xml = path.suffix.lower() == ".xml"
-        assemble = getattr(services, "assemble_resolved", None)
-        resolve_xml = getattr(services, "resolve_xml", None)
-        if is_xml and not callable(resolve_xml):
-            return False
-        if not is_xml and not callable(assemble):
-            return False
+        assemble = resolve.assemble_resolved
+        resolve_xml = resolve.resolve_xml if is_xml else None
 
         config_dir = self.workspace.config_dir or Path(
             getattr(forest, "scan_dir", "") or ""
@@ -1030,16 +1026,6 @@ class ResolvedDocumentMixin:
                 line_sources=line_sources,
                 atomic=True,
             )
-        )
-
-    def sync_resolved_line_edit(self, tab_id, edit, owner=None):
-        """Точечно обновить открытую resolved-вкладку."""
-        return self.apply_resolved_line_edit(
-            tab_id,
-            edit.action,
-            edit.line_number,
-            edit.text,
-            owner=owner,
         )
 
     def sync_resolved_tab(self, tab_id, text, line_sources, root_path,

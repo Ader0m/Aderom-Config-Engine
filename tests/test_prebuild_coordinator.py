@@ -7,8 +7,10 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from core.facade import CoreServices
-
+from core.composition import CoreComposition
+from core.services.cache_control import CacheControl
+from core.services.prebuild import PrebuildServices
+from types import SimpleNamespace
 
 class _Cache:
     def clear(self):
@@ -19,6 +21,9 @@ class _Resolver:
     def invalidate_cache(self):
         pass
 
+    def invalidate_roots(self, roots):
+        pass
+
 
 class _Xml:
     def clear(self):
@@ -27,6 +32,11 @@ class _Xml:
 
 class _Items:
     def clear_memory(self):
+        pass
+
+
+class _Graph:
+    def clear_cache(self):
         pass
 
 
@@ -45,76 +55,78 @@ class _Prebuild:
 
 class PrebuildCoordinationTest(unittest.TestCase):
     def _services(self):
-        services = CoreServices.__new__(CoreServices)
-        services.cache = _Cache()
-        services.resolver = _Resolver()
-        services.xml = _Xml()
-        services.items = _Items()
-        services.item_icons = _Items()
-        services.localization = _Items()
-        services.prebuild = _Prebuild()
-        services._prebuild_lock = threading.RLock()
-        services._prebuild_forest = object()
-        services._prebuild_config_dir = Path("configs")
-        services._prebuild_overlay = {}
-        services._prebuild_stale = False
-        return services
+        prebuild = PrebuildServices(
+            None,
+            None,
+            service=_Prebuild(),
+        )
+        prebuild._forest = object()
+        prebuild._config_dir = Path("configs")
+        control = CacheControl(
+            cache=_Cache(),
+            cache_service=None,
+            resolve=_Resolver(),
+            graph=_Graph(),
+            data=_Items(),
+            prebuild=prebuild,
+        )
+        return SimpleNamespace(prebuild=prebuild, cache_control=control)
 
     def test_invalidate_marks_prebuild_stale(self):
         services = self._services()
-        services.invalidate_cache()
-        self.assertTrue(services._prebuild_stale)
+        services.cache_control.invalidate_cache()
+        self.assertTrue(services.prebuild._stale)
 
     def test_resolver_invalidation_marks_prebuild_stale(self):
         services = self._services()
-        services.invalidate_resolver_cache()
-        self.assertTrue(services._prebuild_stale)
+        services.cache_control.invalidate_resolver_cache()
+        self.assertTrue(services.prebuild._stale)
 
     def test_ensure_starts_prebuild_after_invalidation(self):
         services = self._services()
-        services.invalidate_cache()
+        services.cache_control.invalidate_cache()
 
-        self.assertTrue(services.ensure_prebuild())
-        self.assertEqual(len(services.prebuild.starts), 1)
-        self.assertFalse(services._prebuild_stale)
+        self.assertTrue(services.prebuild.ensure())
+        self.assertEqual(len(services.prebuild.prebuild.starts), 1)
+        self.assertFalse(services.prebuild._stale)
 
         # Пока сборка идёт и кеш не менялся, второй запуск не нужен.
-        self.assertFalse(services.ensure_prebuild())
-        self.assertEqual(len(services.prebuild.starts), 1)
+        self.assertFalse(services.prebuild.ensure())
+        self.assertEqual(len(services.prebuild.prebuild.starts), 1)
 
     def test_invalidate_paths_prebuilds_only_affected_roots(self):
         services = self._services()
         root = Path("configs") / "system.ltx"
 
-        services.invalidate_paths({root})
-        self.assertTrue(services.ensure_prebuild())
+        services.cache_control.invalidate_paths({root})
+        self.assertTrue(services.prebuild.ensure())
 
-        self.assertEqual(len(services.prebuild.starts), 1)
+        self.assertEqual(len(services.prebuild.prebuild.starts), 1)
         self.assertEqual(
-            services.prebuild.starts[0][3],
+            services.prebuild.prebuild.starts[0][3],
             {root},
         )
 
     def test_ensure_restarts_running_prebuild_when_stale(self):
         services = self._services()
-        services.invalidate_cache()
-        services.ensure_prebuild()
-        self.assertEqual(len(services.prebuild.starts), 1)
+        services.cache_control.invalidate_cache()
+        services.prebuild.ensure()
+        self.assertEqual(len(services.prebuild.prebuild.starts), 1)
 
-        services.invalidate_cache()
-        self.assertTrue(services.ensure_prebuild())
-        self.assertEqual(len(services.prebuild.starts), 2)
+        services.cache_control.invalidate_cache()
+        self.assertTrue(services.prebuild.ensure())
+        self.assertEqual(len(services.prebuild.prebuild.starts), 2)
 
     def test_concurrent_ensure_queues_only_one_build(self):
         services = self._services()
-        services.invalidate_cache()
+        services.cache_control.invalidate_cache()
 
         barrier = threading.Barrier(2)
         results = []
 
         def worker():
             barrier.wait()
-            results.append(services.ensure_prebuild())
+            results.append(services.prebuild.ensure())
 
         threads = [
             threading.Thread(target=worker),
@@ -126,8 +138,8 @@ class PrebuildCoordinationTest(unittest.TestCase):
             thread.join(2.0)
 
         self.assertEqual(sum(1 for value in results if value), 1)
-        self.assertEqual(len(services.prebuild.starts), 1)
-        self.assertFalse(services._prebuild_stale)
+        self.assertEqual(len(services.prebuild.prebuild.starts), 1)
+        self.assertFalse(services.prebuild._stale)
 
 
 if __name__ == "__main__":

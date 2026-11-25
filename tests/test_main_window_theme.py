@@ -49,8 +49,10 @@ class MainWindowThemeTest(unittest.TestCase):
             SimpleNamespace(register=lambda *a, **k: None),
             None,
             SimpleNamespace(
-                tree_query=SimpleNamespace(
-                    sort_nodes=lambda nodes: nodes,
+                tree=SimpleNamespace(
+                    tree_query=SimpleNamespace(
+                        sort_nodes=lambda nodes: nodes,
+                    ),
                 ),
             ),
             SimpleNamespace(

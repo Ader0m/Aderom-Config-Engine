@@ -8,8 +8,9 @@ from unittest.mock import patch
 from tests.support import SRC  # noqa: F401
 
 from core.cache.service import CacheService
-from core.facade import CoreServices
 from core.models import LineSource
+from core.services.cache_control import CacheControl
+from core.services.graph import GraphServices
 from core.tools.cache import project_overlay_signature
 from core.tree.graph import (
     EdgeType,
@@ -395,12 +396,23 @@ class ReferenceGraphTest(unittest.TestCase):
             resolved_provider=provider,
         )
 
-        services = CoreServices.__new__(CoreServices)
-        services.graph_builder = builder
-        services.resolver = SimpleNamespace(
-            invalidate_roots=lambda _roots: None,
+        graph = GraphServices(
+            builder,
+            SimpleNamespace(invalidate_roots=lambda _roots: None),
+            SimpleNamespace(),
         )
-        services.invalidate_paths([self.system])
+        control = CacheControl(
+            cache=None,
+            cache_service=None,
+            resolve=SimpleNamespace(
+                invalidate_cache=lambda: None,
+                invalidate_roots=lambda _roots: None,
+            ),
+            graph=graph,
+            data=SimpleNamespace(clear_memory=lambda: None),
+            prebuild=SimpleNamespace(mark_stale=lambda roots=None: None),
+        )
+        control.invalidate_paths([self.system])
 
         builder.build_for_section(
             forest,
@@ -420,8 +432,11 @@ class ReferenceGraphTest(unittest.TestCase):
                 return object()
 
         builder = RecordingBuilder()
-        services = CoreServices.__new__(CoreServices)
-        services.graph_builder = builder
+        graph = GraphServices(
+            builder,
+            SimpleNamespace(),
+            SimpleNamespace(),
+        )
         forest = SimpleNamespace(
             scan_dir=str(self.root),
             cache_id="snapshot-1",
@@ -430,7 +445,7 @@ class ReferenceGraphTest(unittest.TestCase):
             source_files={self.xml: "<root/>"},
         )
 
-        services.build_section_graph(
+        graph.build_section_graph(
             forest,
             "test",
             overlay=overlay,

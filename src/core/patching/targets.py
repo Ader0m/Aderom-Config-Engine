@@ -40,7 +40,6 @@ _XML_INDEX_ATTR = "_ace_xml_patch_target_index"
 _DERIVED_FOREST_ATTRS = (
     _INDEX_ATTR,
     _XML_INDEX_ATTR,
-    "_resolved_signature_memo",
 )
 
 

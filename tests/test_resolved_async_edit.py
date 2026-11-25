@@ -48,6 +48,11 @@ class _Window:
 
 
 class _Services:
+    def __init__(self):
+        self.cache_control = self
+        self.tree = self
+        self.resolve = self
+
     def invalidate_resolver_cache(self):
         return None
 
@@ -308,13 +313,11 @@ class ResolvedAsyncEditTest(unittest.TestCase):
             )
         )
         self.assertFalse(
-            self.api.sync_resolved_line_edit(
+            self.api.apply_resolved_line_edit(
                 tab_id,
-                SimpleNamespace(
-                    action="replace",
-                    line_number=2,
-                    text="kind = i_med",
-                ),
+                "replace",
+                2,
+                "kind = i_med",
                 owner="mod_b",
             )
         )

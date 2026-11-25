@@ -83,7 +83,9 @@ class _Host(SectionCardMixin):
         self.error = None
         self.opened = None
         self.services = SimpleNamespace(
-            semantic_query=SectionQueryService(service)
+            resolve=SimpleNamespace(
+                semantic_query=SectionQueryService(service)
+            )
         )
 
     def _get_or_restore_document(self, tab_id):

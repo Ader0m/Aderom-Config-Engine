@@ -525,7 +525,9 @@ class MainWindowMenuTest(_ContextMixin, unittest.TestCase):
         events = EventBus()
         commands = CommandBus()
         services = SimpleNamespace(
-            tree_query=SimpleNamespace(sort_nodes=lambda nodes: nodes),
+            tree=SimpleNamespace(
+                tree_query=SimpleNamespace(sort_nodes=lambda nodes: nodes),
+            ),
         )
         api = PlatformApi(events, commands, None, services, paths)
         ctx = _make_context(api, events, commands, paths, services, "demo")

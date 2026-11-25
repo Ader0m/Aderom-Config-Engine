@@ -39,16 +39,18 @@ from core.api.vfs import game_root_from_scan_dir
 
 from app.projects.assets import ProjectAssetTypeError
 from app.projects.models import (
-    AssetChange,
-    PreviewItem,
     Project,
     ProjectDraft,
     ProjectAssetDraft,
     ProjectError,
-    ProjectPatchPreview,
     ProjectResolvedDraft,
     normalize_save_mode,
     resolved_key,
+)
+from app.patching.models import (
+    AssetChange,
+    PreviewItem,
+    ProjectPatchPreview,
 )
 from app.projects.readers import FileReaderError
 
@@ -179,7 +181,7 @@ class ProjectPreviewBuilder:
     def __init__(self, asset_registry, file_readers):
         self.asset_registry = asset_registry
         self.file_readers = file_readers
-        # Предпросмотр asset/new-file не требует CoreServices: движки
+        # Предпросмотр asset/new-file не требует CoreComposition: движки
         # собирают план и патч из уже разрешённых данных проекта.
         self._file_patch_orchestrator = PatchOrchestrator(
             engines=(
@@ -345,7 +347,7 @@ class ProjectPreviewBuilder:
     # -------------------------------------------------- предпросмотр патча
     def build(
         self,
-        services,
+        patch,
         forest,
         snapshot,
         log=None,
@@ -354,14 +356,14 @@ class ProjectPreviewBuilder:
         mode = normalize_save_mode(snapshot.save_mode or "root")
         if mode == "root":
             return self._build_preview_root(
-                services,
+                patch,
                 forest,
                 snapshot,
                 mode,
                 log=log,
             )
         return self._build_preview_per_file(
-            services,
+            patch,
             forest,
             snapshot,
             mode,
@@ -622,7 +624,7 @@ class ProjectPreviewBuilder:
 
     def _build_preview_per_file(
         self,
-        services,
+        patch,
         forest,
         snapshot,
         mode,
@@ -804,7 +806,7 @@ class ProjectPreviewBuilder:
                 # превращать в дельту: правка записывается полной
                 # заменой самого файла.
                 try:
-                    result = services.plan_ltx_patch(
+                    result = patch.plan_ltx_patch(
                         source_path,
                         original_text,
                         current_text,
@@ -872,7 +874,7 @@ class ProjectPreviewBuilder:
                         options,
                         xml_patch_mode=xml_mode,
                     )
-                    result = services.plan_xml_patch(
+                    result = patch.plan_xml_patch(
                         source_path,
                         original_text,
                         current_text,
@@ -884,7 +886,7 @@ class ProjectPreviewBuilder:
                         overlay=overlay,
                     )
                 else:
-                    result = services.plan_ltx_patch(
+                    result = patch.plan_ltx_patch(
                         source_path,
                         original_text,
                         current_text,
@@ -931,7 +933,7 @@ class ProjectPreviewBuilder:
                 if pre_generated is not None:
                     generated = pre_generated
                 elif plan.can_generate and generate:
-                    generated = services.generate_patch(plan)
+                    generated = patch.generate_patch(plan)
                 else:
                     generated = None
 
@@ -1069,7 +1071,7 @@ class ProjectPreviewBuilder:
 
     def _build_preview_root(
         self,
-        services,
+        patch,
         forest,
         snapshot,
         mode,
@@ -1077,7 +1079,7 @@ class ProjectPreviewBuilder:
     ):
         """Один патч на корень загрузки; XML — один пакет на проект."""
         base = self._build_preview_per_file(
-            services,
+            patch,
             forest,
             snapshot,
             mode,
@@ -1184,7 +1186,7 @@ class ProjectPreviewBuilder:
             try:
                 if is_xml:
                     merged, generated = merge_xml_generated(
-                        services,
+                        patch,
                         [
                             (item.plan, item.generated, item.source_path)
                             for item in group
@@ -1205,7 +1207,7 @@ class ProjectPreviewBuilder:
                         ),
                     )
                     generated = (
-                        services.generate_patch(merged)
+                        patch.generate_patch(merged)
                         if merged.can_generate
                         else None
                     )

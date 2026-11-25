@@ -12,13 +12,13 @@ from sdk.contracts.models import (
     ProjectOverlay,
     SectionGraphContribution,
     SectionGraphRequest,
-    TreeSummary,
 )
 from sdk.features.documents.models import LineSource, XmlResolveResult  # noqa: F401
 from sdk.features.patches.models import PatchTargetInfo
 from sdk.kernel.registrations import RegistrationHandle, remove_identity
 
 from .common import _SDK_API_MARKER, _to_patch_target_info, _to_section_graph_view
+from ..tree_summary import summarize_forest
 
 
 _CONTRIBUTOR_REGISTRIES = weakref.WeakKeyDictionary()
@@ -79,17 +79,17 @@ class CoreApiAdapter:
         return cls(provider, contributors=contributors)
 
     def detect_config_dir(self, candidates):
-        return self._provider.detect_config_dir(candidates)
+        return self._provider.resolve.detect_config_dir(candidates)
 
     def find_system_ltx(self, selected_dir):
-        return self._provider.find_system_ltx(selected_dir)
+        return self._provider.tree.find_system_ltx(selected_dir)
 
     def resolve_scan_dir(self, config_dir):
-        return self._provider.resolve_scan_dir(config_dir)
+        return self._provider.tree.resolve_scan_dir(config_dir)
 
     def build_tree(self, scan_dir, system_root, log=None, clean=False,
                    overlay=None):
-        raw = self._provider.build_tree(
+        raw = self._provider.tree.build_tree(
             scan_dir,
             system_root,
             log=log,
@@ -99,24 +99,10 @@ class CoreApiAdapter:
         return forest_ref(raw)
 
     def tree_summary(self, forest):
-        forest = unwrap_forest(forest)
-        resolver_sections = getattr(forest, "resolver_sections", None)
-        if resolver_sections is not None:
-            try:
-                resolver_sections = int(resolver_sections)
-            except (TypeError, ValueError):
-                pass
-
-        return TreeSummary(
-            roots=len(getattr(forest, "roots", ()) or ()),
-            total_files=int(getattr(forest, "total_files", 0) or 0),
-            system_tree_files=int(getattr(forest, "system_tree_files", 0) or 0),
-            resolver_sections=resolver_sections,
-            xml_files=int(getattr(forest, "total_xml_files", 0) or 0),
-        )
+        return summarize_forest(unwrap_forest(forest))
 
     def relative_path(self, forest, path):
-        return self._provider.relative_path(unwrap_forest(forest), path)
+        return self._provider.tree.relative_path(unwrap_forest(forest), path)
 
     def forest_scan_dir(self, forest):
         forest = unwrap_forest(forest)
@@ -129,52 +115,52 @@ class CoreApiAdapter:
         return Path(value) if value else None
 
     def game_root(self, forest):
-        return self._provider.game_root(unwrap_forest(forest))
+        return self._provider.tree.game_root(unwrap_forest(forest))
 
     def add_virtual_file(self, forest, path, text):
-        return self._provider.add_virtual_file(
+        return self._provider.tree.add_virtual_file(
             unwrap_forest(forest),
             path,
             text,
         )
 
     def patch_target_info(self, forest, path):
-        target = self._provider.patch_target_info(
+        target = self._provider.tree.patch_target_info(
             unwrap_forest(forest),
             path,
         )
         return _to_patch_target_info(target)
 
     def patch_target(self, forest, path):
-        return self._provider.patch_target(unwrap_forest(forest), path)
+        return self._provider.tree.patch_target(unwrap_forest(forest), path)
 
     def read_text(self, path):
-        return self._provider.read_text(path)
+        return self._provider.tree.read_text(path)
 
     def read_xml_text(self, path):
-        return self._provider.read_xml_text(path)
+        return self._provider.tree.read_xml_text(path)
 
     def color_definitions(self, forest, overlay=None, config_dir=None):
-        return self._provider.color_definitions(
+        return self._provider.data.color_definitions(
             unwrap_forest(forest),
             overlay=overlay,
             config_dir=config_dir,
         )
 
     def ltx_section_at_line(self, text, line_number):
-        return self._provider.ltx_section_at_line(text, line_number)
+        return self._provider.resolve.ltx_section_at_line(text, line_number)
 
     def ltx_section_bounds(self, text, section):
-        return self._provider.ltx_section_bounds(text, section)
+        return self._provider.resolve.ltx_section_bounds(text, section)
 
     def ltx_field_line(self, text, section, key):
-        return self._provider.ltx_field_line(text, section, key)
+        return self._provider.resolve.ltx_field_line(text, section, key)
 
     def ltx_key_from_line(self, line):
-        return self._provider.ltx_key_from_line(line)
+        return self._provider.resolve.ltx_key_from_line(line)
 
     def ltx_declared_sections(self, text):
-        return self._provider.ltx_declared_sections(text)
+        return self._provider.resolve.ltx_declared_sections(text)
 
     def ltx_edit_section(
         self,
@@ -185,7 +171,7 @@ class CoreApiAdapter:
         new_line=None,
         after_key=None,
     ):
-        return self._provider.ltx_edit_section(
+        return self._provider.resolve.ltx_edit_section(
             text,
             section,
             key,
@@ -195,30 +181,30 @@ class CoreApiAdapter:
         )
 
     def start_prebuild(self, forest, config_dir, overlay=None):
-        return self._provider.start_prebuild(
+        return self._provider.prebuild.start(
             unwrap_forest(forest),
             config_dir,
             overlay=overlay,
         )
 
     def ensure_prebuild(self, forest=None, config_dir=None, overlay=None):
-        return self._provider.ensure_prebuild(
+        return self._provider.prebuild.ensure(
             unwrap_forest(forest),
             config_dir,
             overlay=overlay,
         )
 
     def prebuild_status(self):
-        return self._provider.prebuild_status()
+        return self._provider.prebuild.status()
 
     def wait_prebuild(self, log=None, timeout=None):
-        return self._provider.wait_prebuild(log=log, timeout=timeout)
+        return self._provider.prebuild.wait(log=log, timeout=timeout)
 
     def stop_prebuild(self):
-        return self._provider.stop_prebuild()
+        return self._provider.prebuild.stop()
 
     def run_resolver(self, forest, config_dir, log=None):
-        return self._provider.run_resolver(
+        return self._provider.resolve.run_resolver(
             unwrap_forest(forest),
             config_dir,
             log=log,
@@ -226,7 +212,7 @@ class CoreApiAdapter:
 
     def assemble_text(self, root_path, forest, config_dir, log=None,
                       overlay=None):
-        return self._provider.assemble_text(
+        return self._provider.resolve.assemble_text(
             root_path,
             unwrap_forest(forest),
             config_dir,
@@ -235,14 +221,14 @@ class CoreApiAdapter:
         )
 
     def assemble_to_file(self, root_path, forest):
-        return self._provider.assemble_to_file(
+        return self._provider.resolve.assemble_to_file(
             root_path,
             unwrap_forest(forest),
         )
 
     def assemble_resolved(self, root_path, forest, config_dir, log=None,
                           overlay=None):
-        return self._provider.assemble_resolved(
+        return self._provider.resolve.assemble_resolved(
             root_path,
             unwrap_forest(forest),
             config_dir,
@@ -252,7 +238,7 @@ class CoreApiAdapter:
 
     def resolve_xml(self, path, config_dir, log=None, dxml=True,
                     overlay=None):
-        raw = self._provider.resolve_xml(
+        raw = self._provider.resolve.resolve_xml(
             path,
             config_dir,
             log=log,
@@ -269,7 +255,7 @@ class CoreApiAdapter:
 
     def resolve_xml_to_file(self, path, config_dir, log=None, dxml=True,
                             overlay=None):
-        return self._provider.resolve_xml_to_file(
+        return self._provider.resolve.resolve_xml_to_file(
             path,
             config_dir,
             log=log,
@@ -279,7 +265,7 @@ class CoreApiAdapter:
 
     def build_section_graph(self, forest, section_name, vfs_mode=False,
                             log=None, overlay=None):
-        graph = self._provider.build_section_graph(
+        graph = self._provider.graph.build_section_graph(
             unwrap_forest(forest),
             section_name,
             vfs_mode=vfs_mode,
@@ -362,7 +348,7 @@ class CoreApiAdapter:
         ).children
 
     def open_external_editor(self, path):
-        return self._provider.open_external_editor(path)
+        return self._provider.resolve.open_external_editor(path)
 
     def open_with_shell(self, path):
-        return self._provider.open_with_shell(path)
+        return self._provider.resolve.open_with_shell(path)

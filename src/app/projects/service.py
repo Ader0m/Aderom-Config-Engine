@@ -964,10 +964,6 @@ class ProjectService:
         self._write_draft(project, draft)
         return draft
 
-    def save_text(self, path, text: str) -> ProjectDraft:
-        """Сохранить конкретный текст как текущую версию черновика."""
-        return self.save_draft(path, text)
-
     def autosave(
         self,
         expected_project=None,
@@ -1637,16 +1633,16 @@ class ProjectService:
 
     def build_preview(
         self,
-        services,
+        patch_services,
         forest,
         log=None,
         expected_project=None,
     ):
         """Собрать предпросмотр по снимку активного проекта.
 
-        ``expected_project`` — проект, для которого запущен фон: если
-        активный проект сменился, возвращается ``None``, а не чужой
-        предпросмотр.
+        ``patch_services`` — узкий патч-компонент, а не широкий
+        композиционный объект. ``expected_project`` — проект, для которого
+        запущен фон: если активный проект сменился, возвращается ``None``.
         """
         from app.patching.preview import PreviewSnapshot
 
@@ -1665,7 +1661,7 @@ class ProjectService:
                 module_settings=state.module_settings,
             )
         return self.preview_builder.build(
-            services,
+            patch_services,
             forest,
             snapshot,
             log=log,

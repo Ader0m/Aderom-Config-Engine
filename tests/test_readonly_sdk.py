@@ -58,6 +58,9 @@ class ForestRefTest(unittest.TestCase):
         raw = _Forest()
 
         class Provider:
+            def __init__(self):
+                self.tree = self
+
             def build_tree(self, *args, **kwargs):
                 return raw
 

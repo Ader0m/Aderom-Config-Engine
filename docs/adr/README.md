@@ -128,9 +128,9 @@
 - [ADR-33](ADR-33-base-item-browser-domain.md) — `item_browser`, домен
   items/ogg, default-set и закрытие MOD-1…MOD-4; в части `base`/`ogg_editor`
   заменён ADR-35.
-- [ADR-34](ADR-34-module-data-and-settings.md) — настройки модулей,
+- [ADR-34](ADR-34-module-data-and-settings.md) - настройки модулей,
   `config/modules.json`, `layout.json`, перенос DATA-4 на Этап 9 и
-  закрытие P1 `needs_confirmation`.
+  закрытие P1 `needs_confirmation`; DATA-4 закрыт в аудите 25.11.2026.
 - [ADR-35](ADR-35-base-required-module.md) — `base` как обязательный
   встроенный модуль, `ogg_editor.requires base` и отмена критерия
   запуска без `base`.

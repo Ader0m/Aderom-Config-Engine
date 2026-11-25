@@ -8,12 +8,14 @@ from pathlib import Path
 from tests.support import SRC  # noqa: F401
 
 from app.patching.commit import write_preview
-from app.projects import (
+from app.patching.models import (
     AssetChange,
     PreviewItem,
+    ProjectPatchPreview,
+)
+from app.projects import (
     Project,
     ProjectError,
-    ProjectPatchPreview,
     ProjectService,
 )
 from app.projects.use_cases import rollback_preview_item

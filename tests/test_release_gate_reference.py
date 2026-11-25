@@ -11,7 +11,7 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from core.facade import CoreServices
+from core.composition import CoreComposition
 from core.patching.commit import PatchCommitError, PatchCommitService
 from core.patching.ltx.document import parse_ltx_document
 from core.patching.models import PatchOptions
@@ -60,7 +60,7 @@ def _services(config_dir, generated_dir):
     )
     resolver = ResolverService(cache, ResolvedCache())
     resolver.ensure_adapter(forest, config_dir)
-    services = CoreServices(
+    services = CoreComposition(
         cache=cache,
         tree_builder=TreeBuilder(cache),
         tree_query=TreeQueryService(),
@@ -131,7 +131,7 @@ class ReleaseGateReferenceTest(unittest.TestCase):
                 configs,
                 Path(d) / "generated",
             )
-            plan = services.plan_document_patch(
+            plan = services.patch.plan_document_patch(
                 source,
                 before,
                 after,
@@ -144,19 +144,19 @@ class ReleaseGateReferenceTest(unittest.TestCase):
                 ),
             )
             self.assertFalse(plan.has_errors, plan.issues)
-            generated = services.generate_patch(plan)
+            generated = services.patch.generate_patch(plan)
             self.assertTrue(
                 generated.verification.ok,
                 generated.verification.issues,
             )
-            report = services.patch_commit.roundtrip.verify(generated)
+            report = services.patch.patch_commit.roundtrip.verify(generated)
             self.assertTrue(report.ok, report.issues)
-            authorization = services.patch_commit.authorize(
+            authorization = services.patch.patch_commit.authorize(
                 generated,
-                confirmed_risks=services.patch_commit.risk_keys(plan),
+                confirmed_risks=services.patch.patch_commit.risk_keys(plan),
             )
             with self.assertRaises(PatchWriteError):
-                services.patch_commit.commit(
+                services.patch.patch_commit.commit(
                     generated,
                     authorization,
                     configs,
@@ -165,7 +165,7 @@ class ReleaseGateReferenceTest(unittest.TestCase):
                 )
             self.assertEqual(_file_hashes(configs), original_hashes)
             patch_mod = Path(d) / "mods" / "Test Patch"
-            result = services.patch_commit.commit(
+            result = services.patch.patch_commit.commit(
                 generated,
                 authorization,
                 patch_mod,
@@ -186,7 +186,7 @@ class ReleaseGateReferenceTest(unittest.TestCase):
                 "[removed]\ngone = 1\n",
                 "",
             )
-            delete_plan = services.plan_document_patch(
+            delete_plan = services.patch.plan_document_patch(
                 base_source,
                 before_base,
                 after_base,
@@ -199,18 +199,18 @@ class ReleaseGateReferenceTest(unittest.TestCase):
                 ),
             )
             self.assertFalse(delete_plan.has_errors, delete_plan.issues)
-            delete_generated = services.generate_patch(delete_plan)
+            delete_generated = services.patch.generate_patch(delete_plan)
             self.assertTrue(
                 delete_generated.verification.ok,
                 delete_generated.verification.issues,
             )
-            delete_authorization = services.patch_commit.authorize(
+            delete_authorization = services.patch.patch_commit.authorize(
                 delete_generated,
-                confirmed_risks=services.patch_commit.risk_keys(
+                confirmed_risks=services.patch.patch_commit.risk_keys(
                     delete_plan
                 ),
             )
-            delete_result = services.patch_commit.commit(
+            delete_result = services.patch.patch_commit.commit(
                 delete_generated,
                 delete_authorization,
                 patch_mod,
@@ -226,7 +226,7 @@ class ReleaseGateReferenceTest(unittest.TestCase):
                 )
 
             with self.assertRaises(PatchCommitError):
-                services.patch_commit.commit(
+                services.patch.patch_commit.commit(
                     generated,
                     authorization,
                     Path(d) / "mods" / "Stale",

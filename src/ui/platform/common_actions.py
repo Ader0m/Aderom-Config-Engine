@@ -21,7 +21,7 @@ class CommonActions:
 
     def open_in_external_editor(self, path):
         self.api.log("Открытие в Notepad++: %s" % Path(path).name)
-        ok, message = self.services.open_external_editor(path)
+        ok, message = self.services.resolve.open_external_editor(path)
         if not ok:
             self.api.log("Ошибка Notepad++: %s" % message)
             self.api.show_error(message)
@@ -39,8 +39,8 @@ class CommonActions:
         self.api.log("Сборка: %s" % path.name)
 
         def work(log):
-            out = self.services.assemble_to_file(path, forest)
-            ok, message = self.services.open_external_editor(out)
+            out = self.services.resolve.assemble_to_file(path, forest)
+            ok, message = self.services.resolve.open_external_editor(out)
             if not ok:
                 raise RuntimeError(message)
             return out
@@ -63,7 +63,7 @@ class CommonActions:
     def copy_relative_path(self, path):
         forest = self.api.workspace.forest
         if forest is not None:
-            text = self.services.relative_path(forest, Path(path))
+            text = self.services.tree.relative_path(forest, Path(path))
         else:
             text = str(path)
         self.api.clipboard_set(text)

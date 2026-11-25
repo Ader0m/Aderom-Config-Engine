@@ -11,8 +11,8 @@ from tests.support import SRC  # noqa: F401
 from app.projects import ProjectService
 from app.workspace import SnapshotService, WorkspaceSession
 from core.cache.service import CacheService
-from core.facade import CoreServices
 from core.resolver.service import ResolverService
+from core.services.tree import TreeServices
 from core.tools.cache import FileCacheSystem, ResolvedCache
 from core.tree.builder import TreeBuilder
 from sdk.contracts import ProjectOverlay
@@ -200,30 +200,24 @@ class CoreBuildSnapshotTest(unittest.TestCase):
                 encoding="cp1251",
             )
 
-            services = CoreServices.__new__(CoreServices)
-            services.cache = FileCacheSystem()
-            services.cache_service = CacheService()
-            services.snapshot_service = SnapshotService()
-            services.tree_builder = TreeBuilder(
-                cache=services.cache,
-                cache_service=services.cache_service,
+            cache = FileCacheSystem()
+            cache_service = CacheService()
+            tree = TreeServices(
+                TreeBuilder(cache=cache, cache_service=cache_service),
+                None,
+                snapshot_service=SnapshotService(),
+                cache_service=cache_service,
+                cache_control=SimpleNamespace(
+                    invalidate_cache=lambda: None
+                ),
             )
-            services.resolver = _Noop()
-            services.xml = _Noop()
-            services.items = _Noop()
-            services.item_icons = _Noop()
-            services.localization = _Noop()
-            services.colors = _Noop()
-            services.sections = _Noop()
-            services.includes = _Noop()
-            services.localization_index = _Noop()
 
-            first = services.build_tree(cfg, root, clean=True)
+            first = tree.build_tree(cfg, root, clean=True)
             root.write_text(
                 '[system]\n#include "b.ltx"\n',
                 encoding="cp1251",
             )
-            second = services.build_tree(cfg, root, clean=True)
+            second = tree.build_tree(cfg, root, clean=True)
 
             self.assertNotEqual(first.cache_id, second.cache_id)
             self.assertIn(include_b, second.include_children[root])

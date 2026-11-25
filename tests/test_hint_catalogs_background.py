@@ -30,6 +30,7 @@ class _Tasks:
 class _Services:
     def __init__(self):
         self.calls = []
+        self.data = self
 
     def color_set(self, forest, overlay=None):
         self.calls.append("colors")
@@ -59,7 +60,8 @@ class HintCatalogsBackgroundTest(unittest.TestCase):
         self.assertEqual(len(tasks.calls), 2)
 
         build, apply, handle = tasks.calls[0]
-        self.assertEqual(build(), "COLORS")
+        # TaskService всегда передаёт рабочий лог-приёмник.
+        self.assertEqual(build(lambda _message: None), "COLORS")
         apply("COLORS", None)
         self.assertEqual(catalogs.colors, "COLORS")
         self.assertFalse(handle.cancelled)

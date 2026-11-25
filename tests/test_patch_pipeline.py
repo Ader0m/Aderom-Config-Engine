@@ -10,7 +10,7 @@ from core.resolver.assembly import AssemblyService
 from core.patching.ltx.diff import diff_texts
 from core.patching.ltx.document import parse_ltx_document
 from core.patching.ltx.generator import DltxGenerator
-from core.facade import CoreServices
+from core.composition import CoreComposition
 from core.tools.cache import FileCacheSystem
 from core.patching.models import PatchFile, PatchOptions
 from core.patching.planner import PatchPlanner
@@ -291,7 +291,7 @@ class PatchPipelineTest(unittest.TestCase):
             )
             resolver = ResolverService(cache, ResolvedCache())
             resolver.ensure_adapter(forest, cfg)
-            services = CoreServices(
+            services = CoreComposition(
                 cache=cache,
                 tree_builder=TreeBuilder(cache),
                 tree_query=TreeQueryService(),
@@ -304,7 +304,7 @@ class PatchPipelineTest(unittest.TestCase):
                 generated_dir=Path(d) / "generated",
                 xml_resolve_service=XmlResolveService(),
             )
-            plan = services.plan_document_patch(
+            plan = services.patch.plan_document_patch(
                 source,
                 "[base]\nx = 1\n[weapon]:base\ny = 2\n",
                 "[base]\nx = 1\n[weapon]\ny = 2\n",
@@ -316,14 +316,14 @@ class PatchPipelineTest(unittest.TestCase):
                 ),
             )
             self.assertFalse(plan.has_errors, plan.issues)
-            generated = services.generate_patch(plan)
+            generated = services.patch.generate_patch(plan)
 
             self.assertTrue(generated.verification.ok)
-            report = services.patch_commit.roundtrip.verify(generated)
+            report = services.patch.patch_commit.roundtrip.verify(generated)
             self.assertTrue(report.ok, report.issues)
-            authorization = services.patch_commit.authorize(
+            authorization = services.patch.patch_commit.authorize(
                 generated,
-                confirmed_risks=services.patch_commit.risk_keys(plan),
+                confirmed_risks=services.patch.patch_commit.risk_keys(plan),
             )
             self.assertIsNotNone(authorization)
 
@@ -356,7 +356,7 @@ class PatchPipelineTest(unittest.TestCase):
             )
             resolver = ResolverService(cache, ResolvedCache())
             resolver.ensure_adapter(forest, cfg)
-            services = CoreServices(
+            services = CoreComposition(
                 cache=cache,
                 tree_builder=TreeBuilder(cache),
                 tree_query=TreeQueryService(),
@@ -369,7 +369,7 @@ class PatchPipelineTest(unittest.TestCase):
                 generated_dir=Path(d) / "generated",
                 xml_resolve_service=XmlResolveService(),
             )
-            plan = services.plan_document_patch(
+            plan = services.patch.plan_document_patch(
                 source,
                 before,
                 after,
@@ -381,14 +381,14 @@ class PatchPipelineTest(unittest.TestCase):
                 ),
             )
             self.assertFalse(plan.has_errors, plan.issues)
-            generated = services.generate_patch(plan)
+            generated = services.patch.generate_patch(plan)
 
             self.assertTrue(generated.verification.ok)
-            report = services.patch_commit.roundtrip.verify(generated)
+            report = services.patch.patch_commit.roundtrip.verify(generated)
             self.assertTrue(report.ok, report.issues)
-            authorization = services.patch_commit.authorize(
+            authorization = services.patch.patch_commit.authorize(
                 generated,
-                confirmed_risks=services.patch_commit.risk_keys(plan),
+                confirmed_risks=services.patch.patch_commit.risk_keys(plan),
             )
             self.assertIsNotNone(authorization)
 
@@ -414,7 +414,7 @@ class PatchPipelineTest(unittest.TestCase):
             )
             resolver = ResolverService(cache, ResolvedCache())
             resolver.ensure_adapter(forest, cfg)
-            services = CoreServices(
+            services = CoreComposition(
                 cache=cache,
                 tree_builder=TreeBuilder(cache),
                 tree_query=TreeQueryService(),
@@ -427,7 +427,7 @@ class PatchPipelineTest(unittest.TestCase):
                 generated_dir=Path(d) / "generated",
                 xml_resolve_service=XmlResolveService(),
             )
-            plan = services.plan_document_patch(
+            plan = services.patch.plan_document_patch(
                 source,
                 "[base]\nx = 1\nkeep = 2\n[weapon]:base\ny = 2\n",
                 "[base]\nkeep = 2\n[weapon]:base\ny = 2\n",
@@ -439,14 +439,14 @@ class PatchPipelineTest(unittest.TestCase):
                 ),
             )
             self.assertFalse(plan.has_errors, plan.issues)
-            generated = services.generate_patch(plan)
+            generated = services.patch.generate_patch(plan)
 
             self.assertTrue(generated.verification.ok)
-            report = services.patch_commit.roundtrip.verify(generated)
+            report = services.patch.patch_commit.roundtrip.verify(generated)
             self.assertTrue(report.ok, report.issues)
-            authorization = services.patch_commit.authorize(
+            authorization = services.patch.patch_commit.authorize(
                 generated,
-                confirmed_risks=services.patch_commit.risk_keys(plan),
+                confirmed_risks=services.patch.patch_commit.risk_keys(plan),
             )
             self.assertIsNotNone(authorization)
 
@@ -754,7 +754,7 @@ class PatchPipelineTest(unittest.TestCase):
             resolver = ResolverService(cache, ResolvedCache())
             resolver.ensure_adapter(forest, cfg)
 
-            services = CoreServices(
+            services = CoreComposition(
                 cache=cache,
                 tree_builder=TreeBuilder(cache),
                 tree_query=TreeQueryService(),
@@ -768,10 +768,10 @@ class PatchPipelineTest(unittest.TestCase):
                 xml_resolve_service=XmlResolveService(),
             )
 
-            self.assertIsNotNone(services.patch_commit)
+            self.assertIsNotNone(services.patch.patch_commit)
             self.assertFalse(hasattr(services, "write_patch"))
 
-            plan = services.plan_document_patch(
+            plan = services.patch.plan_document_patch(
                 source,
                 "[w]\ncost = 100\n",
                 "[w]\ncost = 150\n",
@@ -782,17 +782,17 @@ class PatchPipelineTest(unittest.TestCase):
                     snapshot_id="SNAP",
                 ),
             )
-            generated = services.generate_patch(plan)
+            generated = services.patch.generate_patch(plan)
 
             self.assertTrue(generated.verification.ok)
-            roundtrip = services.patch_commit.roundtrip.verify(generated)
+            roundtrip = services.patch.patch_commit.roundtrip.verify(generated)
             self.assertTrue(roundtrip.ok, roundtrip.issues)
             self.assertIn(
                 "full_diff",
                 [check.name for check in roundtrip.checks],
             )
-            authorization = services.patch_commit.authorize(generated)
-            written = services.patch_commit.commit(
+            authorization = services.patch.patch_commit.authorize(generated)
+            written = services.patch.patch_commit.commit(
                 generated,
                 authorization,
                 Path(d) / "mods" / "Test Patch",

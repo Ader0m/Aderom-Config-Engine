@@ -9,6 +9,11 @@ from types import SimpleNamespace
 from tests.support import SRC  # noqa: F401
 
 from tests.qt_support import qapp
+from core.api.documents import (
+    declared_sections,
+    edit_section_text,
+    parse_ltx_document,
+)
 from sdk.features.items import ItemCatalog, ItemEntry, ItemField, ItemSection
 from sdk.contracts import ProjectOverlay
 from modules.item_browser.item_viewer import (
@@ -93,13 +98,9 @@ class _Services:
         return self._scan_dir
 
     def ltx_section_at_line(self, text, line_number):
-        from core import parse_ltx_document
-
         return parse_ltx_document(text).section_at_line(line_number)
 
     def ltx_section_bounds(self, text, section):
-        from core import parse_ltx_document
-
         return parse_ltx_document(text).section_bounds(section)
 
     def ltx_key_from_line(self, line):
@@ -118,8 +119,6 @@ class _Services:
         new_line=None,
         after_key=None,
     ):
-        from core import edit_section_text
-
         return edit_section_text(
             text,
             section,
@@ -130,8 +129,6 @@ class _Services:
         )
 
     def ltx_declared_sections(self, text):
-        from core import declared_sections
-
         return declared_sections(text)
 
 

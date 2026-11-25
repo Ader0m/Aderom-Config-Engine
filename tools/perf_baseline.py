@@ -198,14 +198,14 @@ def _make_services(
     snapshot_service=None,
     resolved_cache=None,
 ):
-    from core.facade import CoreServices
+    from core.composition import CoreComposition
     from core.resolver.assembly import AssemblyService
     from core.tree.builder import TreeBuilder
     from core.tree.graph import ReferenceGraphBuilder
     from core.tree.query import TreeQueryService
     from core.xml.service import XmlResolveService
 
-    return CoreServices(
+    return CoreComposition(
         cache=cache,
         tree_builder=TreeBuilder(
             cache=cache,
@@ -276,7 +276,7 @@ def _measure_preview(
         text = source.read_text(encoding="windows-1251", errors="replace")
         project.update_draft(source, _change_source_text(text))
         preview, elapsed = _timed(
-            lambda: project.build_preview(services, forest)
+            lambda: project.build_preview(services.patch, forest)
         )
         return {
             "available": True,

@@ -22,7 +22,7 @@ from core.api.patches import (
     PatchFile,
     VerificationResult,
 )
-from core.facade import CoreServices
+from core.composition import CoreComposition
 from core.patching.engines.asset import AssetPatchEngine
 from core.patching.engines.ltx import LtxPatchEngine
 from core.patching.engines.new_file import NewFilePatchEngine
@@ -57,7 +57,7 @@ def _services(d, cfg, root):
         ResolvedCache(cache_dir=Path(d) / "cache"),
     )
     resolver.ensure_adapter(forest, cfg)
-    services = CoreServices(
+    services = CoreComposition(
         cache=cache,
         tree_builder=TreeBuilder(cache),
         tree_query=TreeQueryService(),
@@ -107,7 +107,7 @@ class PatchOrchestratorTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             services, _forest, _source = _ltx_environment(d)
 
-            orchestrator = services.patch_orchestrator
+            orchestrator = services.patch.patch_orchestrator
             self.assertIsInstance(
                 orchestrator.engine("ltx"),
                 LtxPatchEngine,
@@ -147,7 +147,7 @@ class PatchOrchestratorTest(unittest.TestCase):
                 forest=forest,
                 snapshot_id="SNAP-X",
             )
-            bundle = services.patch_orchestrator.build(intent, snapshot)
+            bundle = services.patch.patch_orchestrator.build(intent, snapshot)
 
             self.assertTrue(bundle.ok)
             self.assertEqual(bundle.intent, intent)
@@ -161,7 +161,7 @@ class PatchOrchestratorTest(unittest.TestCase):
             self.assertTrue(bundle.verification.ok)
             self.assertTrue(bundle.generated.files)
 
-            engine = services.patch_orchestrator.engine("ltx")
+            engine = services.patch.patch_orchestrator.engine("ltx")
             self.assertIn("cost = 150", engine.preview(bundle.plan))
             regenerated = engine.generate(bundle.plan)
             self.assertTrue(engine.verify(regenerated).ok)
@@ -178,7 +178,7 @@ class PatchOrchestratorTest(unittest.TestCase):
                 after_text="[w]\ncost = 150\n",
                 patch_mod="OnlyIntent",
             )
-            bundle = services.patch_orchestrator.build(intent, snapshot)
+            bundle = services.patch.patch_orchestrator.build(intent, snapshot)
             self.assertEqual(bundle.plan.patch_mod, "OnlyIntent")
 
             fallback = PatchIntent(
@@ -191,7 +191,7 @@ class PatchOrchestratorTest(unittest.TestCase):
                     suffix="engine",
                 ),
             )
-            bundle = services.patch_orchestrator.build(fallback, snapshot)
+            bundle = services.patch.patch_orchestrator.build(fallback, snapshot)
             self.assertEqual(bundle.plan.patch_mod, "FromOptions")
 
     def test_empty_snapshot_keeps_options_snapshot_id(self):
@@ -204,7 +204,7 @@ class PatchOrchestratorTest(unittest.TestCase):
                 after_text="[w]\ncost = 150\n",
                 options=PatchOptions(snapshot_id="LEGACY"),
             )
-            bundle = services.patch_orchestrator.build(
+            bundle = services.patch.patch_orchestrator.build(
                 intent,
                 PatchSnapshot(forest=forest),
             )
@@ -225,7 +225,7 @@ class PatchOrchestratorTest(unittest.TestCase):
                 snapshot_id="SNAP-X",
             )
             with self.assertRaises(PatchPlanningError):
-                services.patch_orchestrator.build(intent, snapshot)
+                services.patch.patch_orchestrator.build(intent, snapshot)
 
 class _FakeXmlServices:
     def __init__(self):

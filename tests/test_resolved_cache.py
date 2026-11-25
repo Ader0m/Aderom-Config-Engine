@@ -11,7 +11,6 @@ from core.models import LineSource
 from core.tools.cache import (
     ResolvedCache,
     file_subtree_signature,
-    invalidate_forest_signatures,
     resolver_signature,
 )
 from core.tree.builder import TreeBuilder
@@ -81,18 +80,6 @@ class ResolvedCacheTest(unittest.TestCase):
             after = file_subtree_signature(forest, path)
 
             self.assertNotEqual(before, after)
-
-    def test_invalidate_signatures_recomputes_same_value(self):
-        with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / "a.ltx"
-            path.write_text("[a]\n", encoding="utf-8")
-            forest = FakeForest([path])
-
-            first = file_subtree_signature(forest, path)
-            invalidate_forest_signatures(forest)
-            second = file_subtree_signature(forest, path)
-
-            self.assertEqual(first, second)
 
     def test_include_dependency_change_invalidates_signature(self):
         with tempfile.TemporaryDirectory() as d:

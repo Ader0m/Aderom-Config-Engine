@@ -30,8 +30,17 @@ class TreeBuilder:
     """
 
     def __init__(self, cache=None, cache_service=None):
-        self.cache = cache or FileCacheSystem()
+        # ``cache`` — legacy fallback для standalone/тестов. В production
+        # владельцем кэша является CacheService, поэтому отдельный
+        # FileCacheSystem здесь не создаётся до первого реального
+        # fallback-обращения.
+        self.cache = cache
         self.cache_service = cache_service
+
+    def _fallback_cache(self):
+        if self.cache is None:
+            self.cache = FileCacheSystem()
+        return self.cache
 
     def build(
         self,
@@ -102,14 +111,14 @@ class TreeBuilder:
                     deps=(scan, system),
                     snapshot_id=snapshot_id,
                 )
-            cached = self.cache.get(key)
+            cached = self._fallback_cache().get(key)
             if cached is not None:
                 return cached
 
         forest = build_forest()
 
         if use_cache and self.cache_service is None:
-            self.cache.set(key, forest)
+            self._fallback_cache().set(key, forest)
 
         return forest
 

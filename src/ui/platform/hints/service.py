@@ -97,7 +97,7 @@ class HintCatalogs:
         generation = str(getattr(forest, "cache_id", "") or "")
 
         def build():
-            return self._services.color_set(forest, overlay=overlay)
+            return self._services.data.color_set(forest, overlay=overlay)
 
         def apply(value, error):
             self._pending.discard("colors")
@@ -122,7 +122,7 @@ class HintCatalogs:
         generation = str(getattr(forest, "cache_id", "") or "")
 
         def build():
-            return self._services.include_set(forest, overlay=overlay)
+            return self._services.data.include_set(forest, overlay=overlay)
 
         def apply(value, error):
             self._pending.discard("includes")
@@ -150,7 +150,7 @@ class HintCatalogs:
         generation = str(getattr(forest, "cache_id", "") or "")
 
         def build():
-            return self._services.localization_set(
+            return self._services.data.localization_set(
                 forest,
                 overlay=overlay,
             )
@@ -178,7 +178,7 @@ class HintCatalogs:
         generation = str(getattr(forest, "cache_id", "") or "")
 
         def build():
-            return self._services.section_set(
+            return self._services.data.section_set(
                 forest,
                 overlay=overlay,
                 deadline=time.monotonic() + 1.5,
@@ -211,7 +211,13 @@ class HintCatalogs:
         self._pending.add(key)
         if background and self._tasks is not None:
             try:
-                handle = self._tasks.run(build, on_done=apply)
+                # TaskService передаёт рабочему callable потокобезопасный
+                # лог-приёмник. Обёртка сохраняет простой build() и не
+                # ломает контракт задачи.
+                def work(_log):
+                    return build()
+
+                handle = self._tasks.run(work, on_done=apply)
                 if handle is not None:
                     self._handles[key] = handle
                 return

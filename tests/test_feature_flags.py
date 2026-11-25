@@ -12,12 +12,12 @@ from PyQt5.QtWidgets import QMessageBox
 from tests.qt_support import qapp
 from tests.support import SRC  # noqa: F401
 
-from app.projects import (
+from app.patching.models import (
     AssetChange,
     PreviewItem,
-    Project,
     ProjectPatchPreview,
 )
+from app.projects import Project
 from core.patching.models import (
     GeneratedPatch,
     PatchFile,
@@ -239,14 +239,14 @@ class ProjectControllerWriteGateTest(unittest.TestCase):
             result = controller.write_preview(None)
 
         self.assertFalse(result)
-        services.patch_commit.commit.assert_not_called()
+        services.patch.patch_commit.commit.assert_not_called()
         self.assertTrue(controller.errors)
         self.assertIn("отключена", controller.errors[0])
 
     def test_risky_preview_requires_confirmation(self):
         project = Project(id="p1", name="Demo", root_dir=Path("."))
         services = Mock()
-        services.patch_commit.risk_keys.return_value = ("danger",)
+        services.patch.patch_commit.risk_keys.return_value = ("danger",)
         controller = _Controller(services)
         controller.project = Mock()
         controller.project.active = project

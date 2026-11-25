@@ -11,14 +11,11 @@ from .readers import (
     ProjectFileReaderRegistry,
 )
 from .models import (
-    AssetChange,
-    PreviewItem,
     Project,
     ProjectAssetDraft,
     ProjectDraft,
     ProjectError,
     ProjectInfo,
-    ProjectPatchPreview,
     ProjectResolvedDraft,
     normalize_save_mode,
 )
@@ -36,10 +33,8 @@ from .settings import (
 )
 
 __all__ = [
-    "AssetChange",
     "FileReaderError",
     "FileReaderSubscription",
-    "PreviewItem",
     "PROJECT_SCHEMA_VERSION",
     "Project",
     "ProjectAssetDraft",
@@ -49,7 +44,6 @@ __all__ = [
     "ProjectError",
     "ProjectFileReaderRegistry",
     "ProjectInfo",
-    "ProjectPatchPreview",
     "ProjectRepository",
     "ProjectResolvedDraft",
     "ProjectService",

@@ -101,11 +101,11 @@ class ResolvedItemFlowTest(unittest.TestCase):
             None,
             _Services(),
             paths,
+            items=_Services(),
         )
         self.window = _Window()
         self.window.editor = EditorTabs(events=self.events)
         self.api.window = self.window
-        self.api.items = _Services()
         self.api.project.create("flow", save_mode="root")
         self.api._forest = object()
 

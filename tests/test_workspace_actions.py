@@ -28,11 +28,13 @@ class _Api:
     def __init__(self):
         self.logs = []
         self.statuses = []
+        self.errors = []
+        self.ready = []
 
     def log(self, message):
         self.logs.append(str(message))
 
-    def set_status(self, message):
+    def set_status(self, message, timeout=None):
         self.statuses.append(str(message))
 
     def project_overlay(self):
@@ -41,8 +43,12 @@ class _Api:
     def ask_directory(self, _path=""):
         return ""
 
-    def show_error(self, _message):
-        pass
+    def show_error(self, message):
+        self.errors.append(str(message))
+
+    def publish_tree_ready(self, forest):
+        self.ready.append(forest)
+        return object()
 
 
 class _Tasks:
@@ -53,6 +59,28 @@ class _Tasks:
     def run(self, fn, **kwargs):
         self.runs.append((fn, kwargs))
         return object()
+
+
+class _Forest:
+    def __init__(self):
+        self.cache_id = "forest-1"
+        self.roots = [object(), object(), object()]
+        self.total_files = 12
+        self.system_tree_files = 5
+        self.xml_files = [object(), object()]
+        self.total_xml_files = 2
+        self.resolver_sections = 42
+
+
+class _Services:
+    """Сервис без ``tree_summary``: сводку строит платформа."""
+
+    def __init__(self):
+        self.calls = []
+        self.prebuild = self
+
+    def start(self, forest, config_dir, overlay=None):
+        self.calls.append((forest, config_dir, overlay))
 
 
 class WorkspaceActionsTest(unittest.TestCase):
@@ -95,6 +123,31 @@ class WorkspaceActionsTest(unittest.TestCase):
         self.assertEqual(tasks.runs, [])
         self.assertIn("Пересборка VFS уже выполняется.", api.logs)
         self.assertEqual(events.published, [])
+
+    def test_scan_done_builds_summary_without_core_service_method(self):
+        tasks = _Tasks()
+        actions, api, events = self._actions(tasks)
+        services = _Services()
+        actions.services = services
+        forest = _Forest()
+
+        actions._on_scan_done(forest, None)
+
+        self.assertEqual(services.calls, [(forest, Path("configs"), {})])
+        self.assertEqual(api.ready, [forest])
+        self.assertEqual(api.errors, [])
+        self.assertTrue(
+            any(
+                "Корней: 3; файлов LTX: 12; XML: 2; "
+                "в дереве system: 5; секций: 42" == status
+                for status in api.statuses
+            ),
+            api.statuses,
+        )
+        self.assertTrue(
+            any("Корней: 3; LTX: 12; XML: 2" in message for message in api.logs),
+            api.logs,
+        )
 
 
 if __name__ == "__main__":

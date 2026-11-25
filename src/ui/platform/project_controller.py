@@ -112,11 +112,8 @@ class ProjectControllerMixin:
 
     def _start_project_prebuild(self):
         """Пересобрать только затронутые проектом корни."""
-        ensure = getattr(self.services, "ensure_prebuild", None)
-        if not callable(ensure):
-            return
         try:
-            ensure(
+            self.services.prebuild.ensure(
                 overlay=self.project_overlay(),
                 roots=getattr(self, "_project_prebuild_roots", None),
             )
@@ -140,7 +137,7 @@ class ProjectControllerMixin:
         overlay = self.project_overlay()
         added, removed = self.workspace.apply_overlay(
             overlay,
-            services=self.services,
+            services=self.services.tree,
         )
         if added or removed:
             self.publish_tree_ready(forest)
@@ -148,13 +145,8 @@ class ProjectControllerMixin:
                 roots = self.workspace.roots_for(
                     self.workspace.last_added_paths
                 ) | set(self.workspace.last_removed_roots)
-                invalidate = getattr(
-                    self.services,
-                    "invalidate_paths",
-                    None,
-                )
-                if roots and callable(invalidate):
-                    invalidate(roots)
+                if roots:
+                    self.services.cache_control.invalidate_paths(roots)
                 else:
                     self._invalidate_resolver_cache()
             except Exception:
@@ -716,8 +708,8 @@ class ProjectControllerMixin:
                 return text
         try:
             if path.suffix.lower() == ".xml":
-                return self.services.read_xml_text(path)
-            return self.services.read_text(path)
+                return self.services.tree.read_xml_text(path)
+            return self.services.tree.read_text(path)
         except OSError:
             return ""
 
@@ -737,30 +729,6 @@ class ProjectControllerMixin:
         # Кеш здесь намеренно не сбрасывается: черновик живёт в памяти,
         # а ключ резолва уже включает overlay проекта. Инвалидация — и,
         # значит, пересборка корня — выполняется только при сохранении.
-        self._update_project_status()
-
-    def on_resolved_changed(self, tab_id, view, text):
-        """Пользователь правит итоговый (resolved) текст."""
-        if not self.project.is_active:
-            return
-
-        title = "%s (resolved)" % Path(view.root_path).name
-
-        try:
-            self.project.update_resolved_draft(
-                tab_id,
-                view.root_path,
-                title,
-                view.baseline_text,
-                text,
-                line_sources=view.line_sources,
-            )
-        except ProjectError as exc:
-            self.log("Проект: не удалось обновить resolved-черновик: %s" % exc)
-            return
-
-        # Как и для обычных файлов, правка resolved-текста не сбрасывает
-        # кеш: это происходит при сохранении resolved-черновика.
         self._update_project_status()
 
     def save_resolved_document(self, tab_id, view=None):
@@ -2021,7 +1989,7 @@ class ProjectControllerMixin:
 
         def work(log):
             return self.project.build_preview(
-                self.services,
+                self.services.patch,
                 forest,
                 log=log,
                 expected_project=project,
@@ -2079,7 +2047,7 @@ class ProjectControllerMixin:
 
     def _verify_preview_roundtrip(self, preview, project, forest):
         """Полный round-trip в фоне; результат прикладывается к элементам."""
-        verifier = self.services.patch_roundtrip
+        verifier = self.services.patch.patch_roundtrip
 
         def work(log):
             reports = []
@@ -2201,7 +2169,7 @@ class ProjectControllerMixin:
                 continue
             if item.plan is None:
                 continue
-            risks.extend(self.services.patch_commit.risk_keys(item.plan))
+            risks.extend(self.services.patch.patch_commit.risk_keys(item.plan))
         risks = tuple(dict.fromkeys(risks))
         if risks:
             answer = QMessageBox.question(
@@ -2226,7 +2194,7 @@ class ProjectControllerMixin:
         def work(log):
             return write_preview_use_case(
                 self.project,
-                self.services,
+                self.services.patch,
                 preview,
                 directory,
                 forest=forest,

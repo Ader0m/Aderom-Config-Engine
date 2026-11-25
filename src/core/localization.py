@@ -129,7 +129,7 @@ class LocalizationService:
 
     ``cache_service=None`` создаёт изолированный ``CacheService`` для
     standalone-использования и тестов. Production-композиция
-    (``CoreServices``) обязана передать общий ``CacheService``.
+    (``CoreComposition``) обязана передать общий ``CacheService``.
     """
 
     def __init__(

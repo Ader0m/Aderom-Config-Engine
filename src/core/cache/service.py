@@ -49,13 +49,23 @@ class CacheService:
         memory_cache=None,
         resolved_cache=None,
         format_version=CACHE_FORMAT_VERSION,
+        cache_dir=None,
+        resolved_max_entries=None,
+        resolved_max_chars=None,
+        resolved_max_disk_bytes=None,
     ):
         self._lock = threading.RLock()
         self._format_version = int(format_version)
         self._memory = memory_cache or ObjectCache(max_entries=64)
-        self._resolved = resolved_cache or ResolvedCache(
-            format_version=self._format_version,
-        )
+        if resolved_cache is None:
+            resolved_cache = ResolvedCache(
+                cache_dir=cache_dir,
+                max_entries=resolved_max_entries,
+                max_chars=resolved_max_chars,
+                max_disk_bytes=resolved_max_disk_bytes,
+                format_version=self._format_version,
+            )
+        self._resolved = resolved_cache
         # Семантическая модель ссылается на объекты Resolver4 и не
         # сериализуется. Держим только несколько корней в памяти.
         self._semantic = ObjectCache(max_entries=4)
@@ -281,22 +291,29 @@ class CacheService:
                 self._forget_locked(entry_key)
 
     def clear_namespace(self, namespace):
-        """Очистить память зарегистрированного backend'а; диск сохраняется.
+        """Очистить память backend'а namespace; диск сохраняется.
 
         Нужен владельцам namespace'ов для их локального ``clear_memory``,
         не затрагивающего остальные кэши общего ``CacheService``.
-        Метаданные снимаются без ``backend.delete``: иначе вместе с
-        памятью удалялась бы и дисковая запись. In-flight вычисления
-        этого namespace помечаются отменёнными: ожидающие получают
-        ошибку, а owner не записывает результат обратно в кэш.
+        Поддерживает зарегистрированные backend'ы и встроенные
+        ``resolve.text``/``xml``/``resolve.semantic``. Метаданные снимаются
+        без ``backend.delete``: иначе вместе с памятью удалялась бы и
+        дисковая запись. In-flight вычисления этого namespace помечаются
+        отменёнными: ожидающие получают ошибку, а owner не записывает
+        результат обратно в кэш.
         """
         namespace = str(namespace)
         with self._lock:
             backend = self._backends.get(namespace)
             if backend is None:
-                raise KeyError(
-                    "namespace %r не зарегистрирован" % namespace
-                )
+                if namespace == "resolve.semantic":
+                    backend = self._semantic
+                elif namespace in ("resolve.text", "xml"):
+                    backend = self._resolved
+                else:
+                    raise KeyError(
+                        "namespace %r не зарегистрирован" % namespace
+                    )
             keys = [
                 entry_key
                 for entry_key in self._meta

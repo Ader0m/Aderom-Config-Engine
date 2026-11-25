@@ -122,12 +122,10 @@ def main():
     from app.patching.audit import PatchAuditLog
     from app.paths import PathsAdapter
     from app.workspace import SnapshotService
-    from core.api.services import CoreServices
+    from core.composition import CoreComposition
     from core.cache.service import CacheService
     from core.tools.cache import (
         CACHE_FORMAT_VERSION,
-        FileCacheSystem,
-        ResolvedCache,
     )
     from core.tree.builder import TreeBuilder
     from core.tree.query import TreeQueryService
@@ -195,27 +193,21 @@ def main():
     # 1) Сервисы ядра (Композиционный корень создаёт их здесь)
     # --------------------------------------------------
 
-    # Общий кэш
-    cache = FileCacheSystem()
+    # Общий кэш: CacheService — единственный владелец памяти, resolved и
+    # зарегистрированных namespace-бэкендов. Отдельные FileCacheSystem и
+    # ResolvedCache в composition root больше не создаются.
     snapshot_service = SnapshotService()
-
-    # Дерево
-    resolved_cache = ResolvedCache(
+    cache_service = CacheService(
         cache_dir=generated_dir / "cache-v2" / "resolved",
-        max_entries=128,
-        max_chars=256_000_000,
-        # Один файл кэша — это один корень/XML. Рабочий набор большой
+        resolved_max_entries=128,
+        resolved_max_chars=256_000_000,
+        # Один файл кэша — это один корень/XML. Рабочий набор большого
         # VFS может быть больше тысяч файлов, поэтому ограничиваем не
         # количество, а общий объём (с запасом; типичный кэш — десятки МБ).
-        max_disk_bytes=1_000_000_000,
-        format_version=CACHE_FORMAT_VERSION,
-    )
-    cache_service = CacheService(
-        resolved_cache=resolved_cache,
+        resolved_max_disk_bytes=1_000_000_000,
         format_version=CACHE_FORMAT_VERSION,
     )
     tree_builder = TreeBuilder(
-        cache=cache,
         cache_service=cache_service,
     )
     tree_query = TreeQueryService()
@@ -225,12 +217,9 @@ def main():
 
     # Резолвер и сборка
     resolver_service = ResolverService(
-        cache=cache,
-        resolved_cache=resolved_cache,
         cache_service=cache_service,
     )
     xml_resolve_service = XmlResolveService(
-        resolved_cache=resolved_cache,
         cache_service=cache_service,
     )
     assembly_service = AssemblyService(
@@ -239,8 +228,8 @@ def main():
     )
 
     # Фасад (тонкий, только агрегирует сервисы)
-    services = CoreServices(
-        cache=cache,
+    services = CoreComposition(
+        cache=None,
         tree_builder=tree_builder,
         tree_query=tree_query,
         graph_builder=graph_builder,
@@ -251,10 +240,16 @@ def main():
         cache_service=cache_service,
         snapshot_service=snapshot_service,
     )
-    services.patch_commit.audit = PatchAuditLog.for_session(
+    services.patch.patch_commit.audit = PatchAuditLog.for_session(
         generated_dir,
     )
-    item_features = ItemFeatureService(services)
+    item_features = ItemFeatureService(
+        cache_service=services.cache_service,
+        generated_dir=services.generated_dir,
+        localization=services.data.localization,
+        localization_index=services.data.localization_index,
+        resolver=services.resolve.resolver,
+    )
 
     # 2) Сервисы платформы.
     events = EventBus()
@@ -416,7 +411,7 @@ def main():
     # 4) Главное окно. Сразу разворачиваем: рабочая среда рассчитана
     # на широкий экран (дерево + редактор + диагностика).
     window = MainWindow(api)
-    if getattr(window, "layout_restored", False):
+    if window.layout_restored:
         window.show()
     else:
         window.showMaximized()
@@ -427,15 +422,13 @@ def main():
 
     code = app.exec_()
 
-    services.stop_prebuild()
+    services.prebuild.stop()
     hints.close()
     loader.deactivate_all(log=api.log)
-    shutdown_tasks = getattr(tasks, "shutdown", None)
-    if callable(shutdown_tasks):
-        if not shutdown_tasks():
-            api.log(
-                "Не все фоновые задачи завершились за отведённое время"
-            )
+    if not tasks.shutdown():
+        api.log(
+            "Не все фоновые задачи завершились за отведённое время"
+        )
     sys.exit(code)
 
 

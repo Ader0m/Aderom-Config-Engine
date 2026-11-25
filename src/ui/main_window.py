@@ -104,7 +104,7 @@ class MainWindow(QMainWindow):
         self.splitter = QSplitter(Qt.Horizontal)
 
         # Дерево + строка поиска в левой панели
-        self.file_tree = FileTreeWidget(sort_fn=self.api.services.tree_query.sort_nodes)
+        self.file_tree = FileTreeWidget(sort_fn=self.api.services.tree.tree_query.sort_nodes)
         self.file_tree.file_opened.connect(
             lambda p: self.api.commands.execute("ui.open_file", p)
         )
@@ -364,7 +364,7 @@ class MainWindow(QMainWindow):
         forest = self.file_tree.forest
         if forest is None:
             return []
-        return self.api.services.tree_query.search_nodes(forest, query)
+        return self.api.services.tree.tree_query.search_nodes(forest, query)
 
     # -------------------------------------------------- события
     def _on_tree_ready(self, _payload=None):

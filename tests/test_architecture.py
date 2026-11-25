@@ -29,7 +29,7 @@ ROOT = Path(SRC)
 
 KNOWN_FILES = {
     "app": ROOT / "app" / "projects" / "service.py",
-    "core": ROOT / "core" / "facade.py",
+    "core": ROOT / "core" / "composition.py",
     "ui": ROOT / "ui" / "module_loader.py",
     "sdk": ROOT / "sdk" / "kernel" / "context.py",
     "modules": ROOT / "modules" / "base" / "section_graph.py",
@@ -312,6 +312,20 @@ class ArchitectureBoundaryTest(unittest.TestCase):
                 self.assertTrue(files, "не найдены .py файлы в %s" % package)
                 self.assertIn(known, files, "не найден ожидаемый файл %s" % known)
 
+    def test_composition_root_wires_item_service_into_platform_api(self):
+        tree = _parse(ROOT / "main.py")
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "PlatformApi"
+        ]
+        self.assertTrue(calls, "PlatformApi не создаётся в main.py")
+        keywords = {keyword.arg for keyword in calls[0].keywords}
+        self.assertIn("items", keywords)
+        self.assertIn("snapshot_service", keywords)
+
     def test_modules_do_not_import_core_app_platform_or_ui(self):
         for path in _files("modules"):
             roots = _imports(path)
@@ -336,6 +350,25 @@ class ArchitectureBoundaryTest(unittest.TestCase):
             roots = _imports(path)
             for forbidden in ("core", "app", "platform", "ui", "modules"):
                 self.assertNotIn(forbidden, roots, str(path))
+
+    def test_project_models_do_not_own_patch_models(self):
+        path = ROOT / "app" / "projects" / "models.py"
+        targets = _module_targets(path)
+        self.assertNotIn("core.api.patches", targets)
+        self.assertNotIn("core.patching", {
+            target.split(".")[0] + "." + target.split(".")[1]
+            if target.startswith("core.")
+            else target
+            for target in targets
+        })
+        names = {
+            node.name
+            for node in ast.walk(_parse(path))
+            if isinstance(node, ast.ClassDef)
+        }
+        self.assertFalse(
+            names & {"AssetChange", "PreviewItem", "ProjectPatchPreview"}
+        )
 
     def test_app_does_not_import_ui_platform_or_modules(self):
         for path in _files("app"):
@@ -546,6 +579,22 @@ class ArchitectureBoundaryTest(unittest.TestCase):
                         "app импортирует внутренности core: %s -> %s"
                         % (_rel(path), name)
                     )
+
+    def test_core_composition_is_not_public_layer_api(self):
+        self.assertFalse((ROOT / "core" / "api" / "services.py").exists())
+        from core.composition import CoreComposition
+
+        public_methods = [
+            name
+            for name, value in vars(CoreComposition).items()
+            if not name.startswith("_") and callable(value)
+        ]
+        self.assertEqual(public_methods, [])
+        for package in ("app", "ui", "modules", "sdk"):
+            for path in _files(package):
+                targets = _module_targets(path)
+                self.assertNotIn("core.composition", targets, str(path))
+                self.assertNotIn("core.api.services", targets, str(path))
 
     def test_sdk_loader_lives_outside_sdk(self):
         self.assertFalse((ROOT / "sdk" / "loader.py").exists())

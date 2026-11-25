@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from sdk.contracts.events import Events
+from ui.platform.tree_summary import summarize_forest
 
 UPSTREAM_GAME_DIR = Path("Anomaly 1.5.3 up") / "gamedata"
 MO2_GAMEDATA_DIR = Path("gamedata")
@@ -86,7 +87,7 @@ class WorkspaceActions:
 
     def detect_config_dir(self):
         candidates = config_dir_candidates(self.api.paths.app_dir)
-        return self.services.detect_config_dir(candidates)
+        return self.services.resolve.detect_config_dir(candidates)
 
     def choose_directory(self):
         directory = self.api.ask_directory(str(self.config_dir or ""))
@@ -133,23 +134,23 @@ class WorkspaceActions:
 
     def _scan(self, log, overlay=None):
         selected = self.config_dir
-        system = self.services.find_system_ltx(selected)
+        system = self.services.tree.find_system_ltx(selected)
         if system is None:
             raise RuntimeError("system.ltx не найден в %s" % selected)
 
-        scan_dir = self.services.resolve_scan_dir(selected)
+        scan_dir = self.services.tree.resolve_scan_dir(selected)
         if scan_dir is None:
             raise RuntimeError("Не удалось определить каталог сканирования")
 
         log("Сканирую: %s" % scan_dir)
-        forest = self.services.build_tree(
+        forest = self.services.tree.build_tree(
             scan_dir,
             system,
             log=log,
             clean=True,
             overlay=overlay,
         )
-        self.services.run_resolver(forest, selected, log=log)
+        self.services.resolve.run_resolver(forest, selected, log=log)
         return forest
 
     def _on_scan_done(self, forest, err):
@@ -163,7 +164,7 @@ class WorkspaceActions:
         self.events.publish(Events.CLEAN_RUN_FINISHED, ready)
 
         try:
-            self.services.start_prebuild(
+            self.services.prebuild.start(
                 forest,
                 self.config_dir,
                 overlay=self._overlay,
@@ -171,7 +172,7 @@ class WorkspaceActions:
         except Exception as exc:
             self.api.log("Не удалось запустить фоновую сборку: %s" % exc)
 
-        summary = self.services.tree_summary(forest)
+        summary = summarize_forest(forest)
         self.api.set_status(
             "Корней: %d; файлов LTX: %d; XML: %d; "
             "в дереве system: %d; секций: %s"

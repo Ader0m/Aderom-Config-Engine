@@ -12,7 +12,7 @@ from pathlib import Path
 from tests.support import SRC  # noqa: F401
 
 from core.resolver.assembly import AssemblyService
-from core.facade import CoreServices
+from core.composition import CoreComposition
 from core.tools.cache import FileCacheSystem
 from core.tree.graph import DisabledCache, ReferenceGraphBuilder
 from core.tools.cache import ResolvedCache
@@ -399,7 +399,7 @@ class ProjectServiceTest(unittest.TestCase):
             ResolvedCache(cache_dir=Path(d) / "cache"),
         )
         resolver.ensure_adapter(forest, cfg)
-        services = CoreServices(
+        services = CoreComposition(
             cache=cache,
             tree_builder=TreeBuilder(cache),
             tree_query=TreeQueryService(),
@@ -652,7 +652,7 @@ class ProjectServiceTest(unittest.TestCase):
             resolver = ResolverService(cache, ResolvedCache())
             resolver.ensure_adapter(forest, cfg)
 
-            services = CoreServices(
+            services = CoreComposition(
                 cache=cache,
                 tree_builder=TreeBuilder(cache),
                 tree_query=TreeQueryService(),
@@ -670,7 +670,7 @@ class ProjectServiceTest(unittest.TestCase):
             project.create("Preview")
             project.update_draft(source, "[w]\ncost = 150\n")
 
-            preview = project.build_preview(services, forest)
+            preview = project.build_preview(services.patch, forest)
 
             self.assertEqual(len(preview.items), 1)
             self.assertEqual(preview.patch_count, 1)
@@ -703,7 +703,7 @@ class ProjectServiceTest(unittest.TestCase):
                 "[w]\n; новый комментарий\ncost = 300\n",
             )
 
-            preview = project.build_preview(services, forest)
+            preview = project.build_preview(services.patch, forest)
 
             self.assertEqual(len(preview.items), 1)
             item = preview.items[0]
@@ -722,12 +722,12 @@ class ProjectServiceTest(unittest.TestCase):
             self.assertEqual(file.encoding, "windows-1251")
             self.assertIn(patch, item.rollback_paths)
 
-            confirmed_risks = services.patch_commit.risk_keys(item.plan)
-            authorization = services.patch_commit.authorize(
+            confirmed_risks = services.patch.patch_commit.risk_keys(item.plan)
+            authorization = services.patch.patch_commit.authorize(
                 item.generated,
                 confirmed_risks=confirmed_risks,
             )
-            written = services.patch_commit.commit(
+            written = services.patch.patch_commit.commit(
                 item.generated,
                 authorization,
                 Path(d) / "patch_mod",
@@ -762,7 +762,7 @@ class ProjectServiceTest(unittest.TestCase):
             resolver = ResolverService(cache, ResolvedCache())
             resolver.ensure_adapter(forest, cfg)
 
-            services = CoreServices(
+            services = CoreComposition(
                 cache=cache,
                 tree_builder=TreeBuilder(cache),
                 tree_query=TreeQueryService(),
@@ -781,24 +781,24 @@ class ProjectServiceTest(unittest.TestCase):
             project.update_draft(source, "[w]\ncost = 150\n")
 
             verify_flags = []
-            original_plan = services.plan_ltx_patch
+            original_plan = services.patch.plan_ltx_patch
 
             def plan_ltx(*args, **kwargs):
                 verify_flags.append(kwargs.get("verify_resolver", True))
                 return original_plan(*args, **kwargs)
 
-            services.plan_ltx_patch = plan_ltx
+            services.patch.plan_ltx_patch = plan_ltx
 
             generated = []
-            original_generate = services.generate_patch
+            original_generate = services.patch.generate_patch
 
             def generate_patch(plan):
                 generated.append(plan)
                 return original_generate(plan)
 
-            services.generate_patch = generate_patch
+            services.patch.generate_patch = generate_patch
 
-            preview = project.build_preview(services, forest)
+            preview = project.build_preview(services.patch, forest)
 
             # В Root-режиме поштучный патч не проверяется резолвером:
             # остаётся ровно один проход на объединённый план.
@@ -809,7 +809,7 @@ class ProjectServiceTest(unittest.TestCase):
             # В on_file поштучный патч — это и есть записываемый файл,
             # поэтому полная проверка обязана остаться.
             project.set_patch_mode("on_file")
-            preview = project.build_preview(services, forest)
+            preview = project.build_preview(services.patch, forest)
 
             self.assertTrue(verify_flags[-1])
             self.assertTrue(preview.items[0].ok, preview.items[0].error)
@@ -835,7 +835,7 @@ class ProjectServiceTest(unittest.TestCase):
             resolver = ResolverService(cache, ResolvedCache())
             resolver.ensure_adapter(forest, cfg)
 
-            services = CoreServices(
+            services = CoreComposition(
                 cache=cache,
                 tree_builder=TreeBuilder(cache),
                 tree_query=TreeQueryService(),
@@ -849,7 +849,7 @@ class ProjectServiceTest(unittest.TestCase):
                 xml_resolve_service=XmlResolveService(),
             )
 
-            baseline, sources = services.assemble_resolved(
+            baseline, sources = services.resolve.assemble_resolved(
                 root,
                 forest,
                 cfg,
@@ -868,7 +868,7 @@ class ProjectServiceTest(unittest.TestCase):
                 line_sources=sources,
             )
 
-            preview = project.build_preview(services, forest)
+            preview = project.build_preview(services.patch, forest)
             item = preview.items[0]
 
             self.assertTrue(item.ok, item.error)
@@ -898,7 +898,7 @@ class ProjectServiceTest(unittest.TestCase):
             resolver = ResolverService(cache, ResolvedCache())
             resolver.ensure_adapter(forest, cfg)
 
-            services = CoreServices(
+            services = CoreComposition(
                 cache=cache,
                 tree_builder=TreeBuilder(cache),
                 tree_query=TreeQueryService(),
@@ -917,7 +917,7 @@ class ProjectServiceTest(unittest.TestCase):
             project.update_draft(source_a, "[a]\nx = 2\n")
             project.update_draft(source_b, "[b]\ny = 2\n")
 
-            preview = project.build_preview(services, forest)
+            preview = project.build_preview(services.patch, forest)
 
             self.assertEqual(len(preview.items), 1)
             item = preview.items[0]
@@ -947,7 +947,7 @@ class ProjectServiceTest(unittest.TestCase):
             resolver = ResolverService(cache, ResolvedCache())
             resolver.ensure_adapter(forest, cfg)
 
-            services = CoreServices(
+            services = CoreComposition(
                 cache=cache,
                 tree_builder=TreeBuilder(cache),
                 tree_query=TreeQueryService(),
@@ -961,7 +961,7 @@ class ProjectServiceTest(unittest.TestCase):
                 xml_resolve_service=XmlResolveService(),
             )
 
-            baseline, sources = services.assemble_resolved(
+            baseline, sources = services.resolve.assemble_resolved(
                 root,
                 forest,
                 cfg,
@@ -979,7 +979,7 @@ class ProjectServiceTest(unittest.TestCase):
                 line_sources=sources,
             )
 
-            preview = project.build_preview(services, forest)
+            preview = project.build_preview(services.patch, forest)
             item = preview.items[0]
 
             self.assertTrue(item.ok, item.error)
@@ -1009,7 +1009,7 @@ class ProjectServiceTest(unittest.TestCase):
             resolver = ResolverService(cache, ResolvedCache())
             resolver.ensure_adapter(forest, cfg)
 
-            services = CoreServices(
+            services = CoreComposition(
                 cache=cache,
                 tree_builder=TreeBuilder(cache),
                 tree_query=TreeQueryService(),
@@ -1023,7 +1023,7 @@ class ProjectServiceTest(unittest.TestCase):
                 xml_resolve_service=XmlResolveService(),
             )
 
-            baseline, sources = services.assemble_resolved(
+            baseline, sources = services.resolve.assemble_resolved(
                 root,
                 forest,
                 cfg,
@@ -1044,7 +1044,7 @@ class ProjectServiceTest(unittest.TestCase):
 
             old_patch_before = existing_patch.read_bytes()
 
-            preview = project.build_preview(services, forest)
+            preview = project.build_preview(services.patch, forest)
             item = preview.items[0]
 
             self.assertTrue(item.ok, item.error)
@@ -1064,8 +1064,8 @@ class ProjectServiceTest(unittest.TestCase):
                 item.generated.text,
                 encoding="windows-1251",
             )
-            services.invalidate_cache()
-            resolved, sources = services.assemble_resolved(
+            services.cache_control.invalidate_cache()
+            resolved, sources = services.resolve.assemble_resolved(
                 root,
                 forest,
                 cfg,
@@ -1106,7 +1106,7 @@ class ProjectServiceTest(unittest.TestCase):
             resolver = ResolverService(cache, ResolvedCache())
             resolver.ensure_adapter(forest, cfg)
 
-            services = CoreServices(
+            services = CoreComposition(
                 cache=cache,
                 tree_builder=TreeBuilder(cache),
                 tree_query=TreeQueryService(),
@@ -1120,7 +1120,7 @@ class ProjectServiceTest(unittest.TestCase):
                 xml_resolve_service=XmlResolveService(),
             )
 
-            baseline, sources = services.assemble_resolved(
+            baseline, sources = services.resolve.assemble_resolved(
                 root,
                 forest,
                 cfg,
@@ -1139,7 +1139,7 @@ class ProjectServiceTest(unittest.TestCase):
                 line_sources=sources,
             )
 
-            preview = project.build_preview(services, forest)
+            preview = project.build_preview(services.patch, forest)
 
             self.assertEqual(len(preview.items), 1)
             item = preview.items[0]
@@ -1171,7 +1171,7 @@ class ProjectServiceTest(unittest.TestCase):
             project.update_draft(source_a, "[w]\ncost = 300\n")
             project.update_draft(source_b, "[w]\ncost = 400\n")
 
-            preview = project.build_preview(services, forest)
+            preview = project.build_preview(services.patch, forest)
 
             self.assertEqual(len(preview.items), 1)
             item = preview.items[0]
@@ -1212,7 +1212,7 @@ class ProjectServiceTest(unittest.TestCase):
             project.update_draft(source_a, "[a]\nx = 1\n")
             project.update_draft(source_b, "[b]\ny = 3\n")
 
-            preview = project.build_preview(services, forest)
+            preview = project.build_preview(services.patch, forest)
 
             self.assertEqual(len(preview.items), 1)
             item = preview.items[0]
@@ -1251,7 +1251,7 @@ class ProjectServiceTest(unittest.TestCase):
             project.update_draft(source_a, "[w]\ncost = 3\n")
             project.update_draft(source_b, "[w]\ncost = 4\n")
 
-            preview = project.build_preview(services, forest)
+            preview = project.build_preview(services.patch, forest)
 
             self.assertEqual(len(preview.items), 2)
             self.assertTrue(all(item.ok for item in preview.items))

@@ -52,7 +52,7 @@ class LtxPatchEngine(PatchEngine):
     def verify(self, generated: GeneratedPatch) -> VerificationResult:
         # Объединённому плану без одного diff модельная проверка
         # неприменима: его проверяет Resolver4. Это то же правило, что
-        # в ``CoreServices.generate_patch``.
+        # в ``CoreComposition.generate_patch``.
         if generated.plan.diff is None:
             return self.services.verify_patch_with_resolver(generated)
         model = self.services.verify_patch(generated)

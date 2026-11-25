@@ -15,7 +15,8 @@ from sdk.contracts.events import Events
 from ui.bus import EventBus
 from ui.operations import DONE
 from ui.platform_api import PlatformApi
-from app.projects import PreviewItem, ProjectService
+from app.patching.models import PreviewItem
+from app.projects import ProjectService
 
 
 class FakeEvents:
@@ -247,8 +248,10 @@ class PlatformApiTest(unittest.TestCase):
         }
         stopped = []
         services = SimpleNamespace(
-            prebuild_status=lambda: status,
-            stop_prebuild=lambda: stopped.append(True),
+            prebuild=SimpleNamespace(
+                status=lambda: status,
+                stop=lambda: stopped.append(True),
+            ),
         )
         api = PlatformApi(
             FakeEvents(),
@@ -676,7 +679,13 @@ class _RestoreResolver:
 
 class _RestoreServices:
     def __init__(self):
+        self.tree = self
         self.resolver = _RestoreResolver()
+        self.resolve = SimpleNamespace(resolver=self.resolver)
+        self.cache_control = SimpleNamespace(
+            invalidate_paths=lambda roots: self.resolver.invalidate_cache(),
+            invalidate_resolver_cache=self.resolver.invalidate_cache,
+        )
 
     def add_virtual_file(self, forest, path, text):
         if path in forest.files:
@@ -724,6 +733,8 @@ class TreeReadyPayloadTest(unittest.TestCase):
             self.assertIs(api._forest, forest)
             self.assertIsInstance(payload, TreeReady)
             self.assertEqual(payload.cache_id, "forest-1")
+            self.assertIsNotNone(payload.summary)
+            self.assertEqual(payload.summary.roots, 0)
             self.assertFalse(hasattr(payload, "forest"))
             self.assertEqual(seen, [payload])
 
@@ -1626,6 +1637,11 @@ class DocumentTextReaderTest(unittest.TestCase):
             calls = []
 
             class Services:
+                tree = None
+
+                def __init__(self):
+                    self.tree = self
+
                 def read_text(self, path):
                     calls.append(("text", Path(path)))
                     return "TEXT"

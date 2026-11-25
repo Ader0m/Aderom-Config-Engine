@@ -12,7 +12,8 @@ from PyQt5.QtWidgets import QMessageBox
 from tests.qt_support import qapp
 from tests.support import SRC  # noqa: F401
 
-from app.projects import PreviewItem, Project, ProjectPatchPreview
+from app.patching.models import PreviewItem, ProjectPatchPreview
+from app.projects import Project
 from core.patching.models import (
     GeneratedPatch,
     PatchFile,
@@ -117,7 +118,7 @@ class PatchWriteAsyncTest(unittest.TestCase):
             cache_id="SNAP",
         )
         services = Mock()
-        services.patch_commit.risk_keys.return_value = ()
+        services.patch.patch_commit.risk_keys.return_value = ()
         tasks = _Tasks()
         return (
             project,

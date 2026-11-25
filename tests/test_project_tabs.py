@@ -24,6 +24,10 @@ from ui.tasks import TaskService
 
 
 class _Services:
+    def __init__(self):
+        self.tree = self
+        self.cache_control = self
+
     def invalidate_paths(self, _roots):
         pass
 

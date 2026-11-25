@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Tuple
 
-from .models import PreviewItem, ProjectError
+from app.patching.models import PreviewItem
+from .models import ProjectError
 
 
 @dataclass(frozen=True)

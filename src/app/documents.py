@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import copy
 import logging
-import re
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,37 +27,12 @@ from sdk.contracts.events import Events
 log = logging.getLogger(__name__)
 
 
-_HEADER_RE = re.compile(r"^[ \t]*(?:!!|!|@)?\[([^\]\r\n]+)\]")
-_FIELD_PREFIXES = ("!", ">", "<")
-
-
 def normalize_text(text) -> str:
     """Привести переводы строк к ``\\n`` (внутренний формат документа)."""
     value = str(text or "")
     if "\r" not in value:
         return value
     return value.replace("\r\n", "\n").replace("\r", "\n")
-
-
-def header_name(line) -> Optional[str]:
-    """Имя секции из строки заголовка LTX (``[x]``, ``![x]``, ``@[x]``)."""
-    match = _HEADER_RE.match(str(line or ""))
-    if match is None:
-        return None
-    name = match.group(1).strip().lower()
-    return name or None
-
-
-def field_key(line) -> str:
-    """Ключ из строки ``ключ = значение`` (с учётом префиксов DLTX)."""
-    value = str(line or "").strip()
-    for prefix in _FIELD_PREFIXES:
-        if value.startswith(prefix):
-            value = value[1:].lstrip()
-            break
-    if "=" in value:
-        value = value.split("=", 1)[0]
-    return value.strip().lower()
 
 
 def collapse_duplicated_text(text, original=""):
@@ -242,17 +216,6 @@ def prepare_field_edit(
         parsed=new_parsed,
         section=section,
     )
-
-
-@dataclass
-class SectionSpan:
-    """Границы секции в документе (1-based, ``end`` — исключающая)."""
-
-    name: str
-    start: int
-    end: int
-    char_start: int = 0
-    char_end: int = 0
 
 
 @dataclass

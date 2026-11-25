@@ -66,7 +66,7 @@ class SectionCardMixin:
             )
             return False
 
-        query = self.services.semantic_query
+        query = self.services.resolve.semantic_query
         config_dir = self.workspace.config_dir or Path(
             getattr(forest, "scan_dir", "") or ""
         )

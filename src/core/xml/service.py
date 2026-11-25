@@ -37,7 +37,9 @@ class XmlResolveService:
         scripts_dir=None,
         cache_service=None,
     ):
-        self._resolved_cache = resolved_cache or ResolvedCache()
+        if resolved_cache is None and cache_service is None:
+            resolved_cache = ResolvedCache()
+        self._resolved_cache = resolved_cache
         self._cache_service = cache_service
         self._scripts_dir = scripts_dir
         self._lock = threading.RLock()
@@ -84,7 +86,10 @@ class XmlResolveService:
         return result
 
     def clear(self):
-        self._resolved_cache.clear()
+        if self._cache_service is not None:
+            self._cache_service.clear_namespace("xml")
+        elif self._resolved_cache is not None:
+            self._resolved_cache.clear()
 
     def cache_key(self, path, config_dir, dxml=True, overlay=None):
         resolver = self._resolver(config_dir, dxml)
@@ -92,6 +97,8 @@ class XmlResolveService:
 
     def has_resolved(self, path, config_dir, dxml=True, overlay=None):
         key = self.cache_key(path, config_dir, dxml, overlay=overlay)
+        if self._cache_service is not None:
+            return self._cache_service.has("xml", key)
         return self._resolved_cache.has(key)
 
     def has_resolved_by_key(self, key):

@@ -25,7 +25,7 @@ from pathlib import Path
 from tests.support import SRC  # noqa: F401
 
 from core.resolver.assembly import AssemblyService
-from core.facade import CoreServices
+from core.composition import CoreComposition
 from core.tools.cache import FileCacheSystem
 from core.tree.graph import DisabledCache, ReferenceGraphBuilder
 from core.tools.cache import ResolvedCache
@@ -179,7 +179,7 @@ class PatchModesTest(PatchDataSetBase):
     """Патчинг в трёх режимах проекта: Root, On-file, Override."""
 
     def _services(self):
-        return CoreServices(
+        return CoreComposition(
             cache=self.cache,
             tree_builder=TreeBuilder(self.cache),
             tree_query=TreeQueryService(),
@@ -204,7 +204,10 @@ class PatchModesTest(PatchDataSetBase):
             self.edited_text,
             line_sources=self.line_sources,
         )
-        preview = projects.build_preview(self._services(), self.forest)
+        preview = projects.build_preview(
+            self._services().patch,
+            self.forest,
+        )
 
         self.assertEqual(len(preview.items), 1, preview.items)
         item = preview.items[0]

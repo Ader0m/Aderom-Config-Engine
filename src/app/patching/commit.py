@@ -15,10 +15,8 @@ from typing import Tuple
 
 from core.api.patches import PatchCommitResult
 
-from app.projects.models import (
-    ProjectError,
-    ProjectPatchPreview,
-)
+from app.patching.models import ProjectPatchPreview
+from app.projects.models import ProjectError
 
 
 @dataclass(frozen=True)
@@ -43,7 +41,7 @@ def _patch_mod_name(project_name) -> str:
 
 def write_preview(
     project_service,
-    services,
+    patch,
     preview: ProjectPatchPreview,
     directory,
     *,
@@ -153,7 +151,7 @@ def write_preview(
                 )
 
             try:
-                authorization = services.patch_commit.authorize(
+                authorization = patch.patch_commit.authorize(
                     item.generated,
                     confirmed_risks=confirmed_risks,
                     roundtrip_report=item.roundtrip,
@@ -167,7 +165,7 @@ def write_preview(
                     raise ProjectError(
                         "Снимок VFS изменился: патч не записан."
                     )
-                result = services.patch_commit.commit(
+                result = patch.patch_commit.commit(
                     item.generated,
                     authorization,
                     mod_dir,
@@ -185,7 +183,7 @@ def write_preview(
 
             after = current_snapshot()
             if cancelled():
-                services.patch_commit.audit_outcome(
+                patch.patch_commit.audit_outcome(
                     result,
                     "cancelled",
                     "запись отменена",
@@ -193,7 +191,7 @@ def write_preview(
                 remove_paths(result.paths)
                 raise ProjectError("Запись патч-мода отменена.")
             if after != current or str(plan.snapshot_id or "") != after:
-                services.patch_commit.audit_outcome(
+                patch.patch_commit.audit_outcome(
                     result,
                     "rolled_back",
                     "снимок VFS изменился",
@@ -216,7 +214,7 @@ def write_preview(
         # фиксируем откат в аудите.
         for record in audit:
             try:
-                services.patch_commit.audit_outcome(
+                patch.patch_commit.audit_outcome(
                     record,
                     "rolled_back",
                     str(exc),

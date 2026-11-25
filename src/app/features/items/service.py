@@ -22,17 +22,22 @@ from .icons import ItemIconService
 
 
 class ItemFeatureService:
-    def __init__(self, services, generated_dir=None):
-        cache_dir = Path(
-            generated_dir or services.generated_dir
-        ) / "cache-v2" / "items"
-        cache_service = services.cache_service
+    def __init__(
+        self,
+        *,
+        cache_service,
+        generated_dir,
+        localization,
+        localization_index,
+        resolver,
+    ):
+        cache_dir = Path(generated_dir) / "cache-v2" / "items"
         # Локализация — общий сервис композиционного корня: подсказки и
         # карточки предметов используют один кэш и один снимок строк.
-        self.localization = services.localization
-        self.localization_index = services.localization_index
+        self.localization = localization
+        self.localization_index = localization_index
         self.catalog = ItemCatalogService(
-            services.resolver,
+            resolver,
             cache_dir=cache_dir,
             localization_service=self.localization,
             max_disk_bytes=256_000_000,

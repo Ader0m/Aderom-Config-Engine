@@ -436,6 +436,10 @@ class CanonicalRedirectTest(unittest.TestCase):
     class Provider:
         def __init__(self):
             self.calls = []
+            self.tree = self
+            self.resolve = self
+            self.data = self
+            self.graph = self
 
         def resolve_scan_dir(self, config_dir):
             self.calls.append(("scan", config_dir))
@@ -502,6 +506,9 @@ class CanonicalRedirectTest(unittest.TestCase):
 
     def test_section_graph_conversion_keeps_confidence(self):
         class Provider:
+            def __init__(self):
+                self.graph = self
+
             def build_section_graph(
                 self,
                 forest,

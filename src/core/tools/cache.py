@@ -57,14 +57,6 @@ def resolver_signature(resolver_script) -> str:
     )
 
 
-def invalidate_forest_signatures(forest):
-    """Оставить совместимый сброс на случай внешних вызовов."""
-    try:
-        forest._resolved_signature_memo = {}
-    except Exception:
-        pass
-
-
 def project_overlay_signature(overlay) -> str:
     """Подпись единого слоя правок проекта."""
     if overlay is None:

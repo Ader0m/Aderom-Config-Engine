@@ -45,6 +45,7 @@ from .platform.project_controller import ProjectControllerMixin
 from .platform.registration import RegistrationHub
 from .platform.resolved import ResolvedDocumentMixin
 from .platform.section_card import SectionCardMixin
+from .platform.tree_summary import summarize_forest
 
 
 def _is_platform_owner_value(owner):
@@ -153,7 +154,7 @@ class PlatformApi(
             file_readers=self.file_readers,
         )
         self.workspace = WorkspaceSession(
-            services,
+            getattr(services, "tree", services) if services is not None else None,
             snapshot_service=snapshot_service or SnapshotService(),
         )
         # Корни, которые нужно пересобрать после последней точечной
@@ -503,34 +504,14 @@ class PlatformApi(
         # следующая предсборка соберёт только старый «затронутый» корень
         # и оставит остальной кеш пустым.
         self._project_prebuild_roots = None
-        invalidate = getattr(
-            self.services,
-            "invalidate_resolver_cache",
-            None,
-        )
-        if callable(invalidate):
-            invalidate()
-            return
-        invalidate = getattr(self.services, "invalidate_cache", None)
-        if callable(invalidate):
-            invalidate()
-            return
-        resolver = getattr(self.services, "resolver", None)
-        if resolver is not None and hasattr(resolver, "invalidate_cache"):
-            resolver.invalidate_cache()
+        self.services.cache_control.invalidate_resolver_cache()
 
     def _invalidate_paths(self, paths):
-        """Инвалидировать только корни, в поддеревья которых входят пути.
-
-        Возвращает ``True``, если удалось определить затронутые корни.
-        Если путь не связан с деревом (или сервис не умеет точечную
-        инвалидацию), выполняется полная инвалидация.
-        """
+        """Инвалидировать только корни, в поддеревья которых входят пути."""
         paths = [Path(path) for path in (paths or ()) if path is not None]
         roots = self.workspace.roots_for(paths)
-        invalidate = getattr(self.services, "invalidate_paths", None)
-        if roots and callable(invalidate):
-            invalidate(roots)
+        if roots:
+            self.services.cache_control.invalidate_paths(roots)
             self._project_prebuild_roots = roots
             self.log("Проект: инвалидированы корни: %d" % len(roots))
             return True
@@ -565,21 +546,12 @@ class PlatformApi(
         return self.operations.clear_finished()
 
     def cancel_prebuild(self):
-        stop = getattr(self.services, "stop_prebuild", None)
-        if callable(stop):
-            stop()
-            return True
-        return False
+        self.services.prebuild.stop()
+        return True
 
     def sync_prebuild_operation(self):
         """Показать фоновую предсборку в общем центре операций."""
-        status_fn = getattr(self.services, "prebuild_status", None)
-        if not callable(status_fn):
-            return
-        try:
-            status = status_fn()
-        except Exception:
-            return
+        status = self.services.prebuild.status()
         state = str(status.get("state") or "idle")
         previous_state = self._prebuild_last_state
         self._prebuild_last_state = state
@@ -705,11 +677,7 @@ class PlatformApi(
                     or "—",
                 )
             )
-        summary = None
-        try:
-            summary = self.services.tree_summary(raw)
-        except Exception:
-            pass
+        summary = summarize_forest(raw)
         payload = TreeReady(
             cache_id=forest_snapshot,
             generation=int(self.workspace.generation),

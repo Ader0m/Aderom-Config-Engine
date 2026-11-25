@@ -158,14 +158,17 @@ def _filter_overlay(forest, root_path, overlay):
 class ResolverService:
     """Сервис ядра для оркестрации работы с внешним резолвером."""
 
-    def __init__(self, cache, resolved_cache=None, cache_service=None):
+    def __init__(self, cache=None, resolved_cache=None, cache_service=None):
         """
         Args:
-            cache: FileCacheSystem — общий кэш ядра.
-            resolved_cache: ResolvedCache — кэш результатов резолва.
+            cache: FileCacheSystem — legacy fallback для standalone/тестов.
+            resolved_cache: ResolvedCache — legacy fallback для
+                standalone/тестов; в production принадлежит CacheService.
         """
         self._cache = cache
-        self._resolved_cache = resolved_cache or ResolvedCache()
+        if resolved_cache is None and cache_service is None:
+            resolved_cache = ResolvedCache()
+        self._resolved_cache = resolved_cache
         self._cache_service = cache_service
         self._adapter = None
         self._adapter_context = None
@@ -184,7 +187,14 @@ class ResolverService:
 
     def invalidate_cache(self):
         """Сбросить кэш резолва (вызывается при «Пересборке VFS»)."""
-        self._resolved_cache.clear()
+        if self._cache_service is not None:
+            # В production backend'ом владеет CacheService; явные
+            # namespace'ы — контракт инвалидации, а не побочный эффект
+            # очистки XML-кэша.
+            self._cache_service.clear_namespace("resolve.text")
+            self._cache_service.clear_namespace("resolve.semantic")
+        if self._resolved_cache is not None:
+            self._resolved_cache.clear()
         with self._key_lock:
             self._key_cache.clear()
 

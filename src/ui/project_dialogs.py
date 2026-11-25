@@ -33,7 +33,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from app.projects import ProjectPatchPreview
+from app.patching.models import ProjectPatchPreview
 
 from .platform.theme import theme_service
 
