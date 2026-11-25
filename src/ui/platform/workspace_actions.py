@@ -96,7 +96,7 @@ class WorkspaceActions:
         self.run()
 
     def run(self):
-        if self.tasks.operation_active("vfs.rebuild"):
+        if self.tasks.operations.is_active("vfs.rebuild"):
             self.api.log("Пересборка VFS уже выполняется.")
             return
 

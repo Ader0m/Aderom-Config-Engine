@@ -893,6 +893,7 @@ class ResolvedDocumentPlatformTest(unittest.TestCase):
         api.window = FakeWindow()
         api.project.create("documents", save_mode="root")
         api.services = _FakeServices()
+        api.items = api.services
         api._forest = object()
         return api, events
 
@@ -993,6 +994,7 @@ class ResolvedDocumentPlatformTest(unittest.TestCase):
                 "[sec]\nkind = i_food\n",
                 (None, None, None),
             )
+            api.services = object()
             entry = api.item_entry(tab_id, "sec")
             self.assertIsNotNone(entry)
             self.assertEqual(entry.section, "sec")

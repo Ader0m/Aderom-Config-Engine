@@ -87,5 +87,9 @@
 
 - Шаг 5.5: round-trip выполняется в фоне, с прогрессом и отменой.
 - Этап 8: полный round-trip на эталонном наборе как release gate.
+  `tests/test_release_gate_reference.py` покрывает LTX-моды,
+  list/delete/create и XML/DXML (включая DXML include и повторное
+  чтение full-copy XML в новом VFS) с полной записью через
+  `PatchCommitService`.
 - При изменении семантики Resolver4 паритетные тесты и этот ADR
   пересматриваются отдельно.

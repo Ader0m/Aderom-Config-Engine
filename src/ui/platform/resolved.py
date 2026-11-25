@@ -905,6 +905,8 @@ class ResolvedDocumentMixin:
         document = self._get_or_restore_document(tab_id)
         if document is None or self._forest is None:
             return None
+        if self.items is None:
+            raise RuntimeError("PlatformApi не получил item feature service")
 
         overlay = (
             self.project_overlay()
@@ -915,7 +917,7 @@ class ResolvedDocumentMixin:
         block = document.section_block(section)
         if block is not None:
             block_text, offset = block
-            return self.services.build_item_entry_from_block(
+            return self.items.build_item_entry_from_block(
                 self._forest,
                 block_text,
                 section,
@@ -923,7 +925,7 @@ class ResolvedDocumentMixin:
                 overlay=overlay,
             )
 
-        return self.services.build_item_entry(
+        return self.items.build_item_entry(
             self._forest,
             document.current_text,
             section,

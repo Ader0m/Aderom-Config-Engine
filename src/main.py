@@ -278,6 +278,7 @@ def main():
         snapshot_service=snapshot_service,
         operations=operations,
         window_service=window_service,
+        items=item_features,
     )
     if removed_caches:
         api.log(

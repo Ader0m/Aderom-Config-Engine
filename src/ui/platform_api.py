@@ -109,11 +109,13 @@ class PlatformApi(
         snapshot_service=None,
         operations=None,
         window_service=None,
+        items=None,
     ):
         self.events = events
         self.commands = commands
         self.tasks = tasks
         self.services = services
+        self.items = items
         self.paths = _coerce_paths(paths)
         self.hints = hints
         self.window_service = window_service
