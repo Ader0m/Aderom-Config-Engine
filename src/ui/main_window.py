@@ -351,6 +351,13 @@ class MainWindow(QMainWindow):
     # Публичное имя для PlatformApi: окно не обязано вызывать private.
     def refresh_project_actions(self):
         self._update_project_menu()
+        self._refresh_changed_paths()
+
+    def _refresh_changed_paths(self):
+        """Перекрасить изменённые файлы проекта в дереве."""
+        getter = getattr(self.api, "project_changed_paths", None)
+        paths = getter() if callable(getter) else ()
+        self.file_tree.set_changed_paths(paths)
 
     def _update_operations(self):
         self.api.sync_prebuild_operation()
@@ -456,6 +463,17 @@ class MainWindow(QMainWindow):
         if callable(close_windows):
             try:
                 close_windows()
+            except Exception:
+                pass
+
+        close_preview = getattr(
+            self.api,
+            "close_patch_preview_dialog",
+            None,
+        )
+        if callable(close_preview):
+            try:
+                close_preview()
             except Exception:
                 pass
 

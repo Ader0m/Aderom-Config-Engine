@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple
 
@@ -777,6 +777,9 @@ def render_sections(root_path, resolver_script, sections, source_map=None,
                 value_text = str(value)
 
             item_source = src_of(getattr(item, "filename", ""))
+            item_line = int(getattr(item, "line", 0) or 0)
+            if item_source is not None and item_line > 0:
+                item_source = replace(item_source, line=item_line)
 
             if "\n" in value_text or "\r" in value_text:
                 parts = (

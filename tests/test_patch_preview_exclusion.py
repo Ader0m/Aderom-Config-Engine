@@ -6,7 +6,6 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QMessageBox
 
 from tests.qt_support import qapp
@@ -21,9 +20,22 @@ from core.patching.models import (
     PatchTarget,
     VerificationResult,
 )
-from ui.project_dialogs import ProjectPreviewDialog
+from ui.patch_preview import ProjectPreviewDialog
 
 _app = qapp()
+
+
+def _patch_path(item):
+    relative = Path(item.generated.files[0].relative_path)
+    parts = relative.parts
+    if parts and parts[0].lower() == "gamedata":
+        parts = parts[1:]
+    return Path(*parts)
+
+
+def _file_item(dialog, path):
+    dialog.select_patch_path(path)
+    return dialog.tree.currentItem()
 
 
 def _preview(excluded=False):
@@ -65,19 +77,20 @@ class PatchPreviewExclusionTest(unittest.TestCase):
     def test_toggle_excluded_marks_only_preview_item(self):
         preview = _preview()
         dialog = ProjectPreviewDialog(preview)
-        entry = dialog.list.item(0)
+        path = _patch_path(preview.items[0])
+        entry = _file_item(dialog, path)
 
         dialog._toggle_excluded(entry)
 
-        self.assertTrue(entry.data(Qt.UserRole).excluded)
+        self.assertTrue(dialog._selector_items()[0].excluded)
         self.assertFalse(preview.items[0].excluded)
-        self.assertIn("не включён", entry.text())
+        self.assertIn("исключён", dialog.tree.currentItem().toolTip(0))
         self.assertIn("Исключено: 1", dialog._header.text())
 
-        dialog._toggle_excluded(entry)
+        dialog._toggle_excluded(dialog.tree.currentItem())
 
-        self.assertFalse(entry.data(Qt.UserRole).excluded)
-        self.assertNotIn("не включён", entry.text())
+        self.assertFalse(dialog._selector_items()[0].excluded)
+        self.assertNotIn("исключён", dialog.tree.currentItem().toolTip(0))
         self.assertNotIn("Исключено", dialog._header.text())
 
     def test_write_passes_excluded_flag_to_callback(self):
@@ -86,6 +99,17 @@ class PatchPreviewExclusionTest(unittest.TestCase):
             preview.items[0],
             title="b.ltx",
             source_path=Path("gamedata") / "configs" / "b.ltx",
+            generated=replace(
+                preview.items[0].generated,
+                files=(
+                    PatchFile(
+                        relative_path=Path(
+                            "gamedata/configs/mod_ace_b.ltx"
+                        ),
+                        text="[b]\n",
+                    ),
+                ),
+            ),
             rollback_paths=(Path("gamedata") / "configs" / "b.ltx",),
         )
         preview = replace(preview, items=(preview.items[0], second))
@@ -100,7 +124,8 @@ class PatchPreviewExclusionTest(unittest.TestCase):
             on_write=on_write,
             write_enabled=True,
         )
-        dialog._toggle_excluded(dialog.list.item(0))
+        entry = _file_item(dialog, _patch_path(preview.items[0]))
+        dialog._toggle_excluded(entry)
         dialog._write()
 
         self.assertTrue(captured["preview"].items[0].excluded)
@@ -123,18 +148,19 @@ class PatchPreviewExclusionTest(unittest.TestCase):
             return True
 
         dialog = ProjectPreviewDialog(preview, on_rollback=on_rollback)
+        entry = _file_item(dialog, _patch_path(preview.items[0]))
 
         with patch(
-            "ui.project_dialogs.QMessageBox.question",
+            "ui.patch_preview.QMessageBox.question",
             return_value=QMessageBox.Yes,
         ) as question:
-            dialog._rollback_entry(dialog.list.item(0))
+            dialog._rollback_entry(entry)
 
         question.assert_called_once()
         self.assertIn("Вы уверены", question.call_args[0][2])
         self.assertIn("a.ltx", question.call_args[0][2])
         self.assertIs(captured["item"], preview.items[0])
-        self.assertEqual(dialog.list.count(), 0)
+        self.assertEqual(len(dialog.patch_paths()), 0)
 
     def test_rollback_cancelled_keeps_item(self):
         preview = _preview()
@@ -145,15 +171,16 @@ class PatchPreviewExclusionTest(unittest.TestCase):
             return True
 
         dialog = ProjectPreviewDialog(preview, on_rollback=on_rollback)
+        entry = _file_item(dialog, _patch_path(preview.items[0]))
 
         with patch(
-            "ui.project_dialogs.QMessageBox.question",
+            "ui.patch_preview.QMessageBox.question",
             return_value=QMessageBox.No,
         ):
-            dialog._rollback_entry(dialog.list.item(0))
+            dialog._rollback_entry(entry)
 
         self.assertEqual(called, [])
-        self.assertEqual(dialog.list.count(), 1)
+        self.assertEqual(len(dialog.patch_paths()), 1)
 
 
 if __name__ == "__main__":

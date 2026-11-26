@@ -51,16 +51,13 @@ class _Adapter:
             if patched_parents is None
             else patched_parents
         )
+        self.patch_files = {}
 
     def resolve_sections_details(self, root_path):
         return self.baseline, self.parents
 
-    def resolve_with_virtual_patch_details(
-        self,
-        root_path,
-        patch_filename,
-        patch_text,
-    ):
+    def resolve_with_virtual_files_details(self, root_path, patch_files):
+        self.patch_files = dict(patch_files)
         return (
             self.patched,
             self.sources,
@@ -314,6 +311,50 @@ class PatchRoundTripVerifierTest(unittest.TestCase):
         self.assertIn(
             "roundtrip_value_mismatch",
             [issue.code for issue in report.issues],
+        )
+
+    def test_all_patch_files_are_virtualized_at_their_paths(self):
+        source = Path("C:/game/gamedata/configs/a.ltx")
+        plan = PatchPlan(
+            source_path=source,
+            target=PatchTarget(
+                source_path=source,
+                root_path=Path("C:/game/gamedata/configs/system.ltx"),
+            ),
+            patch_mod="Test",
+            patch_file_rel=Path("defines.ltx"),
+            changes=(),
+            snapshot_id="SNAP",
+            format="ltx_override",
+        )
+        generated = GeneratedPatch(
+            plan=plan,
+            files=(
+                PatchFile(
+                    relative_path=Path("gamedata/configs/defines.ltx"),
+                    text="[hud_base]\nvalue = 1\n",
+                ),
+                PatchFile(
+                    relative_path=Path(
+                        "gamedata/configs/mod_system_mas_base.ltx"
+                    ),
+                    text="[scope_base]\nvalue = 2\n",
+                ),
+            ),
+            text="; combined preview",
+            verification=VerificationResult(ok=True),
+        )
+
+        adapter = _Adapter({}, {})
+        report = PatchRoundTripVerifier(adapter=adapter).verify(generated)
+
+        self.assertTrue(report.ok, report.issues)
+        self.assertEqual(
+            set(adapter.patch_files),
+            {
+                Path("C:/game/gamedata/configs/defines.ltx"),
+                Path("C:/game/gamedata/configs/mod_system_mas_base.ltx"),
+            },
         )
 
     def test_xml_is_verified_by_xml_verifier(self):

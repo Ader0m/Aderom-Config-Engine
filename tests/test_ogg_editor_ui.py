@@ -73,6 +73,8 @@ class _Ui:
         self.saved = {}
         self.dirty = []
         self.forest = None
+        self.logs = []
+        self.status_log = {}
 
     def workspace_forest(self):
         return self.forest
@@ -116,7 +118,10 @@ class _Ui:
         self.error = text
 
     def log(self, message):
-        pass
+        self.logs.append(str(message))
+
+    def log_status(self, key, message):
+        self.status_log[str(key)] = str(message)
 
 
 class _Tasks:
@@ -515,6 +520,53 @@ class OggEditorUiTest(unittest.TestCase):
                     item.text(FIELD_COLUMNS[4]),
                 )
                 self.assertEqual(item.text(FIELD_COLUMNS[5]), "35")
+            finally:
+                window.close()
+
+    def test_explorer_reports_collection_in_diagnostics(self):
+        with tempfile.TemporaryDirectory() as d:
+            game = Path(d) / "gamedata"
+            sounds = game / "sounds"
+            sounds.mkdir(parents=True)
+            comments = build_comment_packet(
+                "enc",
+                (
+                    build_xray_comment(
+                        XraySoundComment(min_dist=2.0, max_dist=42.0)
+                    ),
+                ),
+            )
+            (sounds / "a.ogg").write_bytes(_make_file(comments))
+
+            ctx = _Ctx()
+            window = OggExplorerWindow(
+                ctx,
+                on_open=lambda path: None,
+                on_add=lambda: None,
+            )
+            try:
+                window.set_game_root(game)
+                self.assertIn(
+                    "каталог звуков собран",
+                    ctx.ui.status_log["ogg_editor.collect"],
+                )
+
+                item = next(
+                    item
+                    for item in window._iter_items()
+                    if item.text(NAME_COLUMN) == "a.ogg"
+                )
+                window._try_edit_cell(item, FIELD_COLUMNS[1])
+                self.assertIn(
+                    "ещё загружаются",
+                    ctx.ui.status_log["ogg_editor.fields"],
+                )
+
+                window._load_visible_fields()
+                self.assertIn(
+                    "параметры загружены",
+                    ctx.ui.status_log["ogg_editor.fields"],
+                )
             finally:
                 window.close()
 

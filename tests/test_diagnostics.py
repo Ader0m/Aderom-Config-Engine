@@ -43,6 +43,22 @@ class DiagnosticsTest(unittest.TestCase):
         )
         self.assertEqual(log._fades, [])
 
+    def test_set_lines_replaces_without_fade(self):
+        log = DiagnosticsLog()
+        log.append_message("old")
+
+        log.set_lines(("first", "second"))
+
+        self.assertEqual(
+            log.toPlainText(),
+            "first\nsecond",
+        )
+        self.assertEqual(
+            self._block_color(log, 0),
+            DEFAULT_PALETTE.text.lower(),
+        )
+        self.assertEqual(log._fades, [])
+
     def test_status_updates_same_block(self):
         log = DiagnosticsLog()
         log.append_message("start")

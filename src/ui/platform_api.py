@@ -166,6 +166,11 @@ class PlatformApi(
         # Асинхронная запись патч-мода: один активный проход.
         self._patch_write_running = False
         self._patch_preview_dialog = None
+        # Окно предпросмотра живёт между открытиями: инвалидация файлов
+        # проекта только помечает его данные устаревшими.
+        self._patch_preview_stale = False
+        self._patch_preview_snapshot = ""
+        self._patch_log_lines = []
         self._close_pending = False
         self._close_flush_running = False
         self._close_flush_project = None
@@ -499,6 +504,7 @@ class PlatformApi(
         # Полная инвалидация отменяет и точечный набор корней: иначе
         # следующая предсборка соберёт только старый «затронутый» корень
         # и оставит остальной кеш пустым.
+        self._mark_patch_preview_stale()
         self._project_prebuild_roots = None
         self.services.cache_control.invalidate_resolver_cache()
 
@@ -506,6 +512,7 @@ class PlatformApi(
         """Инвалидировать только корни, в поддеревья которых входят пути."""
         paths = [Path(path) for path in (paths or ()) if path is not None]
         roots = self.workspace.roots_for(paths)
+        self._mark_patch_preview_stale()
         if roots:
             self.services.cache_control.invalidate_paths(roots)
             self._project_prebuild_roots = roots

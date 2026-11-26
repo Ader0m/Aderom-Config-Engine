@@ -26,10 +26,10 @@ from app.projects import (
 from app.patching.commit import write_preview as write_preview_use_case
 from app.projects import use_cases as project_use_cases
 from ..tasks import current_task
+from ..patch_preview import ProjectPreviewDialog
 from ..project_dialogs import (
     ProjectCreateDialog,
     ProjectLoadDialog,
-    ProjectPreviewDialog,
     ProjectSettingsDialog,
 )
 from .feature_flags import patch_write_enabled
@@ -53,6 +53,17 @@ class ProjectControllerMixin:
     def project_has_changes(self):
         return self.project.has_changes()
 
+    def project_changed_paths(self):
+        """Файлы активного проекта, изменённые относительно оригиналов."""
+        if not self.project.is_active:
+            return ()
+        paths = list(self.project.changed_paths())
+        paths.extend(
+            Path(draft.path)
+            for draft in self.project.changed_asset_drafts()
+        )
+        return tuple(paths)
+
     def project_has_dirty(self):
         return self.project.has_dirty()
 
@@ -66,6 +77,16 @@ class ProjectControllerMixin:
         overlay = self.project.project_overlay()
         self.workspace.update_overlay(getattr(overlay, "revision", ""))
         return overlay
+
+    def _mark_patch_preview_stale(self):
+        """Пометить живой предпросмотр патча устаревшим.
+
+        Пересборка не запускается здесь: окно обновится при следующем
+        открытии/явном запросе, как у «Просмотра игровых предметов».
+        """
+        if getattr(self, "_patch_preview_dialog", None) is None:
+            return
+        self._patch_preview_stale = True
 
     def refresh_workspace(self):
         """Обновить виртуальные файлы проекта и вернуть (added, removed)."""
@@ -527,6 +548,7 @@ class ProjectControllerMixin:
             self.log("Проект: настройка %s не изменена: %s" % (key, exc))
             return False
 
+        self._mark_patch_preview_stale()
         self.events.publish(
             Events.PROJECT_SETTINGS_CHANGED,
             {setting.key: normalized},
@@ -717,6 +739,24 @@ class ProjectControllerMixin:
             return self.services.tree.read_text(path)
         except OSError:
             return ""
+
+    def document_original_text(self, path):
+        """Исходный текст файла до правок проекта (для меток изменений)."""
+        if not self.project.is_active:
+            return None
+        draft = self.project.get_draft(Path(path))
+        if draft is None:
+            return None
+        return str(draft.original_text)
+
+    def document_change_ranges(self, path):
+        """Готовая карта изменённых строк черновика (если рассчитана)."""
+        if not self.project.is_active:
+            return None
+        draft = self.project.get_draft(Path(path))
+        if draft is None:
+            return None
+        return draft.change_ranges
 
     def on_document_changed(self, path, text):
         if not self.project.is_active:
@@ -1160,6 +1200,28 @@ class ProjectControllerMixin:
         """Callable для атомарной проверки зависимости в TaskService."""
         return lambda: self._project_tree_dependency() or ()
 
+    def _patch_preview_dependency(self):
+        """Зависимость предпросмотра патча от сборки VFS.
+
+        Пересборка заменяет лес, а предсборка наполняет резолв-кэш,
+        который использует патч-конвейер. ``None`` — дерева нет и
+        сборка не идёт; ``()`` — можно строить сразу.
+        """
+        dependencies = tuple(
+            key
+            for key in ("vfs.rebuild", "vfs.prebuild")
+            if self.operations.is_active(key)
+        )
+        if dependencies:
+            return dependencies
+        if self.has_forest():
+            return ()
+        return None
+
+    def _patch_preview_dependency_provider(self):
+        """Callable для атомарной проверки зависимости в TaskService."""
+        return lambda: self._patch_preview_dependency() or ()
+
     def create_project(self):
         if self.window is None:
             return
@@ -1553,6 +1615,7 @@ class ProjectControllerMixin:
         for key, value in dialog.module_setting_values().items():
             self.set_project_setting(key, value)
 
+        self._mark_patch_preview_stale()
         self._update_project_status()
         self.log(
             "Проект: DLTX=%s; DXML=%s"
@@ -1574,7 +1637,12 @@ class ProjectControllerMixin:
 
         for path in editor.open_paths():
             text = self.document_text(path)
-            editor.reload_path(path, text)
+            editor.reload_path(
+                path,
+                text,
+                baseline_text=self.document_original_text(path),
+                change_ranges=self.document_change_ranges(path),
+            )
             editor.mark_clean(path, text)
 
         handled = set()
@@ -1958,6 +2026,31 @@ class ProjectControllerMixin:
             logger.exception("Не удалось собрать список вкладок")
             return None
 
+    def _reset_patch_log(self):
+        self._patch_log_lines = []
+        dialog = getattr(self, "_patch_preview_dialog", None)
+        if dialog is not None:
+            try:
+                dialog.set_log_lines(())
+            except RuntimeError:
+                self._patch_preview_dialog = None
+
+    def _patch_log(self, message):
+        text = str(message)
+        self.log(text)
+        lines = getattr(self, "_patch_log_lines", None)
+        if lines is None:
+            lines = []
+            self._patch_log_lines = lines
+        if len(lines) < 5000:
+            lines.append(text)
+        dialog = getattr(self, "_patch_preview_dialog", None)
+        if dialog is not None:
+            try:
+                dialog.append_log(text)
+            except RuntimeError:
+                self._patch_preview_dialog = None
+
     def build_patch_preview(self):
         if self.window is None:
             return
@@ -1967,7 +2060,8 @@ class ProjectControllerMixin:
             self.show_error("Создайте или загрузите проект.")
             return
 
-        if self._forest is None:
+        dependency = self._patch_preview_dependency()
+        if dependency is None:
             self.show_error(
                 "Дерево не построено: сначала выполните «Пересобрать VFS»."
             )
@@ -1981,6 +2075,19 @@ class ProjectControllerMixin:
             )
             return
 
+        dialog = getattr(self, "_patch_preview_dialog", None)
+        if dependency and dialog is not None:
+            # Старый предпросмотр собран для другого снимка VFS.
+            self._patch_preview_stale = True
+        if (
+            not dependency
+            and dialog is not None
+            and not getattr(self, "_patch_preview_stale", False)
+            and self._patch_preview_is_current(dialog)
+        ):
+            if self._present_patch_preview():
+                return
+
         preview_key = "project.patch_preview:%s:%s" % (
             project.id,
             getattr(self._forest, "cache_id", "") or "",
@@ -1991,12 +2098,26 @@ class ProjectControllerMixin:
             return
 
         self.autosave_project()
-        self.set_status("Подготовка патча проекта…")
-        self.log("Проект: подготовка патча…")
+        self._reset_patch_log()
+        if dependency:
+            self.set_status("Подготовка патча: ожидание сборки VFS…")
+            self._patch_log("Проект: ожидание пересборки VFS…")
+        else:
+            self.set_status("Подготовка патча проекта…")
+            self._patch_log("Проект: подготовка патча…")
 
-        forest = self._forest
+        # Снимок VFS берётся после зависимости: пересборка могла
+        # заменить лес, и предпросмотр обязан строиться по актуальному.
+        forest_holder = {"value": None}
 
         def work(log):
+            forest = self._forest
+            if forest is None:
+                raise RuntimeError(
+                    "Дерево не построено: сначала выполните "
+                    "«Пересобрать VFS»."
+                )
+            forest_holder["value"] = forest
             return self.project.build_preview(
                 self.services.patch,
                 forest,
@@ -2010,18 +2131,32 @@ class ProjectControllerMixin:
                 preview,
                 err,
                 project=project,
-                forest=forest,
+                forest=forest_holder["value"],
             ),
-            on_log=self.log,
+            on_log=self._patch_log,
             operation_key=preview_key,
             title="Предпросмотр патча: %s" % project.name,
             owner=project.id,
+            depends_on=self._patch_preview_dependency_provider(),
         )
+
+    def _patch_preview_is_current(self, dialog):
+        preview = getattr(dialog, "preview", None)
+        project = self.project.active
+        if preview is None or project is None:
+            return False
+        if getattr(preview, "project", None) is not project:
+            return False
+        expected = str(
+            getattr(self, "_patch_preview_snapshot", "") or ""
+        )
+        current = str(getattr(self._forest, "cache_id", "") or "")
+        return not expected or not current or expected == current
 
     def _on_preview_ready(self, preview, err, project=None, forest=None):
         if err is not None:
             self.set_status("Ошибка подготовки патча")
-            self.log("Проект: ошибка подготовки патча: %s" % err)
+            self._patch_log("Патч: ошибка подготовки: %s" % err)
             self.show_error(str(err))
             return
 
@@ -2080,7 +2215,7 @@ class ProjectControllerMixin:
                     project,
                     forest,
                 ),
-                on_log=self.log,
+                on_log=self._patch_log,
                 operation_key="project.roundtrip:%s:%s" % (
                     project.id,
                     getattr(forest, "cache_id", "") or "",
@@ -2089,8 +2224,17 @@ class ProjectControllerMixin:
                 owner=project.id,
             )
         except Exception as exc:
-            self.log("Патч: не удалось запустить полную проверку: %s" % exc)
-            self._show_preview_dialog(preview)
+            self._patch_log(
+                "Патч: не удалось запустить полную проверку: %s" % exc
+            )
+            self._patch_preview_stale = False
+            self._patch_preview_snapshot = str(
+                getattr(forest, "cache_id", "") or ""
+            )
+            self._show_preview_dialog(
+                preview,
+                log_lines=self._patch_log_lines,
+            )
 
     def _on_roundtrip_done(self, preview, reports, error, project, forest):
         if preview.project is not self.project.active:
@@ -2100,7 +2244,9 @@ class ProjectControllerMixin:
             self.set_status("Лес устарел: проверка отменена", 6000)
             return
         if error is not None:
-            self.log("Патч: полная проверка не выполнена: %s" % error)
+            self._patch_log(
+                "Патч: полная проверка не выполнена: %s" % error
+            )
             self.show_error(
                 "Полная проверка патча не выполнена:\n%s" % error
             )
@@ -2118,23 +2264,66 @@ class ProjectControllerMixin:
             )
             for index, item in enumerate(preview.items)
         )
-        self._show_preview_dialog(replace(preview, items=items))
-
-    def _show_preview_dialog(self, preview):
-        dialog = ProjectPreviewDialog(
-            preview,
-            self.window,
-            on_write=self.write_preview,
-            on_rollback=self.rollback_preview_item,
-            on_cancel=self.cancel_patch_write,
-            write_enabled=patch_write_enabled(),
+        self._patch_preview_stale = False
+        self._patch_preview_snapshot = str(
+            getattr(forest, "cache_id", "") or ""
         )
-        self._patch_preview_dialog = dialog
+        self._show_preview_dialog(
+            replace(preview, items=items),
+            log_lines=getattr(self, "_patch_log_lines", []),
+        )
+
+    def _present_patch_preview(self):
+        dialog = getattr(self, "_patch_preview_dialog", None)
+        if dialog is None:
+            return False
         try:
-            dialog.exec_()
-        finally:
-            if getattr(self, "_patch_preview_dialog", None) is dialog:
-                self._patch_preview_dialog = None
+            dialog.showMaximized()
+            dialog.raise_()
+            dialog.activateWindow()
+        except RuntimeError:
+            self._patch_preview_dialog = None
+            return False
+        return True
+
+    def _show_preview_dialog(self, preview, log_lines=None):
+        dialog = getattr(self, "_patch_preview_dialog", None)
+        if dialog is None:
+            dialog = ProjectPreviewDialog(
+                preview,
+                self.window,
+                on_write=self.write_preview,
+                on_rollback=self.rollback_preview_item,
+                on_cancel=self.cancel_patch_write,
+                write_enabled=patch_write_enabled(),
+                log_lines=(
+                    getattr(self, "_patch_log_lines", [])
+                    if log_lines is None
+                    else log_lines
+                ),
+            )
+            self._patch_preview_dialog = dialog
+        else:
+            dialog.set_preview(
+                preview,
+                log_lines=(
+                    getattr(self, "_patch_log_lines", [])
+                    if log_lines is None
+                    else log_lines
+                ),
+            )
+        self._present_patch_preview()
+
+    def close_patch_preview_dialog(self):
+        """Закрыть живое окно предпросмотра при завершении приложения."""
+        dialog = getattr(self, "_patch_preview_dialog", None)
+        self._patch_preview_dialog = None
+        if dialog is None:
+            return
+        try:
+            dialog.force_close()
+        except RuntimeError:
+            pass
 
     def _forest_is_current(self, forest) -> bool:
         current = self._forest
@@ -2224,7 +2413,7 @@ class ProjectControllerMixin:
             self.tasks.run(
                 work,
                 on_done=self._on_patch_write_done,
-                on_log=self.log,
+                on_log=self._patch_log,
                 owner=owner,
                 operation_key="project.patch_write:%s" % project.id,
                 title="Запись патча: %s" % project.name,
@@ -2303,7 +2492,7 @@ class ProjectControllerMixin:
             return
         if error is not None:
             self.set_status("Ошибка записи патча", 6000)
-            self.log("Проект: ошибка записи патча: %s" % error)
+            self._patch_log("Патч: ошибка записи патча: %s" % error)
             self.show_error(str(error))
             return
         if result is None:
@@ -2313,9 +2502,11 @@ class ProjectControllerMixin:
             "Патч-мод создан: %s" % result.mod_dir.name,
             7000,
         )
-        self.log("Проект: записано файлов патча %d" % len(result.written))
+        self._patch_log(
+            "Патч: записано файлов %d" % len(result.written)
+        )
         for record in result.audit:
-            self.log(
+            self._patch_log(
                 "Патч: план %s, снимок %s, файлов %d"
                 % (
                     record.plan_id,
@@ -2325,11 +2516,11 @@ class ProjectControllerMixin:
             )
         report_lines = self._patch_report_lines(result)
         for line in report_lines:
-            self.log("Патч: " + line)
+            self._patch_log("Патч: " + line)
 
         if result.excluded_count:
-            self.log(
-                "Проект: исключено из патча файлов %d"
+            self._patch_log(
+                "Патч: исключено файлов %d"
                 % result.excluded_count
             )
 

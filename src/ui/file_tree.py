@@ -125,6 +125,10 @@ class FileTreeWidget(QTreeWidget):
         self._group_children = {}   # key виртуальной папки -> список entries
         self._populated = set()
         self._highlight = set()
+        self._changed = set()
+        self._changed_brush = QBrush(
+            QColor(theme_service().palette.syn_comment)
+        )
 
         self.itemDoubleClicked.connect(self._on_double_clicked)
         self.itemExpanded.connect(self._on_expanded)
@@ -266,6 +270,8 @@ class FileTreeWidget(QTreeWidget):
         )
         item.setData(0, Qt.UserRole, key)
         item.setIcon(0, self.style().standardIcon(QStyle.SP_FileIcon))
+        if key in self._changed:
+            item.setForeground(0, self._changed_brush)
         self._path_to_item[key] = item
         if parent_key is not None:
             self._child_index[(parent_key, name)] = item
@@ -304,6 +310,30 @@ class FileTreeWidget(QTreeWidget):
         self._populate(item, key, entries)
         self._populated.add(key)
 
+    # -------------------------------------------------- изменения проекта
+    def set_changed_paths(self, paths):
+        """Подсветить названия файлов, изменённых в проекте.
+
+        Набор хранится на всё время жизни дерева: файлы добавляются
+        лениво, и цвет должен примениться при создании их элементов.
+        """
+        changed = {
+            str(Path(path))
+            for path in (paths or ())
+            if path is not None
+        }
+        if changed == self._changed:
+            return
+        self._changed = changed
+        self._apply_changed_colors()
+
+    def _apply_changed_colors(self):
+        for key, item in self._path_to_item.items():
+            if key in self._changed:
+                item.setForeground(0, self._changed_brush)
+            else:
+                item.setForeground(0, QBrush())
+
     # -------------------------------------------------- поиск: подсветка
     def highlight(self, paths):
         self._highlight = {str(p) for p in paths}
@@ -324,7 +354,11 @@ class FileTreeWidget(QTreeWidget):
         self.HL_COLOR = QColor(
             theme_service().token("tree_highlight")
         )
+        self._changed_brush = QBrush(
+            QColor(theme_service().palette.syn_comment)
+        )
         self.highlight(self._highlight)
+        self._apply_changed_colors()
         self.viewport().update()
 
     # -------------------------------------------------- поиск: показать узел
@@ -377,6 +411,10 @@ class FileTreeWidget(QTreeWidget):
         key = item.data(0, Qt.UserRole)
         if key and not key.startswith("::"):
             self.file_opened.emit(key)
+
+    def item_for_path(self, path):
+        """Вернуть уже созданный элемент реального пути (или ``None``)."""
+        return self._path_to_item.get(str(Path(path)))
 
     def path_at(self, pos):
         item = self.itemAt(pos)

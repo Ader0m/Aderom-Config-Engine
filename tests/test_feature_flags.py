@@ -30,7 +30,7 @@ from ui.platform.feature_flags import (
     patch_write_enabled,
 )
 from ui.platform.project_controller import ProjectControllerMixin
-from ui.project_dialogs import ProjectPreviewDialog
+from ui.patch_preview import ProjectPreviewDialog
 
 _app = qapp()
 

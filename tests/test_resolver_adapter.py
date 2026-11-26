@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import pickle
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -34,6 +35,22 @@ class _Resolver:
         ]
 
 
+class _LineItem(_Item):
+    def __init__(self, first, second, filename, line):
+        super().__init__(first, second, filename)
+        self.line = line
+
+
+class _LineResolver(_Resolver):
+    def load(self):
+        self.data = [
+            ("s1", _Section([
+                _LineItem("a", "1", "defines", 2),
+                _LineItem("b", "2", "defines", 7),
+            ])),
+        ]
+
+
 class ResolverAdapterTest(unittest.TestCase):
     def _adapter(self):
         adapter = LtxResolverAdapter.__new__(LtxResolverAdapter)
@@ -55,6 +72,54 @@ class ResolverAdapterTest(unittest.TestCase):
         self.assertIs(file_sources[0], file_sources[1])
         self.assertIs(file_sources[0], file_sources[-1])
         self.assertEqual(len(text.split("\n")), len(sources))
+
+    def test_line_sources_carry_source_line_numbers(self):
+        adapter = self._adapter()
+        adapter._cls = _LineResolver
+        _text, sources = adapter.assemble_resolved(Path("system.ltx"))
+
+        file_sources = [
+            src
+            for src in sources
+            if (
+                src is not None
+                and src.kind == "file"
+                and src.line > 0
+            )
+        ]
+        self.assertEqual([src.line for src in file_sources], [2, 7])
+
+    def test_virtual_files_are_loaded_at_their_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            configs = Path(temp) / "configs"
+            configs.mkdir()
+            root = configs / "system.ltx"
+            root.write_text(
+                '[system]\nvalue = 1\n#include "defines.ltx"\n',
+                encoding="utf-8",
+            )
+            (configs / "defines.ltx").write_text(
+                "[hud_base]\ncost = 100\n",
+                encoding="utf-8",
+            )
+
+            sections, _sources, duplicates, _parents = (
+                LtxResolverAdapter().resolve_with_virtual_files_details(
+                    root,
+                    {
+                        configs / "defines.ltx": (
+                            "[hud_base]\ncost = 150\n"
+                        ),
+                        configs / "mod_system_custom.ltx": (
+                            "[scope_base]\nvalue = 2\n"
+                        ),
+                    },
+                )
+            )
+
+        self.assertEqual(sections["hud_base"]["cost"], "150")
+        self.assertEqual(sections["scope_base"]["value"], "2")
+        self.assertEqual(duplicates, {})
 
     def test_pickle_keeps_shared_line_sources(self):
         text, sources = self._adapter().assemble_resolved(Path("system.ltx"))

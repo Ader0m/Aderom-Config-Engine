@@ -7,7 +7,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from core.api.paths import path_key
 
@@ -60,6 +60,9 @@ class ProjectDraft:
     revision: int = 0
     updated_at: float = 0.0
     saved_at: float = 0.0
+    # Производная карта изменённых строк относительно original_text.
+    # None означает, что карту ещё нужно пересчитать.
+    change_ranges: Optional[Tuple[Tuple[int, int], ...]] = None
 
     @property
     def is_dirty(self) -> bool:
@@ -123,6 +126,7 @@ class ProjectResolvedDraft:
     revision: int = 0
     updated_at: float = 0.0
     saved_at: float = 0.0
+    change_ranges: Optional[Tuple[Tuple[int, int], ...]] = None
 
     @property
     def is_dirty(self) -> bool:

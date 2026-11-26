@@ -3,6 +3,7 @@
 
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from tests.support import SRC  # noqa: F401
 
@@ -144,6 +145,20 @@ class _Session:
     has_tree = True
     forest = object()
     config_dir = None
+
+
+class _CountingTasks(_Tasks):
+    def __init__(self):
+        self.calls = []
+
+    def run(self, work, on_done, on_log=None, **kwargs):
+        self.calls.append(kwargs)
+        return super().run(
+            work,
+            on_done,
+            on_log=on_log,
+            **kwargs,
+        )
 
 
 class _WaitingTasks:
@@ -305,6 +320,118 @@ class ItemViewerShowTest(unittest.TestCase):
             self.assertEqual(
                 ctx.ui.window.card.section(),
                 "item",
+            )
+        finally:
+            feature.close()
+
+
+class ItemViewerReopenTest(unittest.TestCase):
+    def _feature(self):
+        ctx = _Ctx()
+        ctx.tasks = _CountingTasks()
+        ctx.events = _Events()
+        return ctx, ItemViewerFeature(ctx, _Session())
+
+    def test_reopen_shows_existing_window_without_rebuild(self):
+        ctx, feature = self._feature()
+        try:
+            feature.show()
+            window = feature._window
+            self.assertEqual(len(ctx.tasks.calls), 1)
+
+            window.hide()
+            feature.show()
+
+            self.assertEqual(len(ctx.tasks.calls), 1)
+            self.assertIs(feature._window, window)
+            self.assertIs(ctx.ui.window, window)
+        finally:
+            feature.close()
+
+    def test_invalidation_marks_refresh_and_reopen_rebuilds(self):
+        ctx, feature = self._feature()
+        try:
+            feature.show()
+            window = feature._window
+            window.show()
+
+            ctx.events.publish(Events.TREE_READY, None)
+
+            self.assertTrue(feature._catalog_stale)
+            self.assertEqual(window.refresh_btn.text(), "Обновить*")
+            self.assertEqual(len(ctx.tasks.calls), 1)
+
+            # Пока окно видно, повторный вызов только поднимает его.
+            feature.show()
+            self.assertEqual(len(ctx.tasks.calls), 1)
+
+            window.hide()
+            feature.show()
+
+            self.assertEqual(len(ctx.tasks.calls), 2)
+            self.assertFalse(feature._catalog_stale)
+            self.assertEqual(window.refresh_btn.text(), "Обновить")
+        finally:
+            feature.close()
+
+    def test_refresh_button_forces_rebuild(self):
+        ctx, feature = self._feature()
+        try:
+            feature.show()
+            window = feature._window
+            window.show()
+            ctx.events.publish(Events.TREE_READY, None)
+
+            window.refresh_btn.click()
+
+            self.assertEqual(len(ctx.tasks.calls), 2)
+            self.assertFalse(feature._catalog_stale)
+            self.assertEqual(window.refresh_btn.text(), "Обновить")
+        finally:
+            feature.close()
+
+    def test_close_during_refresh_keeps_window_hidden(self):
+        ctx, feature = self._feature()
+        try:
+            feature.show()
+            window = feature._window
+            window.show()
+
+            ctx.tasks = _WaitingTasks()
+            window.refresh_btn.click()
+            self.assertEqual(len(ctx.tasks.calls), 1)
+
+            window.close()
+            self.assertFalse(window.isVisible())
+
+            work, on_done, _kwargs = ctx.tasks.calls[0]
+            result = work(lambda _message: None)
+            on_done(result, None)
+
+            self.assertFalse(window.isVisible())
+            self.assertFalse(feature._show_on_done)
+        finally:
+            feature.close()
+
+    def test_project_saved_ltx_marks_stale_but_binary_does_not(self):
+        ctx, feature = self._feature()
+        try:
+            feature.show()
+
+            ctx.events.publish(
+                Events.PROJECT_SAVED,
+                SimpleNamespace(path=Path("textures/item.dds")),
+            )
+            self.assertFalse(feature._catalog_stale)
+
+            ctx.events.publish(
+                Events.PROJECT_SAVED,
+                SimpleNamespace(path=Path("system.ltx")),
+            )
+            self.assertTrue(feature._catalog_stale)
+            self.assertEqual(
+                feature._window.refresh_btn.text(),
+                "Обновить*",
             )
         finally:
             feature.close()

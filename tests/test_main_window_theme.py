@@ -11,6 +11,7 @@ from unittest.mock import patch
 from tests.support import SRC  # noqa: F401
 
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QTreeWidgetItem
 
 from sdk import FileOpenHandler
@@ -19,7 +20,7 @@ from tests.qt_support import qapp
 from ui.bus import EventBus
 from ui.main_window import MainWindow
 from ui.platform_api import PlatformApi
-from ui.platform.theme import DEFAULT_PALETTE, apply_theme
+from ui.platform.theme import DEFAULT_PALETTE, apply_theme, theme_service
 
 
 class _ChoiceHandler(FileOpenHandler):
@@ -97,6 +98,31 @@ class MainWindowThemeTest(unittest.TestCase):
                 editor.editor.paper().name(),
                 "#112233",
             )
+
+    def test_changed_file_name_is_green_after_edit(self):
+        with tempfile.TemporaryDirectory() as d:
+            window = self._window(d)
+            window.api.project.create("changed")
+            source = Path(d) / "configs" / "a.ltx"
+            source.parent.mkdir(parents=True)
+            source.write_text("[a]\nx = 1\n", encoding="cp1251")
+
+            item = QTreeWidgetItem(window.file_tree)
+            item.setData(0, Qt.UserRole, str(source))
+            window.file_tree.addTopLevelItem(item)
+            window.file_tree._path_to_item[str(source)] = item
+
+            window.api.on_document_changed(source, "[a]\nx = 2\n")
+
+            self.assertEqual(
+                item.foreground(0).color().name(),
+                QColor(theme_service().palette.syn_comment).name(),
+            )
+
+            window.api.project.remove_draft(source)
+            window.refresh_project_actions()
+
+            self.assertEqual(item.foreground(0).style(), Qt.NoBrush)
 
     def test_choose_open_handler_returns_key_of_selected_label(self):
         with tempfile.TemporaryDirectory() as d:

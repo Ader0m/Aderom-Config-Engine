@@ -571,23 +571,26 @@ class LtxResolverAdapter:
             engine=engine,
         )
 
-    def _resolve_with_virtual_patch_resolver(
+    def _resolve_with_virtual_files_resolver(
         self,
         root_path,
-        patch_filename: str,
-        patch_text: str,
+        patch_files,
     ):
-        """Загрузить корень с виртуальным патчем и вернуть Resolver4."""
+        """Загрузить корень с виртуальными файлами и вернуть Resolver4."""
         import os
 
         from core.tools.fs import pattern_match
 
         resolver = self._make(root_path)
-        root_path = Path(root_path)
-        patch_path = root_path.parent / patch_filename
-
-        patch_norm = os.path.normcase(os.path.abspath(str(patch_path)))
-        folder_norm = os.path.normcase(os.path.abspath(str(root_path.parent)))
+        patches = {}
+        folder_names = {}
+        for path, text in (patch_files or {}).items():
+            current = os.path.normcase(os.path.abspath(str(path)))
+            patches[current] = str(text or "")
+            folder = os.path.dirname(current)
+            folder_names.setdefault(folder, set()).add(
+                os.path.basename(current).lower()
+            )
 
         original_read_lines = resolver._read_lines
         original_load_file = resolver._load_file
@@ -595,13 +598,18 @@ class LtxResolverAdapter:
 
         def read_lines(path):
             current = os.path.normcase(os.path.abspath(str(path)))
-            if current == patch_norm:
-                return str(patch_text).replace("\r\n", "\n").split("\n")
+            if current in patches:
+                return (
+                    patches[current]
+                    .replace("\r\n", "\n")
+                    .replace("\r", "\n")
+                    .split("\n")
+                )
             return original_read_lines(path)
 
         def load_file(fn, inc_path, name, current_file_name, depth):
             current = os.path.normcase(os.path.abspath(str(fn)))
-            if current == patch_norm:
+            if current in patches:
                 previous = current_file_name[0]
                 current_file_name[0] = name
                 resolver._ltx_load(
@@ -624,12 +632,9 @@ class LtxResolverAdapter:
         def file_list(folder, mask):
             result = list(original_file_list(folder, mask))
             current = os.path.normcase(os.path.abspath(str(folder)))
-            if current == folder_norm and pattern_match(
-                patch_filename,
-                mask,
-            ):
-                if patch_filename not in result:
-                    result.append(patch_filename)
+            for name in folder_names.get(current, ()):
+                if pattern_match(name, mask) and name not in result:
+                    result.append(name)
             return sorted(set(result), key=lambda value: value.lower())
 
         resolver._read_lines = read_lines
@@ -638,6 +643,19 @@ class LtxResolverAdapter:
 
         resolver.load()
         return resolver
+
+    def _resolve_with_virtual_patch_resolver(
+        self,
+        root_path,
+        patch_filename: str,
+        patch_text: str,
+    ):
+        """Загрузить корень с одним виртуальным патчем."""
+        root_path = Path(root_path)
+        return self._resolve_with_virtual_files_resolver(
+            root_path,
+            {root_path.parent / patch_filename: patch_text},
+        )
 
     def resolve_with_virtual_patch(
         self,
@@ -672,6 +690,19 @@ class LtxResolverAdapter:
             root_path,
             patch_filename,
             patch_text,
+        )
+        return (
+            self._to_section_dict(resolver),
+            self._to_section_sources(resolver),
+            self._to_section_duplicates(resolver),
+            self._to_section_parents(resolver),
+        )
+
+    def resolve_with_virtual_files_details(self, root_path, patch_files):
+        """Несколько виртуальных файлов + источники, дубли и родители."""
+        resolver = self._resolve_with_virtual_files_resolver(
+            root_path,
+            patch_files,
         )
         return (
             self._to_section_dict(resolver),

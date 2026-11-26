@@ -35,8 +35,9 @@ TABS_NAME = "tabs.json"
 
 # v1 — плоский project.json без поля schema_version (до Этапа 3).
 # v2 — schema_version и нормализованный save_mode.
+# v3 — карта изменённых строк в черновиках; старые карты считаются лениво.
 LEGACY_SCHEMA_VERSION = 1
-PROJECT_SCHEMA_VERSION = 2
+PROJECT_SCHEMA_VERSION = 3
 
 MIGRATION_BACKUP_PREFIX = ".migration_backup_"
 _MIGRATION_BACKUP_ITEMS = (

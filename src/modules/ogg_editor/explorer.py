@@ -1293,6 +1293,10 @@ class OggExplorerWindow(QWidget):
         if self._game_root is None:
             self.tree.clear()
             self.status.setText("Сначала выполните «Пересобрать VFS».")
+            self.ctx.ui.log_status(
+                "ogg_editor.collect",
+                "OGG: каталог звуков не определён — требуется пересборка VFS",
+            )
             return
 
         sounds_root = Path(self._game_root) / "sounds"
@@ -1317,6 +1321,10 @@ class OggExplorerWindow(QWidget):
         self._scan_generation += 1
         generation = self._scan_generation
         self.status.setText("Сканирование звуков…")
+        self.ctx.ui.log_status(
+            "ogg_editor.collect",
+            "OGG: сборка каталога звуков…",
+        )
 
         def work(log):
             entries = scan_sounds(
@@ -1344,6 +1352,10 @@ class OggExplorerWindow(QWidget):
         if error is not None:
             self.status.setText("Ошибка сканирования: %s" % error)
             self.ctx.log("ogg_editor: ошибка сканирования: %s" % error)
+            self.ctx.ui.log_status(
+                "ogg_editor.collect",
+                "OGG: ошибка сборки каталога звуков",
+            )
             return
 
         self._entries = tuple(result.entries or ())
@@ -1358,6 +1370,11 @@ class OggExplorerWindow(QWidget):
         self.status.setText(
             "Найдено .ogg: %d | изменено: %d | новых: %d"
             % (len(self._entries), changed_count, new_count)
+        )
+        self.ctx.ui.log_status(
+            "ogg_editor.collect",
+            "OGG: каталог звуков собран: найдено %d, изменено %d, новых %d"
+            % (len(self._entries), changed_count, new_count),
         )
 
         if self.filter_edit.text().strip():
@@ -1640,6 +1657,10 @@ class OggExplorerWindow(QWidget):
             return
 
         paths = set(payloads)
+        self.ctx.ui.log_status(
+            "ogg_editor.fields",
+            "OGG: чтение параметров: %d файл(ов)…" % len(payloads),
+        )
 
         def work(log):
             result = {}
@@ -1674,6 +1695,7 @@ class OggExplorerWindow(QWidget):
         if error is not None:
             for path in paths:
                 values[path] = (None, str(error))
+            self.ctx.log("ogg_editor: ошибка чтения параметров: %s" % error)
 
         for path, value in values.items():
             self._fields_cache[path] = value
@@ -1687,6 +1709,11 @@ class OggExplorerWindow(QWidget):
                 continue
             self._apply_fields_to_item(item, value[0], value[1])
             item.setData(0, _FIELDS_ROLE, True)
+
+        self.ctx.ui.log_status(
+            "ogg_editor.fields",
+            "OGG: параметры загружены: %d" % len(values),
+        )
 
     # ------------------------------------------------------------ правка ячейки
     def apply_cell_edit(self, item, column, value):
@@ -2066,6 +2093,10 @@ class OggExplorerWindow(QWidget):
         if not self._require_project():
             return
         if item.data(0, _FIELDS_ROLE) is not True:
+            self.ctx.ui.log_status(
+                "ogg_editor.fields",
+                "OGG: параметры ещё загружаются, подождите…",
+            )
             self.ctx.ui.set_status(
                 "Параметры ещё загружаются, подождите…",
                 3000,

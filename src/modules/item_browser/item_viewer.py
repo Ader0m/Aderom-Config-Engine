@@ -447,6 +447,12 @@ class ItemViewerFeature:
         self._request_seq = 0
         self._catalog = None
         self._images = {}
+        # Каталог пересобирается лениво: после инвалидации system.ltx
+        # окно остаётся живым, а данные обновляются при повторном
+        # открытии или по кнопке «Обновить».
+        self._catalog_stale = False
+        self._stale_seq = 0
+        self._show_on_done = False
 
         # Контекст редактирования system.ltx. Текст, источники и dirty
         # принадлежат живому resolved-документу; модуль хранит только
@@ -500,6 +506,7 @@ class ItemViewerFeature:
         self._card_req_sub = None
         self._project_sub = None
         self._project_saved_sub = None
+        self._tree_sub = None
         if events is not None:
             self._doc_sub = events.subscribe(
                 Events.RESOLVED_DOCUMENT_CHANGED,
@@ -508,6 +515,10 @@ class ItemViewerFeature:
             self._tab_sub = events.subscribe(
                 Events.UI_TAB_CLOSED,
                 self._on_tab_closed,
+            )
+            self._tree_sub = events.subscribe(
+                Events.TREE_READY,
+                self._on_tree_ready,
             )
             self._project_sub = events.subscribe(
                 Events.PROJECT_CHANGED,
@@ -567,13 +578,49 @@ class ItemViewerFeature:
 
     # -------------------------------------------------- жизненный цикл
     def show(self):
+        """Показать окно; повторное открытие не пересобирает каталог."""
         self._disposed = False
+        if self._window is not None:
+            if self._catalog_stale and not self._window.isVisible():
+                self._show_on_done = True
+                self._start_catalog_build()
+                return
+            self._present_window()
+            return
+        self._show_on_done = True
+        self._start_catalog_build()
+
+    def refresh(self):
+        """Принудительно пересобрать каталог по кнопке «Обновить»."""
+        self._disposed = False
+        self._show_on_done = False
+        self._start_catalog_build()
+
+    def _present_window(self):
+        if self._window is None:
+            return False
+        self._window.set_refresh_pending(self._catalog_stale)
+        return self.ctx.ui.open_window(
+            WindowSpec(
+                key=self.WINDOW_KEY,
+                title="Просмотр предметов",
+                kind="floating",
+                state_key="item_browser.item_viewer",
+            ),
+            self._window,
+        )
+
+    def _start_catalog_build(self):
         if self.ctx.tasks.operation_active("items.catalog"):
             self.ctx.ui.log("Просмотр предметов уже выполняется.")
+            if self._window is not None:
+                self._present_window()
+                self._show_on_done = False
             return
 
         self._request_seq += 1
         token = self._request_seq
+        stale_seq = self._stale_seq
         waiting_for_vfs = self.ctx.tasks.operation_active("vfs.rebuild")
         if waiting_for_vfs:
             self.ctx.ui.set_status("Предметы: ожидание сборки VFS…")
@@ -700,7 +747,12 @@ class ItemViewerFeature:
 
         self.ctx.tasks.run(
             work,
-            on_done=lambda result, err: self._on_done(result, err, token),
+            on_done=lambda result, err: self._on_done(
+                result,
+                err,
+                token,
+                stale_seq,
+            ),
             on_log=self._on_log,
             operation_key="items.catalog",
             title="Каталог предметов",
@@ -719,8 +771,26 @@ class ItemViewerFeature:
             except Exception:
                 log.exception("Не удалось обновить тему карточки предмета")
 
+    def _mark_catalog_stale(self, reason=""):
+        """Отметить каталог устаревшим без пересборки в UI-потоке."""
+        self._catalog_stale = True
+        self._stale_seq += 1
+        if self._window is not None:
+            self._window.set_refresh_pending(True)
+        if reason:
+            log.debug("Каталог предметов устарел: %s", reason)
+
+    def _on_tree_ready(self, _payload=None):
+        """Новый снимок VFS мог изменить резолв system.ltx."""
+        self._mark_catalog_stale("готово новое дерево VFS")
+
+    def _on_window_closed(self):
+        """Пользователь скрыл окно: завершённая сборка его не откроет."""
+        self._show_on_done = False
+
     def close(self):
         self._disposed = True
+        self._show_on_done = False
         self._field_jobs.clear()
         self._field_job_active = False
         self._field_pump_scheduled = False
@@ -752,6 +822,7 @@ class ItemViewerFeature:
             getattr(self, "_card_req_sub", None),
             getattr(self, "_project_sub", None),
             getattr(self, "_project_saved_sub", None),
+            getattr(self, "_tree_sub", None),
         ):
             if sub is not None and hasattr(sub, "unsubscribe"):
                 try:
@@ -761,16 +832,18 @@ class ItemViewerFeature:
         self._doc_sub = None
         self._tab_sub = None
         self._card_req_sub = None
+        self._tree_sub = None
 
     # -------------------------------------------------- фоновая задача
     def _on_log(self, message):
         self.ctx.ui.log(str(message))
 
-    def _on_done(self, result, err, token):
+    def _on_done(self, result, err, token, stale_seq):
         if token != self._request_seq:
             return
 
         if err is not None:
+            self._show_on_done = False
             self.ctx.ui.set_status("Ошибка")
             self.ctx.ui.log(
                 "Ошибка просмотра предметов: %s" % err
@@ -806,7 +879,8 @@ class ItemViewerFeature:
                 theme_color=self.ctx.ui.theme_color,
                 color_defs=self._color_definitions,
                 attach_hints=self._attach_hints,
-                on_refresh=self.show,
+                on_refresh=self.refresh,
+                on_closed=self._on_window_closed,
                 can_edit=self._can_edit,
                 on_replace_line=lambda line, text: self._replace_line(
                     self._tab_id,
@@ -878,15 +952,13 @@ class ItemViewerFeature:
                 self.ctx.ui.log(
                     "Просмотр предметов: выбрана секция %s" % pending
                 )
-        self.ctx.ui.open_window(
-            WindowSpec(
-                key=self.WINDOW_KEY,
-                title="Просмотр предметов",
-                kind="floating",
-                state_key="item_browser.item_viewer",
-            ),
-            self._window,
-        )
+        # Инвалидация, пришедшая во время сборки, оставляет пометку:
+        # актуальные данные будут собраны при следующем открытии/обновлении.
+        self._catalog_stale = stale_seq != self._stale_seq
+        self._window.set_refresh_pending(self._catalog_stale)
+        if self._show_on_done:
+            self._show_on_done = False
+            self._present_window()
 
     # -------------------------------------------------- редактирование
     def _apply_context(self, context):
@@ -896,8 +968,28 @@ class ItemViewerFeature:
         self._root_text = str(context.get("text") or "")
         self._root_sources = tuple(context.get("line_sources") or ())
 
-    def _on_project_saved(self, _event):
-        """Обновить отрисовку цветов после сохранения XML-файлов проекта."""
+    @staticmethod
+    def _saved_event_invalidates_catalog(event):
+        """Сохранение LTX/XML меняет резолв system.ltx."""
+        path = getattr(event, "path", None)
+        if path is None:
+            return False
+        path = Path(path)
+        if path.name.lower() == "system.ltx":
+            return True
+        return path.suffix.lower() in (".ltx", ".xml")
+
+    def _on_project_saved(self, event):
+        """Отметить каталог устаревшим и обновить цвета после сохранения."""
+        saved_events = (
+            event if isinstance(event, (list, tuple)) else (event,)
+        )
+        if any(
+            self._saved_event_invalidates_catalog(saved)
+            for saved in saved_events
+        ):
+            self._mark_catalog_stale("сохранён LTX/XML проекта")
+
         cards = []
         if self._window is not None:
             cards.append(getattr(self._window, "card", None))
@@ -915,6 +1007,9 @@ class ItemViewerFeature:
         проверяют право на правку в момент действия, поэтому достаточно
         вернуть документ в реестр.
         """
+        # Смена проекта меняет overlay, а значит и резолв system.ltx.
+        if self._window is not None:
+            self._mark_catalog_stale("смена проекта")
         # Удержания относились к освобождённым документам.
         self._retained.clear()
         if self._disposed or not self._tab_id or self._root_path is None:
@@ -1145,10 +1240,12 @@ class ItemViewerFeature:
                 self._pending_focus_line = focus_line
             if full:
                 self._pending_full = True
+                self._mark_catalog_stale("system.ltx")
             elif sections:
                 self._pending_sections.update(sections)
             elif not focus_line:
                 self._pending_full = True
+                self._mark_catalog_stale("system.ltx")
 
         for card_tab_id, record in list(self._cards.items()):
             root_tab, section, _card = record
@@ -1190,20 +1287,7 @@ class ItemViewerFeature:
         requested = set()
 
         if self._window is not None and self._tab_id:
-            if full:
-                if self._window.isVisible():
-                    self.show()
-                else:
-                    section = self._window.card.section()
-                    if section:
-                        requested.add(
-                            (self._tab_id, str(section).lower())
-                        )
-                        self._request_entry_refresh(
-                            self._tab_id,
-                            section,
-                        )
-            else:
+            if not full:
                 for section in sections:
                     requested.add((self._tab_id, section.lower()))
                     self._request_entry_refresh(
@@ -3605,6 +3689,7 @@ class ItemViewerWindow(QDialog):
         color_defs=None,
         attach_hints=None,
         on_refresh=None,
+        on_closed=None,
         can_edit=None,
         on_replace_line=None,
         on_delete_line=None,
@@ -3633,6 +3718,7 @@ class ItemViewerWindow(QDialog):
         self._color_defs = color_defs if color_defs is not None else {}
         self._attach_hints = attach_hints
         self._on_refresh = on_refresh
+        self._on_closed = on_closed
         self._can_edit = can_edit or (lambda: False)
         self._on_replace_line = on_replace_line
         self._on_delete_line = on_delete_line
@@ -3659,6 +3745,7 @@ class ItemViewerWindow(QDialog):
         self._updating = False
         self._populating_fields = False
         self._current_entry = None
+        self._refresh_pending = False
 
         self._filter_timer = QTimer(self)
         self._filter_timer.setSingleShot(True)
@@ -3799,14 +3886,15 @@ class ItemViewerWindow(QDialog):
         self.create_btn.setEnabled(self._on_create_item is not None)
         buttons.addWidget(self.create_btn)
 
-        refresh_btn = QPushButton("Обновить")
-        refresh_btn.clicked.connect(self._refresh)
-        buttons.addWidget(refresh_btn)
+        self.refresh_btn = QPushButton("Обновить")
+        self.refresh_btn.setToolTip("Обновить каталог")
+        self.refresh_btn.clicked.connect(self._refresh)
+        buttons.addWidget(self.refresh_btn)
 
         buttons.addStretch(1)
 
         close_btn = QPushButton("Закрыть")
-        close_btn.clicked.connect(self.hide)
+        close_btn.clicked.connect(self.close)
         buttons.addWidget(close_btn)
 
         layout.addLayout(buttons)
@@ -4140,6 +4228,11 @@ class ItemViewerWindow(QDialog):
             self.card.set_section(None)
 
     # -------------------------------------------------- фильтр / кнопки
+    def closeEvent(self, event):
+        super().closeEvent(event)
+        if event.isAccepted() and callable(self._on_closed):
+            self._on_closed()
+
     def showEvent(self, event):
         super().showEvent(event)
         self.card.refresh()
@@ -4206,6 +4299,18 @@ class ItemViewerWindow(QDialog):
         if entry is not None:
             self.list_view.setCurrentIndex(self.proxy.index(0, 0))
         return entry
+
+    def set_refresh_pending(self, pending):
+        """Пометить кнопку «Обновить», если каталог устарел."""
+        self._refresh_pending = bool(pending)
+        self.refresh_btn.setText(
+            "Обновить*" if self._refresh_pending else "Обновить"
+        )
+        self.refresh_btn.setToolTip(
+            "Обновить каталог: system.ltx изменён"
+            if self._refresh_pending
+            else "Обновить каталог"
+        )
 
     def _refresh(self):
         if self._on_refresh is not None:

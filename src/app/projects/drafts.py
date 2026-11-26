@@ -5,8 +5,9 @@
 атомарную запись. Он не знает про активный проект, overlay, предпросмотр
 и Qt: этим владеет ``ProjectService``.
 
-Формат не меняется. Версии формата поднимаются только вместе с
-one-time migration проекта.
+Формат расширяется аддитивно: старые черновики читаются без миграции,
+новые поля (карта изменённых строк) пересчитываются лениво. Критические
+изменения формата поднимаются вместе с one-time migration проекта.
 """
 
 from __future__ import annotations
@@ -27,6 +28,10 @@ from core.api.paths import path_key
 
 from app.documents import collapse_duplicated_text
 
+from .line_changes import (
+    deserialize_change_map,
+    serialize_change_map,
+)
 from .models import (
     ProjectAssetDraft,
     ProjectDraft,
@@ -264,6 +269,12 @@ class DraftStore:
             payload["original_text"] = _pack_text(original)
         if saved != current:
             payload["saved_text"] = _pack_text(saved)
+        change_map = serialize_change_map(
+            draft.change_ranges,
+            draft.revision,
+        )
+        if change_map is not None:
+            payload["change_map"] = change_map
         return payload
 
     def read_text_drafts(self, project_dir) -> List[ProjectDraft]:
@@ -299,15 +310,20 @@ class DraftStore:
                 "saved_text",
                 default=current,
             )
+            revision = int(data.get("revision") or 0)
             return ProjectDraft(
                 path=path,
                 original_text=original,
                 current_text=current,
                 saved_text=saved,
                 is_new=bool(data["is_new"]),
-                revision=int(data.get("revision") or 0),
+                revision=revision,
                 updated_at=float(data.get("updated_at") or 0.0),
                 saved_at=float(data.get("saved_at") or 0.0),
+                change_ranges=deserialize_change_map(
+                    data.get("change_map"),
+                    revision,
+                ),
             )
         except Exception as exc:
             log.warning(
@@ -456,6 +472,12 @@ class DraftStore:
             data["original_text"] = _pack_text(original)
         if saved != current:
             data["saved_text"] = _pack_text(saved)
+        change_map = serialize_change_map(
+            draft.change_ranges,
+            draft.revision,
+        )
+        if change_map is not None:
+            data["change_map"] = change_map
         return data
 
     def read_resolved_drafts(
@@ -503,6 +525,7 @@ class DraftStore:
                     saved_text,
                     original_text,
                 )
+            revision = int(data.get("revision") or 0)
             return ProjectResolvedDraft(
                 root_path=Path(data["root_path"]),
                 title=str(data.get("title") or ""),
@@ -513,9 +536,13 @@ class DraftStore:
                 line_sources=_deserialize_line_sources(
                     data.get("line_sources")
                 ),
-                revision=int(data.get("revision") or 0),
+                revision=revision,
                 updated_at=float(data.get("updated_at") or 0.0),
                 saved_at=float(data.get("saved_at") or 0.0),
+                change_ranges=deserialize_change_map(
+                    data.get("change_map"),
+                    revision,
+                ),
             )
         except Exception as exc:
             log.warning(

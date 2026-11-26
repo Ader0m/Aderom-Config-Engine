@@ -48,6 +48,34 @@ def _canonical_changes(changes):
     ]
 
 
+def _config_root(root_path) -> Path:
+    """Каталог configs, относительно которого записаны файлы патча."""
+    root = Path(root_path)
+    for directory in root.parents:
+        if directory.name.lower() == "configs":
+            return directory
+    return root.parent
+
+
+def _virtual_patch_files(root_path, generated: GeneratedPatch):
+    """Разместить все файлы патча по их реальным путям в configs."""
+    config_root = _config_root(root_path)
+    files = {}
+    for file in generated.files:
+        relative = Path(file.relative_path)
+        parts = relative.parts
+        if (
+            len(parts) >= 3
+            and parts[0].lower() == "gamedata"
+            and parts[1].lower() == "configs"
+        ):
+            relative = Path(*parts[2:])
+        elif len(parts) >= 2 and parts[0].lower() == "gamedata":
+            relative = Path(*parts[1:])
+        files[config_root / relative] = file.text
+    return files
+
+
 def generated_fingerprint(generated: GeneratedPatch) -> str:
     """Fingerprint патча, плана и корня, для которого он проверен."""
     digest = hashlib.sha1()
@@ -239,16 +267,16 @@ class PatchRoundTripVerifier:
             )
 
         root = Path(plan.target.root_path)
-        patch_filename = Path(generated.files[0].relative_path).name
+        virtual_files = _virtual_patch_files(root, generated)
+        patch_names = frozenset(path.name for path in virtual_files)
         try:
             baseline, baseline_parents = adapter.resolve_sections_details(
                 root,
             )
             patched, sources, duplicates, patched_parents = (
-                adapter.resolve_with_virtual_patch_details(
+                adapter.resolve_with_virtual_files_details(
                     root,
-                    patch_filename,
-                    generated.text,
+                    virtual_files,
                 )
             )
         except Exception as exc:
@@ -278,7 +306,7 @@ class PatchRoundTripVerifier:
             patched_parents,
             sources,
             duplicates,
-            patch_filename,
+            patch_names,
         )
 
     def _compare(
@@ -290,7 +318,7 @@ class PatchRoundTripVerifier:
         patched_parents,
         sources,
         duplicates,
-        patch_filename: str,
+        patch_names,
     ) -> VerificationResult:
         plan = generated.plan
         checks: List[VerificationCheck] = []
@@ -672,7 +700,10 @@ class PatchRoundTripVerifier:
                 )
             )
 
-        expected_stem = Path(patch_filename).stem.lower()
+        expected_stems = {
+            Path(name).stem.lower()
+            for name in (patch_names or ())
+        }
         source_errors = []
         for change in plan.changes:
             if change.kind not in ("set_key", "add_key", "list_append", "list_remove"):
@@ -683,7 +714,7 @@ class PatchRoundTripVerifier:
             if not source:
                 source_errors.append("[%s] %s: источник не найден" % (name, key))
                 continue
-            if Path(str(source)).stem.lower() != expected_stem:
+            if Path(str(source)).stem.lower() not in expected_stems:
                 source_errors.append(
                     "[%s] %s: %s" % (name, key, source)
                 )
@@ -699,51 +730,58 @@ class PatchRoundTripVerifier:
                 )
             )
 
-        patch_doc = parse_ltx_document(
-            generated.text,
-            source_path=plan.source_path,
-        )
-        for name, section in patch_doc.sections.items():
-            seen = set()
-            repeated = []
-            for entry in section.entries:
-                if entry.operation != "set":
-                    continue
-                key = _key(entry.key)
-                if key in seen:
-                    repeated.append(entry.key)
-                seen.add(key)
-            if repeated:
-                issues.append(
-                    PatchIssue(
-                        code="roundtrip_duplicate_patch_key",
-                        message=(
-                            "Патч дублирует ключи [%s]: %s"
-                            % (name, ", ".join(repeated))
-                        ),
-                        severity="error",
-                        section=name,
-                    )
+        # Полные копии файлов (Override/In-place) не являются DLTX-дельтой:
+        # повторные объявления в исходном файле — свойство победителя, а не
+        # дефект патча. Для дельты проверяем каждый файл отдельно.
+        if plan.format == "ltx":
+            for patch_file in generated.files:
+                patch_doc = parse_ltx_document(
+                    patch_file.text,
+                    source_path=patch_file.relative_path,
                 )
+                for name, section in patch_doc.sections.items():
+                    seen = set()
+                    repeated = []
+                    for entry in section.entries:
+                        if entry.operation != "set":
+                            continue
+                        key = _key(entry.key)
+                        if key in seen:
+                            repeated.append(entry.key)
+                        seen.add(key)
+                    if repeated:
+                        issues.append(
+                            PatchIssue(
+                                code="roundtrip_duplicate_patch_key",
+                                message=(
+                                    "Патч дублирует ключи [%s]: %s"
+                                    % (name, ", ".join(repeated))
+                                ),
+                                severity="error",
+                                section=name,
+                            )
+                        )
 
-        header_counts = {}
-        for name, _line in patch_doc.headers:
-            key = _section_key(name)
-            header_counts[key] = header_counts.get(key, 0) + 1
-        duplicate_headers = [
-            name for name, count in header_counts.items() if count > 1
-        ]
-        if duplicate_headers:
-            issues.append(
-                PatchIssue(
-                    code="roundtrip_duplicate_patch_section",
-                    message=(
-                        "Патч повторно объявляет секции: %s"
-                        % ", ".join(sorted(duplicate_headers))
-                    ),
-                    severity="error",
-                )
-            )
+                header_counts = {}
+                for name, _line in patch_doc.headers:
+                    key = _section_key(name)
+                    header_counts[key] = header_counts.get(key, 0) + 1
+                duplicate_headers = [
+                    name
+                    for name, count in header_counts.items()
+                    if count > 1
+                ]
+                if duplicate_headers:
+                    issues.append(
+                        PatchIssue(
+                            code="roundtrip_duplicate_patch_section",
+                            message=(
+                                "Патч повторно объявляет секции: %s"
+                                % ", ".join(sorted(duplicate_headers))
+                            ),
+                            severity="error",
+                        )
+                    )
 
         errors = [issue for issue in issues if issue.severity == "error"]
         checks.append(

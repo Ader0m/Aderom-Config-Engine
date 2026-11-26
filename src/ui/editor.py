@@ -21,7 +21,7 @@ from PyQt5.QtCore import (
     QEvent,
     QTimer,
 )
-from PyQt5.QtGui import QColor, QFont, QKeySequence
+from PyQt5.QtGui import QColor, QFont, QKeySequence, QPainter
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -36,10 +36,16 @@ from PyQt5.QtWidgets import (
     QFrame,
     QStyledItemDelegate,
     QListView,
-
+    QScrollBar,
+    QStyle,
+    QStyleOptionSlider,
 )
 
 from app.documents import ReplaceTextIntent
+from app.projects.line_changes import (
+    changed_line_numbers,
+    expand_change_ranges,
+)
 
 from PyQt5.Qsci import QsciScintilla
 
@@ -60,6 +66,20 @@ except ImportError:  # запуск как пакета
     from .platform.theme import theme_service
     from .lexers import create_lexer
     from .debounce import Debounce
+
+
+_LINE_NUMBER_MARGIN = "000000"
+_CHANGE_MARGIN = 1
+_CHANGE_MARKER = 8
+_CHANGE_MARKER_MASK = 1 << _CHANGE_MARKER
+_CHANGE_MARGIN_WIDTH = 5
+_MAX_EXACT_DIFF_LINES = 50000
+_MAX_DIFF_MIDDLE_LINES = 5000
+
+_SC_MOD_INSERTTEXT = 0x01
+_SC_MOD_DELETETEXT = 0x02
+_SC_MOD_BEFOREINSERT = 0x400
+_SC_MOD_BEFOREDELETE = 0x800
 
 
 def _palette():
@@ -103,6 +123,190 @@ def _restyle_line_at_caret(editor):
         )
     )
     editor.SendScintilla(QsciScintilla.SCI_COLOURISE, start, end)
+
+
+class _ScrollChangePainter(QObject):
+    """Дорисовывает насечки после штатной отрисовки скроллбара."""
+
+    MIN_THICKNESS = 5
+
+    def __init__(self, scrollbar):
+        super().__init__(scrollbar)
+        self._scrollbar = scrollbar
+        self._lines = set()
+        self._total = 1
+        self._color = QColor(_palette().accent_green)
+        scrollbar.installEventFilter(self)
+
+    def refresh_theme(self):
+        self._color = QColor(_palette().accent_green)
+        self._scrollbar.update()
+
+    def set_lines(self, lines, total_lines):
+        self._lines = set(lines or ())
+        self._total = max(1, int(total_lines or 1))
+        self._scrollbar.update()
+
+    def _groove_rect(self):
+        bar = self._scrollbar
+        option = QStyleOptionSlider()
+        option.initFrom(bar)
+        option.orientation = Qt.Vertical
+        option.minimum = bar.minimum()
+        option.maximum = bar.maximum()
+        option.sliderPosition = bar.sliderPosition()
+        option.sliderValue = bar.value()
+        option.pageStep = bar.pageStep()
+        option.subControls = QStyle.SC_All
+        groove = bar.style().subControlRect(
+            QStyle.CC_ScrollBar,
+            option,
+            QStyle.SC_ScrollBarGroove,
+            bar,
+        )
+        return groove if groove.isValid() else bar.rect()
+
+    def eventFilter(self, obj, event):
+        if obj is not self._scrollbar or event.type() != QEvent.Paint:
+            return False
+        QScrollBar.paintEvent(self._scrollbar, event)
+        if not self._lines:
+            return True
+        groove = self._groove_rect()
+        if groove.height() <= 0:
+            return True
+        painter = QPainter(self._scrollbar)
+        if not painter.isActive():
+            return True
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self._color)
+        denominator = max(1, self._total - 1)
+        thickness = self.MIN_THICKNESS
+        for line in self._lines:
+            ratio = min(1.0, max(0.0, float(line) / denominator))
+            center = groove.top() + int(
+                round(ratio * max(0, groove.height() - 1))
+            )
+            top = max(groove.top(), center - thickness // 2)
+            if top + thickness > groove.bottom() + 1:
+                top = max(groove.top(), groove.bottom() + 1 - thickness)
+            painter.drawRect(
+                groove.left(),
+                top,
+                groove.width(),
+                thickness,
+            )
+        painter.end()
+        return True
+
+
+class _ChangedLineMargin:
+    """Узкое поле справа от номеров строк с зелёными маркерами."""
+
+    def __init__(self, editor):
+        self.editor = editor
+        self._lines = set()
+        editor.setMarginType(_CHANGE_MARGIN, QsciScintilla.SymbolMargin)
+        editor.setMarginWidth(_CHANGE_MARGIN, _CHANGE_MARGIN_WIDTH)
+        editor.setMarginMarkerMask(_CHANGE_MARGIN, _CHANGE_MARKER_MASK)
+        editor.markerDefine(
+            QsciScintilla.SC_MARK_FULLRECT,
+            _CHANGE_MARKER,
+        )
+        self._scroll_markers = _ScrollChangePainter(
+            editor.verticalScrollBar()
+        )
+        self.refresh_theme()
+
+    def refresh_theme(self):
+        color = QColor(_palette().accent_green)
+        self.editor.setMarginBackgroundColor(
+            _CHANGE_MARGIN,
+            QColor(_palette().ed_margin_bg),
+        )
+        self.editor.setMarkerBackgroundColor(color, _CHANGE_MARKER)
+        self.editor.setMarkerForegroundColor(color, _CHANGE_MARKER)
+        if self._scroll_markers is not None:
+            self._scroll_markers.refresh_theme()
+
+    def _refresh_scroll_markers(self):
+        if self._scroll_markers is not None:
+            self._scroll_markers.set_lines(
+                self._lines,
+                self.editor.lines(),
+            )
+
+    def _add_line(self, line):
+        try:
+            line = int(line)
+        except (TypeError, ValueError):
+            return False
+        if line < 0 or line >= self.editor.lines():
+            return False
+        if line in self._lines:
+            return False
+        self.editor.markerAdd(line, _CHANGE_MARKER)
+        self._lines.add(line)
+        return True
+
+    def mark_line(self, line):
+        if self._add_line(line):
+            self._refresh_scroll_markers()
+
+    def mark_lines(self, lines):
+        changed = False
+        for line in lines or ():
+            changed = self._add_line(line) or changed
+        if changed:
+            self._refresh_scroll_markers()
+
+    def set_lines(self, lines):
+        self.clear()
+        self.mark_lines(lines)
+
+    def clear(self):
+        self.editor.markerDeleteAll(_CHANGE_MARKER)
+        self._lines.clear()
+        self._refresh_scroll_markers()
+
+
+def _mark_modified_lines(tracker, editor, loading, position, mod_type,
+                         lines_added):
+    """Быстро пометить строки, затронутые правкой Scintilla."""
+    if loading or tracker is None:
+        return
+    if mod_type & (_SC_MOD_BEFOREINSERT | _SC_MOD_BEFOREDELETE):
+        return
+    inserted = bool(mod_type & _SC_MOD_INSERTTEXT)
+    deleted = bool(mod_type & _SC_MOD_DELETETEXT)
+    if not inserted and not deleted:
+        return
+    try:
+        line = int(
+            editor.SendScintilla(
+                QsciScintilla.SCI_LINEFROMPOSITION,
+                int(position),
+            )
+        )
+    except (TypeError, ValueError):
+        return
+    if inserted:
+        added = max(0, int(lines_added or 0))
+        tracker.mark_lines(range(line, line + added + 1))
+    else:
+        tracker.mark_line(line)
+        try:
+            line_start = int(
+                editor.SendScintilla(
+                    QsciScintilla.SCI_POSITIONFROMLINE,
+                    line,
+                )
+            )
+        except (TypeError, ValueError):
+            line_start = int(position)
+        if line > 0 and int(position) <= line_start:
+            tracker.mark_line(line - 1)
 
 
 class _LexerScheduler(QObject):
@@ -337,6 +541,8 @@ class CodeEditor(QWidget):
         self._editable = False
         self._readonly_content = True
         self._baseline_text = ""
+        self._change_baseline_text = ""
+        self._change_ranges_hint = None
         self._dirty = False
         self._hint_attach = hint_attach
         self._hints = None
@@ -417,7 +623,9 @@ class CodeEditor(QWidget):
 
         self.editor = QsciScintilla()
         self._setup_editor()
+        self._change_margin = _ChangedLineMargin(self.editor)
         self.editor.textChanged.connect(self._on_text_changed)
+        self.editor.SCN_MODIFIED.connect(self._on_modified)
 
         self.find_bar = EditorFindBar(self.editor)
         layout.addWidget(self.find_bar)
@@ -470,7 +678,7 @@ class CodeEditor(QWidget):
         self.editor.setFont(font)
 
         self.editor.setMarginType(0, QsciScintilla.NumberMargin)
-        self.editor.setMarginWidth(0, "00000")
+        self.editor.setMarginWidth(0, _LINE_NUMBER_MARGIN)
         self.editor.setMarginsFont(font)
         self.editor.setMarginsBackgroundColor(QColor(_palette().ed_margin_bg))
         self.editor.setMarginsForegroundColor(QColor(_palette().ed_margin_fg))
@@ -517,6 +725,9 @@ class CodeEditor(QWidget):
         self.editor.setPaper(QColor(_palette().bg_main))
         self.editor.setCaretForegroundColor(QColor(_palette().ed_caret))
         self.editor.setCaretLineBackgroundColor(QColor(_palette().ed_caret_line))
+        tracker = getattr(self, "_change_margin", None)
+        if tracker is not None:
+            tracker.refresh_theme()
 
     # -------------------------------------------------- публичные действия
     def show_find(self):
@@ -530,7 +741,8 @@ class CodeEditor(QWidget):
 
     # -------------------------------------------------- содержимое
     def _show_content(self, text, label, source_path=None, readonly=False,
-                      syntax=True, notice=None):
+                      syntax=True, notice=None, baseline_text=None,
+                      change_ranges=None):
         """Единая точка отображения содержимого в редакторе.
 
         ``source_path`` задаёт файл, из которого взято содержимое: по нему
@@ -562,6 +774,10 @@ class CodeEditor(QWidget):
         self._pending_content = None
         self._content_timer.stop()
         self._baseline_text = text
+        self._change_baseline_text = (
+            text if baseline_text is None else str(baseline_text)
+        )
+        self._change_ranges_hint = change_ranges
         self._set_dirty(False)
 
         self.current_file = str(source_path) if source_path is not None else None
@@ -570,6 +786,13 @@ class CodeEditor(QWidget):
         self.notice_label.setText(notice_text)
         self.notice_label.setVisible(bool(notice_text))
         self._loading = False
+        tracker = getattr(self, "_change_margin", None)
+        if change_ranges is not None and tracker is not None:
+            tracker.set_lines(
+                expand_change_ranges(change_ranges, self.editor.lines())
+            )
+        else:
+            self._refresh_change_markers(text, allow_large=True)
 
         # Покраска — отдельная отложенная задача. Файл уже доступен
         # для просмотра, прокрутки и редактирования.
@@ -583,7 +806,8 @@ class CodeEditor(QWidget):
         self.editor.setFocus(Qt.OtherFocusReason)
         self._set_hints_enabled(True)
 
-    def open_file(self, file_path, text=None):
+    def open_file(self, file_path, text=None, baseline_text=None,
+                  change_ranges=None):
         """Показать файл. Возвращает ``False``, если показать не удалось."""
         path = Path(file_path)
 
@@ -599,6 +823,8 @@ class CodeEditor(QWidget):
             str(path),
             source_path=path,
             readonly=False,
+            baseline_text=baseline_text,
+            change_ranges=change_ranges,
         )
         return True
 
@@ -640,6 +866,7 @@ class CodeEditor(QWidget):
         self.flush_pending()
         self._baseline_text = self.text() if text is None else str(text)
         self._set_dirty(self.text() != self._baseline_text)
+        self._refresh_change_markers()
 
     def flush_pending(self):
         """Немедленно отдать накопленный текст прикладному слою."""
@@ -666,6 +893,7 @@ class CodeEditor(QWidget):
         self._pending_content = None
         self.content_changed.emit(text)
         self._set_dirty(text != self._baseline_text)
+        self._refresh_change_markers(text)
         return True
 
     def _set_dirty(self, dirty):
@@ -675,10 +903,55 @@ class CodeEditor(QWidget):
         self._dirty = dirty
         self.dirty_changed.emit(dirty)
 
+    def _on_modified(self, position, mod_type, _text, _length,
+                     lines_added, _line, *_args):
+        _mark_modified_lines(
+            getattr(self, "_change_margin", None),
+            self.editor,
+            self._loading,
+            position,
+            mod_type,
+            lines_added,
+        )
+
+    @property
+    def change_baseline_text(self):
+        return self._change_baseline_text
+
+    def set_change_baseline(self, text):
+        self._change_baseline_text = str(text or "")
+        self._refresh_change_markers(allow_large=True)
+
+    def _refresh_change_markers(self, text=None, allow_large=False):
+        tracker = getattr(self, "_change_margin", None)
+        if tracker is None:
+            return
+        text = self.text() if text is None else str(text)
+        baseline = self._change_baseline_text
+        if text == baseline:
+            tracker.clear()
+            return
+        if self._change_ranges_hint is not None:
+            tracker.set_lines(
+                expand_change_ranges(
+                    self._change_ranges_hint,
+                    self.editor.lines(),
+                )
+            )
+            return
+        changed = changed_line_numbers(
+            baseline,
+            text,
+            max_lines=None if allow_large else _MAX_EXACT_DIFF_LINES,
+            max_middle=None if allow_large else _MAX_DIFF_MIDDLE_LINES,
+        )
+        if changed is not None:
+            tracker.set_lines(changed)
+
     def _on_text_changed(self):
         if self._loading:
             return
-
+        self._change_ranges_hint = None
         self._pending_content = True
         self._content_timer.start()
         # Сравнение всего 40-МБ текста на каждый символ недопустимо.
@@ -713,7 +986,8 @@ class CodeEditor(QWidget):
         return found
 
     def show_text(self, text, label, readonly=True, source_path=None,
-                  line_number=None, syntax=True, notice=None):
+                  line_number=None, syntax=True, notice=None,
+                  baseline_text=None, change_ranges=None):
         path = Path(source_path) if source_path is not None else None
         self._show_content(
             text,
@@ -722,6 +996,8 @@ class CodeEditor(QWidget):
             readonly=readonly,
             syntax=syntax,
             notice=notice,
+            baseline_text=baseline_text,
+            change_ranges=change_ranges,
         )
         if line_number is not None:
             self.goto_line(int(line_number))
@@ -1009,6 +1285,8 @@ class ResolvedView(QWidget):
         self._editable = False
         self._editing_supported = True
         self._baseline_text = ""
+        self._change_baseline_text = ""
+        self._change_ranges_hint = None
         self._dirty = False
         self._document = None
         self._hint_attach = hint_attach
@@ -1113,7 +1391,9 @@ class ResolvedView(QWidget):
 
         self.editor = QsciScintilla()
         self._setup_editor()
+        self._change_margin = _ChangedLineMargin(self.editor)
         self.editor.textChanged.connect(self._on_text_changed)
+        self.editor.SCN_MODIFIED.connect(self._on_modified)
         self.editor.setContextMenuPolicy(Qt.CustomContextMenu)
         self.editor.customContextMenuRequested.connect(
             self._on_editor_context_menu
@@ -1189,7 +1469,7 @@ class ResolvedView(QWidget):
         self.editor.setFont(font)
 
         self.editor.setMarginType(0, QsciScintilla.NumberMargin)
-        self.editor.setMarginWidth(0, "00000")
+        self.editor.setMarginWidth(0, _LINE_NUMBER_MARGIN)
         self.editor.setMarginsFont(font)
         self.editor.setMarginsBackgroundColor(QColor(_palette().ed_margin_bg))
         self.editor.setMarginsForegroundColor(QColor(_palette().ed_margin_fg))
@@ -1229,6 +1509,9 @@ class ResolvedView(QWidget):
         self.editor.setPaper(QColor(_palette().bg_main))
         self.editor.setCaretForegroundColor(QColor(_palette().ed_caret))
         self.editor.setCaretLineBackgroundColor(QColor(_palette().ed_caret_line))
+        tracker = getattr(self, "_change_margin", None)
+        if tracker is not None:
+            tracker.refresh_theme()
 
     def _apply_lexer(self, path):
         """Совместимость: применить лексер сразу (без отложенного запуска)."""
@@ -1248,6 +1531,7 @@ class ResolvedView(QWidget):
             self._line_sources = list(document.line_sources)
             self.source_list.set_sources(self._line_sources)
             self.set_dirty_state(document.is_dirty)
+            self._refresh_change_markers(allow_large=True)
 
     def unbind_document(self, document=None):
         if document is None or self._document is document:
@@ -1318,6 +1602,10 @@ class ResolvedView(QWidget):
         self.editor.setReadOnly(not self._editable)
         self.refresh_hints()
 
+    def set_change_ranges(self, ranges):
+        self._change_ranges_hint = ranges
+        self._refresh_change_markers()
+
     def mark_clean(self, text=None):
         self.flush_pending()
         if self._document is not None:
@@ -1325,9 +1613,11 @@ class ResolvedView(QWidget):
                 self.text() if text is None else text
             )
             self._set_dirty(self._document.is_dirty)
+            self._refresh_change_markers()
             return
         self._baseline_text = self.text() if text is None else str(text)
         self._set_dirty(self.text() != self._baseline_text)
+        self._refresh_change_markers()
 
     def set_dirty_state(self, dirty):
         """Установить признак изменений без пересчёта всего текста."""
@@ -1398,6 +1688,7 @@ class ResolvedView(QWidget):
         else:
             self.content_changed.emit(text)
             self._set_dirty(text != self._baseline_text)
+        self._refresh_change_markers(text)
         return True
 
     def _on_editor_context_menu(self, position):
@@ -1443,6 +1734,16 @@ class ResolvedView(QWidget):
         elif chosen is section_action:
             self.section_card_requested.emit(section)
 
+    def _mark_edited_line(self, action, line_number):
+        tracker = getattr(self, "_change_margin", None)
+        if tracker is None:
+            return
+        if action == "insert":
+            line = max(0, int(line_number))
+        else:
+            line = int(line_number) - 1
+        tracker.mark_line(line)
+
     def apply_line_edit(self, action, line_number, text=""):
         """Точечная правка строки без замены всего текста.
 
@@ -1459,6 +1760,7 @@ class ResolvedView(QWidget):
         # отложенный полный текст относится к предыдущей версии.
         self._pending_text = None
         self._sync_timer.stop()
+        self._change_ranges_hint = None
 
         line_count = editor.lines()
         old_loading = self._loading
@@ -1526,6 +1828,7 @@ class ResolvedView(QWidget):
             # затронутую строку явно.
             if self._lexer is not None:
                 _restyle_line_at_caret(editor)
+            self._mark_edited_line(action, line_number)
 
             if self._document is not None:
                 # Канонический line_sources уже обновлён документом
@@ -1564,6 +1867,7 @@ class ResolvedView(QWidget):
 
                 if not updated:
                     self.source_list.set_sources(list(sources))
+                self._refresh_change_markers()
                 return True
 
             sources = list(self._line_sources)
@@ -1580,6 +1884,7 @@ class ResolvedView(QWidget):
 
             self._line_sources = sources
             self.source_list.set_sources(sources)
+            self._refresh_change_markers()
             return True
         finally:
             editor.setReadOnly(old_readonly)
@@ -1592,9 +1897,53 @@ class ResolvedView(QWidget):
         self._dirty = dirty
         self.dirty_changed.emit(dirty)
 
+    def _on_modified(self, position, mod_type, _text, _length,
+                     lines_added, _line, *_args):
+        _mark_modified_lines(
+            getattr(self, "_change_margin", None),
+            self.editor,
+            self._loading,
+            position,
+            mod_type,
+            lines_added,
+        )
+
+    @property
+    def change_baseline_text(self):
+        if self._document is not None:
+            return self._document.original_text
+        return self._change_baseline_text
+
+    def _refresh_change_markers(self, text=None, allow_large=False):
+        tracker = getattr(self, "_change_margin", None)
+        if tracker is None:
+            return
+        text = self.text() if text is None else str(text)
+        baseline = self.change_baseline_text
+        if text == baseline:
+            tracker.clear()
+            return
+        if self._change_ranges_hint is not None:
+            tracker.set_lines(
+                expand_change_ranges(
+                    self._change_ranges_hint,
+                    self.editor.lines(),
+                )
+            )
+            return
+        changed = changed_line_numbers(
+            baseline,
+            text,
+            max_lines=None if allow_large else _MAX_EXACT_DIFF_LINES,
+            max_middle=None if allow_large else _MAX_DIFF_MIDDLE_LINES,
+        )
+        if changed is not None:
+            tracker.set_lines(changed)
+
     def _on_text_changed(self):
         if self._loading:
             return
+        self._change_ranges_hint = None
         self._pending_text = True
         self._sync_timer.start()
         self._set_dirty(True)
@@ -1613,7 +1962,8 @@ class ResolvedView(QWidget):
         if not self._source_visible:
             self.splitter.setSizes([1, 0])
 
-    def set_content(self, text, line_sources, root_path, sources_visible=True):
+    def set_content(self, text, line_sources, root_path, sources_visible=True,
+                    original_text=None, change_ranges=None):
         self.flush_pending()
         self._set_hints_enabled(False)
         self._pending_text = None
@@ -1624,6 +1974,13 @@ class ResolvedView(QWidget):
         self.set_sources_visible(sources_visible)
 
         text = str(text or "")
+        if original_text is not None:
+            self._change_baseline_text = str(original_text)
+        elif self._document is not None:
+            self._change_baseline_text = self._document.original_text
+        else:
+            self._change_baseline_text = text
+        self._change_ranges_hint = change_ranges
         self._loading = True
         self._lexer_scheduler.stop()
         self.editor.setReadOnly(False)
@@ -1632,6 +1989,12 @@ class ResolvedView(QWidget):
         self._baseline_text = text
         self._set_dirty(False)
         self._loading = False
+        if change_ranges is not None:
+            self._change_margin.set_lines(
+                expand_change_ranges(change_ranges, self.editor.lines())
+            )
+        else:
+            self._refresh_change_markers(text, allow_large=True)
 
         # beginResetModel/endResetModel внутри set_sources полностью
         # заменяют данные панели; clear() не нужен (и у QListView его нет).

@@ -1656,6 +1656,145 @@ class ProjectAutosaveTest(unittest.TestCase):
             self.assertFalse(api._autosave_pending)
 
 
+class PatchPreviewVfsDependencyTest(unittest.TestCase):
+    def _api(self, tasks):
+        api = PlatformApi(FakeEvents(), FakeCommands(), tasks, None, None)
+        api.window = FakeWindow()
+        api.autosave_project = lambda: None
+        project = SimpleNamespace(id="proj-1", name="Proj")
+        api.project = SimpleNamespace(
+            active=project,
+            has_changes=lambda: True,
+        )
+        api.errors = []
+        api.show_error = api.errors.append
+        return api, project
+
+    def _mark_rebuild(self, api, state="running"):
+        api.operations.upsert_external(
+            "vfs.rebuild",
+            owner="<platform>",
+            title="VFS",
+            state=state,
+        )
+
+    def test_build_patch_preview_waits_for_vfs_rebuild(self):
+        tasks = _DeferredTasks()
+        api, _project = self._api(tasks)
+        api._forest = SimpleNamespace(
+            cache_id="OLD",
+            scan_dir=Path("gamedata"),
+        )
+        self._mark_rebuild(api)
+
+        api.build_patch_preview()
+
+        self.assertEqual(api.errors, [])
+        self.assertEqual(len(tasks.calls), 1)
+        depends_on = tasks.last_kwargs.get("depends_on")
+        self.assertTrue(callable(depends_on))
+        self.assertEqual(depends_on(), ("vfs.rebuild",))
+        self.assertEqual(
+            tasks.last_kwargs.get("operation_key"),
+            "project.patch_preview:proj-1:OLD",
+        )
+
+    def test_build_patch_preview_waits_for_prebuild(self):
+        tasks = _DeferredTasks()
+        api, _project = self._api(tasks)
+        api._forest = SimpleNamespace(
+            cache_id="SNAP",
+            scan_dir=Path("gamedata"),
+        )
+        api.operations.upsert_external(
+            "vfs.prebuild",
+            owner="<platform>",
+            title="Prebuild",
+            state="running",
+        )
+
+        api.build_patch_preview()
+
+        self.assertEqual(api.errors, [])
+        self.assertEqual(len(tasks.calls), 1)
+        depends_on = tasks.last_kwargs.get("depends_on")
+        self.assertTrue(callable(depends_on))
+        self.assertEqual(depends_on(), ("vfs.prebuild",))
+
+    def test_build_patch_preview_does_not_reuse_dialog_during_rebuild(self):
+        tasks = _DeferredTasks()
+        api, project = self._api(tasks)
+        api._forest = SimpleNamespace(
+            cache_id="OLD",
+            scan_dir=Path("gamedata"),
+        )
+        api._patch_preview_dialog = SimpleNamespace(
+            preview=SimpleNamespace(project=project),
+            set_log_lines=lambda _lines: None,
+            append_log=lambda _message: None,
+        )
+        api._patch_preview_stale = False
+        api._patch_preview_snapshot = "OLD"
+        api._present_patch_preview = Mock(return_value=True)
+        self._mark_rebuild(api)
+
+        api.build_patch_preview()
+
+        api._present_patch_preview.assert_not_called()
+        self.assertTrue(api._patch_preview_stale)
+        self.assertEqual(len(tasks.calls), 1)
+
+    def test_build_patch_preview_uses_forest_after_dependency(self):
+        tasks = _DeferredTasks()
+        api, project = self._api(tasks)
+        api.services = SimpleNamespace(patch=object())
+        old_forest = SimpleNamespace(
+            cache_id="OLD",
+            scan_dir=Path("gamedata"),
+        )
+        new_forest = SimpleNamespace(
+            cache_id="NEW",
+            scan_dir=Path("gamedata"),
+        )
+        api._forest = old_forest
+        self._mark_rebuild(api)
+        seen = []
+        preview = SimpleNamespace(project=project)
+
+        def build_preview(
+            patch_services,
+            forest,
+            log=None,
+            expected_project=None,
+        ):
+            seen.append((patch_services, forest, expected_project))
+            return preview
+
+        api.project.build_preview = build_preview
+
+        api.build_patch_preview()
+        work, _on_done = tasks.calls[-1]
+        api._forest = new_forest
+        result = work(lambda _message: None)
+
+        self.assertIs(result, preview)
+        self.assertEqual(len(seen), 1)
+        self.assertIs(seen[0][0], api.services.patch)
+        self.assertIs(seen[0][1], new_forest)
+        self.assertIs(seen[0][2], project)
+
+    def test_build_patch_preview_requires_tree_without_rebuild(self):
+        tasks = _DeferredTasks()
+        api, _project = self._api(tasks)
+        api._forest = None
+
+        api.build_patch_preview()
+
+        self.assertEqual(tasks.calls, [])
+        self.assertTrue(api.errors)
+        self.assertIn("Дерево не построено", api.errors[0])
+
+
 class DocumentTextReaderTest(unittest.TestCase):
     def test_document_text_uses_services_instead_of_core_import(self):
         with tempfile.TemporaryDirectory() as d:

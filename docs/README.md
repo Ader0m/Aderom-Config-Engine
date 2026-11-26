@@ -35,10 +35,10 @@
 | Этапы 0–7 | завершены |
 | Этап 8 | 8.1–8.2, 8.4–8.6 выполнены; **8.3 (19023/19024) открыт**; боевой release gate не объявлен |
 | Этап 9 | 9.1–9.6 выполнены; поколенческая очистка кэша остаётся отдельным пунктом |
-| Проверка | **1386 passed, 1 skipped, 76 subtests**; `compileall` и `git diff --check` чистые |
+| Проверка | **1422 passed, 1 skipped, 76 subtests**; `compileall` и `git diff --check` чистые |
 | SDK | `0.14.0`; публичный набор — `sdk.__all__` по allowlist |
 | Запись патчей | **экспериментальная**: `PATCH_WRITE_EXPERIMENTAL=True` (ADR-37); откат — `False`; паритет 19023/19024 не подтверждён |
-| Данные проекта | схема `2`; one-time forward migration с backup |
+| Данные проекта | схема `3`; one-time forward migration с backup; карта изменённых строк черновиков |
 | Кэш | `generated/cache-v2/*`; старый кэш не читается и удаляется при старте |
 | Снимок VFS | `WorkspaceSession.snapshot_id`; смена overlay — новая ревизия |
 

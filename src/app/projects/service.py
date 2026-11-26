@@ -35,6 +35,7 @@ from app.documents import collapse_duplicated_text
 from .assets import ProjectAssetRegistry
 from .readers import ProjectFileReaderRegistry
 from .drafts import DraftStore
+from .line_changes import changed_line_ranges, serialize_change_map
 from .overlay import OverlayBuilder
 from .session import ProjectSession
 from .repository import (
@@ -460,6 +461,45 @@ class ProjectService:
         for draft in self.draft_store.read_asset_drafts(root_dir):
             project.assets[self.path_key(draft.path)] = draft
 
+        # Карты изменений — производные данные. Старые проекты могли их
+        # не хранить: считаем один раз при загрузке, уже вне UI-потока,
+        # и сразу фиксируем в файлах черновиков (one-time upgrade).
+        text_maps = []
+        resolved_maps = []
+        for draft in project.drafts.values():
+            if draft.change_ranges is None:
+                draft.change_ranges = self._draft_change_ranges(draft)
+                text_maps.append(draft)
+        for draft in project.resolved_drafts.values():
+            if draft.change_ranges is None:
+                draft.change_ranges = self._draft_change_ranges(draft)
+                resolved_maps.append(draft)
+
+        for draft in text_maps:
+            try:
+                self._write_draft(project, draft)
+            except Exception as exc:
+                log.warning(
+                    "Проект: не удалось сохранить карту изменений %s: %s",
+                    draft.path,
+                    exc,
+                )
+        for draft in resolved_maps:
+            try:
+                self._write_resolved_draft(
+                    project,
+                    draft,
+                    saved_text=draft.saved_text,
+                    saved_at=draft.saved_at,
+                    change_ranges=draft.change_ranges,
+                )
+            except Exception as exc:
+                log.warning(
+                    "Проект: не удалось сохранить карту изменений %s: %s",
+                    draft.tab_id or draft.root_path,
+                    exc,
+                )
+
         self.session.activate(project)
         return project
 
@@ -805,6 +845,26 @@ class ProjectService:
             self._resolved_draft_files.clear()
         return True
 
+    # -------------------------------------------------- карта изменений
+    @staticmethod
+    def _draft_change_ranges(draft):
+        if draft.change_ranges is not None:
+            return draft.change_ranges
+        return changed_line_ranges(
+            draft.original_text,
+            draft.current_text,
+        ) or ()
+
+    @staticmethod
+    def _payload_with_change_map(payload, draft, revision, ranges=None):
+        if ranges is None:
+            ranges = ProjectService._draft_change_ranges(draft)
+        result = dict(payload)
+        change_map = serialize_change_map(ranges, revision)
+        if change_map is not None:
+            result["change_map"] = change_map
+        return result
+
     # -------------------------------------------------- черновики
     def update_draft(
         self,
@@ -864,6 +924,7 @@ class ProjectService:
             draft.current_text = new_text
             draft.revision += 1
             draft.updated_at = time.time()
+            draft.change_ranges = None
             self._invalidate_preview_cache(path)
 
         return draft
@@ -875,14 +936,23 @@ class ProjectService:
             text if text is not None else self.get_text(path) or "",
         )
         saved_at = time.time()
+        revision = int(draft.revision)
+        change_ranges = self._draft_change_ranges(draft)
         target = self.draft_store.text_target(project.root_dir, draft.path)
-        payload = self.draft_store.build_text_payload(
+        payload = self._payload_with_change_map(
+            self.draft_store.build_text_payload(
+                draft,
+                saved_text=draft.current_text,
+                saved_at=saved_at,
+            ),
             draft,
-            saved_text=draft.current_text,
-            saved_at=saved_at,
+            revision,
+            change_ranges,
         )
         self.draft_store.write_payload(target, payload)
         with self._state_lock:
+            if int(draft.revision) == revision:
+                draft.change_ranges = change_ranges
             draft.saved_text = draft.current_text
             draft.saved_at = saved_at
         return draft
@@ -929,13 +999,35 @@ class ProjectService:
         или новая правка не могут вклиниться и записать устаревший текст
         поверх свежего.
         """
+        with self._state_lock:
+            draft = self.get_draft(path)
+            # Черновик удалён или изменён после подготовки снимка:
+            # не воскрешаем его старым текстом.
+            if draft is None or int(draft.revision) != int(revision):
+                return False
+            change_ranges = draft.change_ranges
+            original_text = draft.original_text
+            current_text = draft.current_text
+
+        if change_ranges is None:
+            # Diff выполняется в фоновом потоке записи, а не в UI-потоке.
+            change_ranges = changed_line_ranges(
+                original_text,
+                current_text,
+            ) or ()
+
         with self._write_lock:
             with self._state_lock:
                 draft = self.get_draft(path)
-                # Черновик удалён или изменён после подготовки снимка:
-                # не воскрешаем его старым текстом.
                 if draft is None or int(draft.revision) != int(revision):
                     return False
+                payload = self._payload_with_change_map(
+                    payload,
+                    draft,
+                    revision,
+                    change_ranges,
+                )
+                draft.change_ranges = change_ranges
                 self.draft_store.write_payload(target, payload)
                 return True
 
@@ -1039,10 +1131,21 @@ class ProjectService:
                 project.root_dir,
                 draft.path,
             )
-            payload = self.draft_store.build_text_payload(
+            change_ranges = draft.change_ranges
+            if change_ranges is None:
+                change_ranges = changed_line_ranges(
+                    draft.original_text,
+                    text,
+                ) or ()
+            payload = self._payload_with_change_map(
+                self.draft_store.build_text_payload(
+                    draft,
+                    saved_text=text,
+                    saved_at=saved_at,
+                ),
                 draft,
-                saved_text=text,
-                saved_at=saved_at,
+                revision,
+                change_ranges,
             )
             with self._write_lock:
                 with self._state_lock:
@@ -1060,6 +1163,8 @@ class ProjectService:
                     # Черновик удалён во время записи: не публикуем
                     # событие о восстановленном файле.
                     continue
+                if int(draft.revision) == revision:
+                    draft.change_ranges = change_ranges
                 if draft.current_text == text:
                     draft.saved_text = text
                     draft.saved_at = saved_at
@@ -1115,6 +1220,12 @@ class ProjectService:
             text = str(draft.current_text or "")
             saved_at = time.time()
             key = self.resolved_key(draft.tab_id, draft.root_path)
+            change_ranges = draft.change_ranges
+            if change_ranges is None:
+                change_ranges = changed_line_ranges(
+                    draft.original_text,
+                    text,
+                ) or ()
             with self._write_lock:
                 with self._state_lock:
                     if not self._autosave_can_write(project, epoch):
@@ -1128,10 +1239,13 @@ class ProjectService:
                     draft,
                     saved_text=text,
                     saved_at=saved_at,
+                    change_ranges=change_ranges,
                 )
             with self._state_lock:
                 if project.resolved_drafts.get(key) is not draft:
                     continue
+                if int(draft.revision) == revision:
+                    draft.change_ranges = change_ranges
                 if draft.current_text == text:
                     draft.saved_text = text
                     draft.saved_at = saved_at
@@ -1469,6 +1583,8 @@ class ProjectService:
                 )
                 project.resolved_drafts[key] = draft
             else:
+                if draft.current_text != current_text:
+                    draft.change_ranges = None
                 draft.current_text = current_text
                 draft.title = str(title or draft.title)
                 draft.revision += 1
@@ -1493,10 +1609,13 @@ class ProjectService:
                     "Resolved-черновик не найден: %s" % tab_id
                 )
             if text is not None:
-                draft.current_text = collapse_duplicated_text(
+                next_text = collapse_duplicated_text(
                     str(text),
                     draft.original_text,
                 )
+                if next_text != draft.current_text:
+                    draft.change_ranges = None
+                draft.current_text = next_text
                 draft.revision += 1
             saved_text = draft.current_text
         saved_at = time.time()
@@ -1660,6 +1779,14 @@ class ProjectService:
                 xml_patch_mode=state.xml_patch_mode,
                 module_settings=state.module_settings,
             )
+        # Предпросмотр собирается в фоновой задаче: здесь можно
+        # досчитать карты для ещё не сохранённых правок, не блокируя UI.
+        for draft in snapshot.drafts:
+            if draft.change_ranges is None:
+                draft.change_ranges = self._draft_change_ranges(draft)
+        for draft in snapshot.resolved_drafts:
+            if draft.change_ranges is None:
+                draft.change_ranges = self._draft_change_ranges(draft)
         return self.preview_builder.build(
             patch_services,
             forest,
@@ -1671,13 +1798,23 @@ class ProjectService:
         return self.session.require_active()
 
     def _write_draft(self, project: Project, draft: ProjectDraft) -> None:
+        revision = int(draft.revision)
+        change_ranges = self._draft_change_ranges(draft)
         target = self.draft_store.text_target(project.root_dir, draft.path)
-        payload = self.draft_store.build_text_payload(
+        payload = self._payload_with_change_map(
+            self.draft_store.build_text_payload(
+                draft,
+                saved_text=draft.saved_text,
+                saved_at=draft.saved_at,
+            ),
             draft,
-            saved_text=draft.saved_text,
-            saved_at=draft.saved_at,
+            revision,
+            change_ranges,
         )
         self.draft_store.write_payload(target, payload)
+        with self._state_lock:
+            if int(draft.revision) == revision:
+                draft.change_ranges = change_ranges
 
     def _write_asset_draft(
         self,
@@ -1703,6 +1840,7 @@ class ProjectService:
         draft: ProjectResolvedDraft,
         saved_text=None,
         saved_at=None,
+        change_ranges=None,
     ) -> None:
         with self._state_lock:
             # Не даём записать уже испорченный «двойной» текст.
@@ -1712,10 +1850,15 @@ class ProjectService:
             )
             if compact != draft.current_text:
                 draft.current_text = compact
+                draft.change_ranges = None
+                change_ranges = None
                 # Текст изменился без роста ревизии: кэш overlay
                 # больше не соответствует состоянию.
                 self._clear_overlay_cache()
             saved = compact if saved_text is None else str(saved_text)
+            revision = int(draft.revision)
+            if change_ranges is None:
+                change_ranges = self._draft_change_ranges(draft)
 
             key = self.resolved_key(draft.tab_id, draft.root_path)
             target = self.draft_store.resolved_target(
@@ -1723,14 +1866,21 @@ class ProjectService:
                 draft,
                 existing=self._resolved_draft_files.get(key),
             )
-            payload = self.draft_store.build_resolved_payload(
+            payload = self._payload_with_change_map(
+                self.draft_store.build_resolved_payload(
+                    draft,
+                    saved_text=saved,
+                    saved_at=saved_at,
+                ),
                 draft,
-                saved_text=saved,
-                saved_at=saved_at,
+                revision,
+                change_ranges,
             )
 
         self.draft_store.write_payload(target, payload)
         with self._state_lock:
+            if int(draft.revision) == revision:
+                draft.change_ranges = change_ranges
             self._resolved_draft_files[key] = target
 
     def _make_project_id(self, name: str) -> str:

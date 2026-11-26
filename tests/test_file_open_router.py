@@ -9,7 +9,7 @@ from pathlib import Path
 from tests.support import SRC  # noqa: F401
 
 from sdk.ui import FileOpenHandler
-from ui.file_open_router import FileOpenRouter
+from ui.file_open_router import FileOpenRouter, TextEditorHandler
 from ui.platform.file_open_preferences import PREFERENCES_VERSION
 
 
@@ -419,6 +419,48 @@ class FileOpenRouterTest(unittest.TestCase):
         self.assertTrue(router.open(Path("a.ltx"), self.api))
         self.assertEqual(low.calls, [Path("a.ltx")])
         self.assertEqual(high.calls, [Path("a.ltx")])
+
+
+class TextEditorHandlerTest(unittest.TestCase):
+    def test_open_passes_project_original_as_change_baseline(self):
+        calls = []
+
+        class _Editor:
+            def open_file(self, path, text=None, request_id=0,
+                          baseline_text=None, change_ranges=None):
+                calls.append(
+                    (
+                        path,
+                        text,
+                        request_id,
+                        baseline_text,
+                        change_ranges,
+                    )
+                )
+                return True
+
+        class _TextApi(_Api):
+            def document_text(self, _path):
+                return "current"
+
+            def document_original_text(self, _path):
+                return "original"
+
+            def document_change_ranges(self, _path):
+                return ((1, 2),)
+
+            def can_edit_documents(self):
+                return True
+
+            def current_file_request_id(self):
+                return 0
+
+        handler = TextEditorHandler(_Editor())
+        self.assertTrue(handler.open(Path("a.ltx"), _TextApi()))
+        self.assertEqual(
+            calls,
+            [("a.ltx", "current", 0, "original", ((1, 2),))],
+        )
 
 
 if __name__ == "__main__":

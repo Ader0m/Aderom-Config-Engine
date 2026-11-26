@@ -131,14 +131,23 @@ def _parse_value(src):
 # ---------------------------------------------------------------- data model
 class Item:
     """CInifile::Item (xr_ini.h:12-33): first/second/filename/depth/insertionIndex."""
-    __slots__ = ("first", "second", "filename", "depth", "insertion_index")
+    __slots__ = (
+        "first",
+        "second",
+        "filename",
+        "depth",
+        "insertion_index",
+        "line",
+    )
 
-    def __init__(self, first=None, second=None, filename="", depth=0, insertion_index=0):
+    def __init__(self, first=None, second=None, filename="", depth=0,
+                 insertion_index=0, line=0):
         self.first = first
         self.second = second
         self.filename = filename
         self.depth = depth
         self.insertion_index = insertion_index
+        self.line = int(line or 0)
 
 
 class Sect:
@@ -307,6 +316,7 @@ class LtxResolver:
                 else:
                     break
 
+            line_number = i + 1
             line = _trim(lines[i])
             i += 1
 
@@ -423,6 +433,7 @@ class LtxResolver:
                     value = ""
 
                 item = Item()
+                item.line = line_number
                 item.first = name if name else None
                 if item.first is None:
                     self._log("~[DLTX] WARNING: Malformed line %s in file %s" %
@@ -438,11 +449,21 @@ class LtxResolver:
                 item.filename = os.path.splitext(current_file_name[0].lower())[0]
                 item.depth = depth
                 if current_base is not None:
-                    self._insert_item(current_base, Item(item.first, item.second,
-                                                         item.filename, depth))
+                    self._insert_item(current_base, Item(
+                        item.first,
+                        item.second,
+                        item.filename,
+                        depth,
+                        line=line_number,
+                    ))
                 if current_override is not None:
-                    self._insert_item(current_override, Item(item.first, item.second,
-                                                             item.filename, depth))
+                    self._insert_item(current_override, Item(
+                        item.first,
+                        item.second,
+                        item.filename,
+                        depth,
+                        line=line_number,
+                    ))
                 continue
 
         # === После цикла (для всех файлов, включая корневой) ===
@@ -651,8 +672,13 @@ class LtxResolver:
                     working = None
                     exists_in_output = False
                     if existing is not None:
-                        working = Item(existing.first, existing.second,
-                                       existing.filename, existing.depth)
+                        working = Item(
+                            existing.first,
+                            existing.second,
+                            existing.filename,
+                            existing.depth,
+                            line=getattr(existing, "line", 0),
+                        )
                         exists_in_output = True
                         di += 1
                     else:
@@ -675,6 +701,7 @@ class LtxResolver:
                                 items_vec = [x for x in items_vec if x not in add_vec]
                             working.second = self._join_list(items_vec)
                             working.filename = m.filename
+                            working.line = getattr(m, "line", 0)
                         mi += 1
                     if exists_in_output and working.second:
                         result.append(working)

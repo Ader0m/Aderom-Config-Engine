@@ -102,7 +102,9 @@ class ProjectRepositoryReadTest(unittest.TestCase):
             LEGACY_SCHEMA_VERSION,
         )
         self.assertEqual(
-            ProjectRepository.schema_version({"schema_version": "2"}),
+            ProjectRepository.schema_version(
+                {"schema_version": str(PROJECT_SCHEMA_VERSION)}
+            ),
             PROJECT_SCHEMA_VERSION,
         )
         self.assertEqual(

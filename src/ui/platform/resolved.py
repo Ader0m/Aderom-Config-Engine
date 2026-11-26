@@ -241,6 +241,7 @@ class ResolvedDocumentMixin:
                 document.current_text,
                 document.line_sources,
                 document.root_path,
+                change_ranges=self._resolved_change_ranges(document.tab_id),
             )
             current.set_dirty_state(document.is_dirty)
             editor.set_tab_dirty(tab_id, document.is_dirty)
@@ -383,12 +384,29 @@ class ResolvedDocumentMixin:
                     document.current_text,
                     document.line_sources,
                     document.root_path,
+                    change_ranges=self._resolved_change_ranges(
+                        document.tab_id
+                    ),
                 )
                 view.set_dirty_state(False)
         return document
 
+    def _resolved_change_ranges(self, tab_id):
+        if not self.project.is_active:
+            return None
+        draft = self.project.get_resolved_draft(tab_id)
+        if draft is None:
+            return None
+        return draft.change_ranges
+
     @staticmethod
-    def _reload_resolved_view(view, text, line_sources, root_path):
+    def _reload_resolved_view(
+        view,
+        text,
+        line_sources,
+        root_path,
+        change_ranges=None,
+    ):
         """Перезалить текст вкладки, сохранив прокрутку и курсор."""
         widget = getattr(view, "editor", None)
         first_line = 0
@@ -400,7 +418,12 @@ class ResolvedDocumentMixin:
             except Exception:
                 pass
 
-        view.set_content(text, line_sources, root_path)
+        view.set_content(
+            text,
+            line_sources,
+            root_path,
+            change_ranges=change_ranges,
+        )
 
         if widget is not None:
             try:
@@ -1079,7 +1102,16 @@ class ResolvedDocumentMixin:
             except Exception:
                 pass
 
-        view.set_content(text, line_sources, root_path)
+        view.set_content(
+            text,
+            line_sources,
+            root_path,
+            change_ranges=(
+                self._resolved_change_ranges(document.tab_id)
+                if document is not None
+                else None
+            ),
+        )
         if document is not None:
             view.set_dirty_state(document.is_dirty)
 
@@ -1142,8 +1174,12 @@ class ResolvedDocumentMixin:
                         document.current_text,
                         document.line_sources,
                         document.root_path,
+                        change_ranges=self._resolved_change_ranges(tab_id),
                     )
                     existing_widget.set_dirty_state(False)
+            existing_widget.set_change_ranges(
+                self._resolved_change_ranges(tab_id)
+            )
             self._wire_section_card(existing_widget, tab_id)
             self.window.editor.open_tab(
                 tab_id,
@@ -1177,6 +1213,7 @@ class ResolvedDocumentMixin:
             document.current_text,
             document.line_sources,
             document.root_path,
+            change_ranges=self._resolved_change_ranges(tab_id),
         )
         view.bind_document(document)
         view.set_dirty_state(document.is_dirty)
@@ -1353,8 +1390,12 @@ class ResolvedDocumentMixin:
                     document.current_text,
                     document.line_sources,
                     document.root_path,
+                    change_ranges=self._resolved_change_ranges(tab_id),
                 )
             existing_widget.set_dirty_state(document.is_dirty)
+            existing_widget.set_change_ranges(
+                self._resolved_change_ranges(tab_id)
+            )
             self.window.editor.open_tab(
                 tab_id,
                 title,
@@ -1374,6 +1415,7 @@ class ResolvedDocumentMixin:
             document.line_sources,
             str(document.root_path),
             sources_visible=has_sources,
+            change_ranges=self._resolved_change_ranges(tab_id),
         )
         view.bind_document(document)
         view.set_dirty_state(document.is_dirty)

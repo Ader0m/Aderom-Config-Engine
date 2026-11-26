@@ -107,6 +107,7 @@ class PreviewSnapshot:
                 revision=draft.revision,
                 updated_at=draft.updated_at,
                 saved_at=draft.saved_at,
+                change_ranges=draft.change_ranges,
             )
             for draft in sorted(
                 (
@@ -147,6 +148,7 @@ class PreviewSnapshot:
                 revision=draft.revision,
                 updated_at=draft.updated_at,
                 saved_at=draft.saved_at,
+                change_ranges=draft.change_ranges,
             )
             for draft in sorted(
                 (

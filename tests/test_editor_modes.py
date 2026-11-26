@@ -6,12 +6,18 @@ import unittest
 from tests.support import SRC  # noqa: F401
 
 from PyQt5.Qsci import QsciScintilla
+from PyQt5.QtGui import QFontMetrics
 from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QWidget
 
 from tests.qt_support import qapp
 from ui import lexers
-from ui.editor import CodeEditor, ResolvedView
+from ui.editor import (
+    _CHANGE_MARKER,
+    _LINE_NUMBER_MARGIN,
+    CodeEditor,
+    ResolvedView,
+)
 from ui.editor_tabs import EditorTabs
 
 
@@ -38,6 +44,89 @@ class EditorModeTest(unittest.TestCase):
             int(editor.SendScintilla(QsciScintilla.SCI_GETSTYLEAT, pos))
             for pos in range(start, end)
         ]
+
+    @staticmethod
+    def _has_change_marker(editor, line):
+        return bool(
+            editor.markersAtLine(line) & (1 << _CHANGE_MARKER)
+        )
+
+    def test_code_editor_marks_changed_line_and_keeps_after_save(self):
+        editor = CodeEditor()
+        self.addCleanup(editor.deleteLater)
+        editor.open_file("a.ltx", text="one\ntwo\nthree\n")
+        editor.set_editable(True)
+
+        editor.editor.insertAt("x", 1, 0)
+        editor.flush_pending()
+
+        self.assertTrue(self._has_change_marker(editor.editor, 1))
+        self.assertFalse(self._has_change_marker(editor.editor, 0))
+        scroll_markers = editor._change_margin._scroll_markers
+        self.assertIn(1, scroll_markers._lines)
+        self.assertGreaterEqual(scroll_markers.MIN_THICKNESS, 5)
+
+        editor.mark_clean()
+        self.assertTrue(self._has_change_marker(editor.editor, 1))
+
+        editor.undo()
+        editor.flush_pending()
+        self.assertFalse(self._has_change_marker(editor.editor, 1))
+
+    def test_code_editor_uses_persisted_change_ranges(self):
+        editor = CodeEditor()
+        self.addCleanup(editor.deleteLater)
+        editor.open_file(
+            "a.ltx",
+            text="one\nchanged\nthree\n",
+            baseline_text="one\ntwo\nthree\n",
+            change_ranges=((1, 2),),
+        )
+
+        self.assertTrue(self._has_change_marker(editor.editor, 1))
+        self.assertFalse(self._has_change_marker(editor.editor, 0))
+
+    def test_code_editor_marks_draft_changes_on_reopen(self):
+        editor = CodeEditor()
+        self.addCleanup(editor.deleteLater)
+        editor.open_file(
+            "a.ltx",
+            text="one\nchanged\nthree\n",
+            baseline_text="one\ntwo\nthree\n",
+        )
+
+        self.assertTrue(self._has_change_marker(editor.editor, 1))
+        self.assertFalse(self._has_change_marker(editor.editor, 0))
+        self.assertFalse(self._has_change_marker(editor.editor, 2))
+
+    def test_resolved_view_marks_draft_changes_after_save(self):
+        view = ResolvedView()
+        self.addCleanup(view.deleteLater)
+        view.set_content(
+            "one\ntwo\nthree\n",
+            [None, None, None, None],
+            "a.ltx",
+            original_text="one\ntwo\nthree\n",
+        )
+        view.set_editable(True)
+
+        self.assertTrue(view.apply_line_edit("replace", 2, "two2"))
+
+        self.assertTrue(self._has_change_marker(view.editor, 1))
+        self.assertFalse(self._has_change_marker(view.editor, 0))
+
+        view.mark_clean()
+        self.assertTrue(self._has_change_marker(view.editor, 1))
+
+    def test_line_number_margin_fits_six_digits(self):
+        self.assertEqual(_LINE_NUMBER_MARGIN, "000000")
+        for widget in (CodeEditor(), ResolvedView()):
+            self.addCleanup(widget.deleteLater)
+            width = widget.editor.marginWidth(0)
+            required = QFontMetrics(
+                widget.editor.font()
+            ).horizontalAdvance(_LINE_NUMBER_MARGIN)
+            self.assertGreaterEqual(width, required)
 
     def test_resolved_view_recolors_edited_line(self):
         view = ResolvedView()

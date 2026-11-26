@@ -51,6 +51,8 @@ class TextEditorHandler(FileOpenHandler):
                 str(path),
                 text=text,
                 request_id=request_id,
+                baseline_text=api.document_original_text(path),
+                change_ranges=api.document_change_ranges(path),
             )
         )
 

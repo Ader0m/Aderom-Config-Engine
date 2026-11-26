@@ -47,6 +47,22 @@ class DiagnosticsLog(QTextEdit):
         if self._fades and not self._timer.isActive():
             self._timer.start()
 
+    def set_lines(self, lines):
+        """Заменить содержимое пачкой строк без анимации затухания."""
+        self._timer.stop()
+        self._fades = []
+        self._status_blocks = {}
+        self.clear()
+        text = "\n".join(str(line) for line in (lines or ()))
+        if not text:
+            return
+        cursor = self.textCursor()
+        fmt = QTextCharFormat()
+        fmt.setForeground(self._base)
+        cursor.insertText(text, fmt)
+        self.setTextCursor(cursor)
+        self.ensureCursorVisible()
+
     def update_message(self, key, message):
         """Обновить ранее добавленную строку по ключу.
 

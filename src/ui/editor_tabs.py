@@ -296,7 +296,7 @@ class EditorTabs(QTabWidget):
                 continue
             widget.mark_clean(text)
 
-    def reload_path(self, path, text):
+    def reload_path(self, path, text, baseline_text=None, change_ranges=None):
         """Перечитать открытую вкладку файла из проекта."""
         path = str(path)
         for widget in self._tab_ids.values():
@@ -304,7 +304,16 @@ class EditorTabs(QTabWidget):
                 continue
             if str(widget.current_file) != path:
                 continue
-            widget.open_file(path, text=text)
+            widget.open_file(
+                path,
+                text=text,
+                baseline_text=(
+                    widget.change_baseline_text
+                    if baseline_text is None
+                    else baseline_text
+                ),
+                change_ranges=change_ranges,
+            )
 
     def current_editor(self):
         widget = self.currentWidget()
@@ -635,7 +644,8 @@ class EditorTabs(QTabWidget):
         editor = self._active_editor()
         return editor.current_file if editor is not None else None
 
-    def open_file(self, file_path, text=None, request_id=0):
+    def open_file(self, file_path, text=None, request_id=0, baseline_text=None,
+                  change_ranges=None):
         """Открыть файл в базовом редакторе.
 
         Возвращает ``True`` только если содержимое действительно показано:
@@ -646,7 +656,12 @@ class EditorTabs(QTabWidget):
         self.setCurrentWidget(editor)
         editor.set_editable(self._can_edit())
         try:
-            opened = editor.open_file(file_path, text=text)
+            opened = editor.open_file(
+                file_path,
+                text=text,
+                baseline_text=baseline_text,
+                change_ranges=change_ranges,
+            )
         except Exception:
             log.exception("Не удалось открыть файл в редакторе: %s", path)
             opened = False
