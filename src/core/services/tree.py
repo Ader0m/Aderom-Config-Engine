@@ -15,6 +15,7 @@ from core.tools.fs import (
     game_root_from_scan_dir,
     read_text_safe,
 )
+from core.tools.text_search import search_text_files
 from core.tree.builder import add_virtual_file, remove_virtual_file
 from core.tree.query import search_nodes, sort_nodes
 
@@ -122,6 +123,27 @@ class TreeServices:
     def search_nodes(self, forest, text):
         """Поиск по дереву файлов."""
         return search_nodes(forest, text)
+
+    def search_text(
+        self,
+        forest,
+        query,
+        source_files=None,
+        case_sensitive=False,
+        log=None,
+        cancel_check=None,
+        progress=None,
+    ):
+        """Полнотекстовый поиск по собранному VFS с учётом overlay."""
+        return search_text_files(
+            forest.scan_dir,
+            query,
+            source_files=source_files,
+            case_sensitive=case_sensitive,
+            log=log,
+            cancel_check=cancel_check,
+            progress=progress,
+        )
 
     def rel_path(self, forest, path):
         """Получить относительный путь файла."""

@@ -1803,12 +1803,18 @@ class ItemViewerFeature:
         )
 
     def _apply_item_text(self, tab_id, section, field, value):
-        """Изменить название/описание через XML строковой таблицы.
+        """Изменить название/описание предмета.
 
-        Правка идёт в тот XML-документ, который дал текущий перевод, и
-        попадает в проектный черновик. Дальше с ним работает обычный
-        XML-конвейер проекта (DXML-Lua / XML / Override), поэтому
-        отображаемый текст и сохраняемый патч остаются согласованными.
+        Текст всегда попадает в проектный XML строковой таблицы. Если
+        ключ уже принадлежит проектному XML, он правится на месте. Для
+        чужого ключа создаётся собственная пара ключей проекта и поля
+        ``inv_name``/``description`` переводятся на неё через
+        resolved-документ.
+
+        Иначе в XML-режиме «подмена ключей» новый ключ и правка
+        ``system.ltx`` создавались бы только в предпросмотре патча, а
+        resolved-документ и подсветка изменённых строк оставались бы
+        исходными.
         """
         if not self._can_edit_tab(tab_id):
             self.ctx.ui.show_error(
@@ -1823,7 +1829,8 @@ class ItemViewerFeature:
             )
             return False
 
-        if str(field).lower() == "name":
+        field = str(field).lower()
+        if field == "name":
             source = getattr(entry, "name_source", None)
             label = "названия"
         else:
@@ -1846,14 +1853,27 @@ class ItemViewerFeature:
             return False
 
         reader = self.ctx.documents.read_project_text
-        writer = self.ctx.documents.write_project_text
-        async_writer = self.ctx.documents.write_project_text_async
         editor = self.ctx.items.edit_localization_text
         if not callable(reader) or not callable(editor):
             self.ctx.ui.show_error(
                 "Платформа не предоставляет доступ к черновикам XML."
             )
             return False
+
+        context = self._project_localization_context(path)
+        if (
+            context is not None
+            and not self._is_project_owned_localization(path)
+        ):
+            return self._save_item_text_retarget(
+                tab_id,
+                section,
+                field,
+                entry,
+                label,
+                value,
+                context,
+            )
 
         current = reader(path)
         updated = editor(
@@ -1871,37 +1891,238 @@ class ItemViewerFeature:
         if updated == current:
             return True
 
-        if callable(async_writer):
-            return self._start_item_text_save(
-                tab_id,
-                section,
-                path,
-                key,
-                label,
-                current,
-                updated,
-                async_writer,
-            )
+        return self._write_item_text(
+            tab_id,
+            section,
+            path,
+            key,
+            label,
+            current,
+            updated,
+        )
 
+    def _project_localization_context(self, source_path):
+        """Параметры проектного XML для текста предмета.
+
+        Возвращает ``(project_name, scan_dir, xml_path)`` или ``None``,
+        если проектная сессия недоступна. ``None`` означает прежнюю
+        правку исходного XML: без сессии новый ключ некуда записать.
+        """
+        if self.session is None:
+            return None
+
+        project_name = str(self.ctx.ui.project_name() or "").strip()
+        if not project_name:
+            return None
+
+        forest = self.session.forest
+        if forest is None:
+            return None
+
+        scan_dir = self.ctx.services.forest_scan_dir(forest)
+        if scan_dir is None:
+            return None
+
+        _item_path, project_xml = self.ctx.items.creation_paths(
+            scan_dir,
+            project_name,
+        )
+        if project_xml is None:
+            return None
+
+        # Язык берём из исходной строки, а имя файла — из правил проекта.
+        # Новый XML кладём в корень языка, иначе загрузчик локализации не
+        # увидит файл, если исходник был include-фрагментом в подпапке.
+        text_dir = self._project_text_dir(source_path)
+        xml_path = self._unique_project_xml_path(
+            text_dir / Path(project_xml).name
+        )
+        return project_name, Path(scan_dir), xml_path
+
+    @staticmethod
+    def _project_text_dir(source_path):
+        """Каталог ``text/<lang>`` для нового файла локализации."""
+        parts = Path(source_path).parts
+        for index in range(len(parts) - 2, -1, -1):
+            if parts[index].lower() == "text":
+                return Path(*parts[: index + 2])
+        return Path(source_path).parent
+
+    def _is_project_owned_localization(self, path):
+        """Создан ли XML-файл самим проектом, а не взят из VFS."""
+        overlay = self.ctx.ui.project_overlay()
+        key = self.ctx.paths.key(path)
+        return any(
+            self.ctx.paths.key(item) == key
+            for item in (overlay.new_files or ())
+        )
+
+    @staticmethod
+    def _unique_project_xml_path(path):
+        """Не занимать уже существующий файл VFS чужим XML-патчем."""
+        path = Path(path)
+        if not path.is_file():
+            return path
+
+        index = 2
+        while True:
+            candidate = path.with_name(
+                "%s_%d%s" % (path.stem, index, path.suffix)
+            )
+            if not candidate.is_file():
+                return candidate
+            index += 1
+
+    @staticmethod
+    def _localization_source_text(source, fallback=""):
+        """Исходный ``<text>`` с ``\\n`` и ``%c[...]`` для нового ключа."""
+        if source is not None:
+            for attr in ("raw_text", "text"):
+                text = str(getattr(source, attr, "") or "")
+                if text:
+                    return text
+        return str(fallback or "")
+
+    def _save_item_text_retarget(
+        self,
+        tab_id,
+        section,
+        field,
+        entry,
+        label,
+        value,
+        context,
+    ):
+        """Создать проектные ключи и перевести на них поля предмета."""
+        project_name, _scan_dir, xml_path = context
+        creator = self.ctx.items.plan_item_creation
+        reader = self.ctx.documents.read_project_text
+        editor = self.ctx.items.edit_localization_text
+        if (
+            not callable(creator)
+            or not callable(reader)
+            or not callable(editor)
+        ):
+            self.ctx.ui.show_error(
+                "Платформа не предоставляет проектные ключи локализации."
+            )
+            return False
+
+        xml_text = reader(xml_path) or ""
+        try:
+            # Из плана нужны только новые ключи и готовый каркас XML.
+            # Секция уже существует, поэтому проверка known_sections
+            # намеренно не применяется.
+            plan = creator(
+                "",
+                xml_text,
+                (),
+                section,
+                None,
+                (),
+                project_name,
+            )
+        except ValueError as exc:
+            self.ctx.ui.show_error(str(exc))
+            return False
+        except Exception as exc:
+            self.ctx.ui.log(
+                "Предметы: не удалось подготовить ключи [%s]: %s"
+                % (section, exc)
+            )
+            self.ctx.ui.show_error(
+                "Не удалось подготовить текст предмета [%s]." % section
+            )
+            return False
+
+        name_value = self._localization_source_text(
+            getattr(entry, "name_source", None),
+            getattr(entry, "name_text", ""),
+        )
+        description_value = self._localization_source_text(
+            getattr(entry, "description_source", None),
+            getattr(entry, "description_text", ""),
+        )
+        if field == "name":
+            name_value = str(value or "")
+        else:
+            description_value = str(value or "")
+
+        updated = editor(plan.xml_text, plan.name_key, name_value)
+        if updated is not None:
+            updated = editor(
+                updated,
+                plan.description_key,
+                description_value,
+            )
+        if updated is None:
+            self.ctx.ui.show_error(
+                "Не удалось записать проектные ключи в %s."
+                % xml_path.name
+            )
+            return False
+
+        old_name_key = str(
+            getattr(entry, "name_key", "")
+            or getattr(
+                getattr(entry, "name_source", None),
+                "key",
+                "",
+            )
+            or ""
+        )
+        if field == "name":
+            fields = [("inv_name", plan.name_key)]
+            short_key = str(entry.field("inv_name_short") or "").strip()
+            if short_key and short_key.lower() == old_name_key.lower():
+                fields.append(("inv_name_short", plan.name_key))
+        else:
+            fields = [("description", plan.description_key)]
+
+        return self._write_item_text(
+            tab_id,
+            section,
+            xml_path,
+            (
+                plan.name_key
+                if field == "name"
+                else plan.description_key
+            ),
+            label,
+            xml_text,
+            updated,
+            fields=tuple(fields),
+        )
+
+    def _write_item_text(
+        self,
+        tab_id,
+        section,
+        path,
+        key,
+        label,
+        current,
+        updated,
+        fields=(),
+    ):
+        """Записать XML-черновик и затем, при необходимости, поля предмета."""
+        writer = self.ctx.documents.write_project_text_async
         if not callable(writer):
             self.ctx.ui.show_error(
                 "Платформа не предоставляет запись черновиков XML."
             )
             return False
-
-        if not writer(path, updated):
-            return False
-
-        self.ctx.ui.log(
-            "Проект: изменён текст %s (%s) в %s"
-            % (key, label, Path(path).name)
+        return self._start_item_text_save(
+            tab_id,
+            section,
+            Path(path),
+            key,
+            label,
+            current,
+            updated,
+            writer,
+            fields=fields,
         )
-        self.ctx.ui.set_status(
-            "Текст предмета записан в черновик XML: %s" % Path(path).name,
-            5000,
-        )
-        self._refresh_item_text(tab_id, section)
-        return True
 
     def _text_save_cards(self, tab_id, section):
         """Карточки, которые показывают сохраняемый предмет."""
@@ -1944,6 +2165,30 @@ class ItemViewerFeature:
                     except Exception:
                         pass
 
+    def _item_text_job(
+        self,
+        tab_id,
+        section,
+        path,
+        key,
+        label,
+        text,
+        fields=(),
+    ):
+        """Снимок операции записи текста предмета."""
+        self._text_save_seq += 1
+        return {
+            "token": self._text_save_seq,
+            "tab_id": str(tab_id or ""),
+            "section": str(section or ""),
+            "path": Path(path),
+            "key": str(key or ""),
+            "label": str(label or ""),
+            "text": str(text or ""),
+            "fields": tuple(fields or ()),
+            "cards": self._text_save_cards(tab_id, section),
+        }
+
     def _start_item_text_save(
         self,
         tab_id,
@@ -1954,6 +2199,7 @@ class ItemViewerFeature:
         current,
         updated,
         writer,
+        fields=(),
     ):
         """Поставить запись XML в очередь и заблокировать представления."""
         path = Path(path)
@@ -1969,17 +2215,15 @@ class ItemViewerFeature:
         if not callable(writer):
             return False
 
-        self._text_save_seq += 1
-        job = {
-            "token": self._text_save_seq,
-            "tab_id": str(tab_id or ""),
-            "section": str(section or ""),
-            "path": path,
-            "key": key,
-            "label": label,
-            "text": updated,
-            "cards": self._text_save_cards(tab_id, section),
-        }
+        job = self._item_text_job(
+            tab_id,
+            section,
+            path,
+            key,
+            label,
+            updated,
+            fields=fields,
+        )
         self._text_save_jobs[path_key] = job
         self._set_save_busy(job, True)
         self.ctx.ui.set_status(
@@ -2044,7 +2288,99 @@ class ItemViewerFeature:
             "Текст предмета сохранён в XML: %s" % path.name,
             5000,
         )
+        if job.get("fields"):
+            self._apply_item_text_fields(job)
+            return
         self._refresh_item_text_async(job)
+
+    def _apply_item_text_fields(self, job):
+        """Перевести поля предмета на ключи только что записанного XML."""
+        fields = list(job.get("fields") or ())
+        if not fields:
+            self._refresh_item_text_async(job)
+            return
+
+        def fail(message):
+            self._finish_item_text_save(job)
+            self.ctx.ui.show_error(
+                "Текст сохранён, но не удалось обновить поля предмета "
+                "[%s]:\n%s" % (job["section"], message)
+            )
+            self.ctx.ui.set_status(
+                "Ошибка обновления полей предмета",
+                6000,
+            )
+            self._request_entry_refresh(
+                job["tab_id"],
+                job["section"],
+            )
+
+        def complete():
+            self.ctx.ui.log(
+                "Проект: предмет [%s] переведён на проектные ключи"
+                % job["section"]
+            )
+            self.ctx.ui.set_status(
+                "Текст предмета обновлён: %s"
+                % Path(job["path"]).name,
+                5000,
+            )
+            self._refresh_item_text_async(job)
+
+        def process(index):
+            if index >= len(fields):
+                complete()
+                return
+
+            key, value = fields[index]
+            state = {"called": False}
+
+            def done(ok, error=None):
+                if state["called"]:
+                    return
+                state["called"] = True
+                if not ok:
+                    fail(error or "правка не применена")
+                    return
+                process(index + 1)
+
+            async_edit = self.ctx.documents.apply_resolved_field_edit_async
+            if callable(async_edit):
+                try:
+                    started = async_edit(
+                        job["tab_id"],
+                        job["section"],
+                        key,
+                        value,
+                        on_done=done,
+                    )
+                except Exception as exc:
+                    self.ctx.ui.log(
+                        "Предметы: поле %s не поставлено в очередь: %s"
+                        % (key, exc)
+                    )
+                    started = False
+                if started or state["called"]:
+                    return
+
+            sync_edit = self.ctx.documents.apply_resolved_field_edit
+            if not callable(sync_edit):
+                fail("платформа не предоставляет правку resolved-поля")
+                return
+
+            try:
+                ok = bool(sync_edit(
+                    job["tab_id"],
+                    job["section"],
+                    key,
+                    value,
+                ))
+            except Exception as exc:
+                fail(str(exc))
+                return
+            done(ok, None if ok else "правка не применена")
+
+        process(0)
 
     def _refresh_item_text_async(self, job):
         """Пересобрать карточку без блокировки UI-потока."""

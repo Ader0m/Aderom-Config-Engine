@@ -157,13 +157,6 @@ class MainWindow(QMainWindow):
             activated=self._toggle_search,
         )
 
-        # Ctrl+Shift+F — поиск по дереву из любого места окна.
-        QShortcut(
-            QKeySequence("Ctrl+Shift+F"),
-            self,
-            activated=self._toggle_search,
-        )
-
         # Док диагностики
         self.log_dock = QDockWidget("Диагностика", self)
         self.log_text = DiagnosticsLog()

@@ -144,6 +144,7 @@ def main():
         SHIPPED_MODULE_IDS,
     )
     from ui.platform.workspace_actions import WorkspaceActions
+    from ui.platform.vfs_search_actions import VfsSearchAction
     from ui.platform.sdk_bridge import build_module_context
     from sdk.contracts.events import Events
     from ui.bus import CommandBus, EventBus
@@ -322,6 +323,7 @@ def main():
         )
 
     common_actions = CommonActions(api, services, tasks)
+    vfs_search = VfsSearchAction(api, services, tasks)
     api.register_menu(
         "Файл", "Открыть папку...",
         workspace_actions.choose_directory, "Ctrl+O",
@@ -337,6 +339,12 @@ def main():
     api.register_menu("Правка", "Отменить", common_actions.undo)
     api.register_menu("Правка", "Повторить", common_actions.redo)
     api.register_menu("Правка", "Найти в файле", common_actions.find)
+    api.register_menu(
+        "Правка",
+        "Найти в файлах VFS…",
+        vfs_search.show,
+        "Ctrl+Shift+F",
+    )
     api.register_tree_context_action(
         "Открыть исходный файл",
         common_actions.open_raw,
@@ -372,6 +380,7 @@ def main():
     commands.register("common.edit_undo", common_actions.undo)
     commands.register("common.edit_redo", common_actions.redo)
     commands.register("common.edit_find", common_actions.find)
+    commands.register(VfsSearchAction.COMMAND, vfs_search.show)
 
     # 3) Загрузка модулей (до построения окна, чтобы регистрации попали в меню).
     def make_context(manifest):
