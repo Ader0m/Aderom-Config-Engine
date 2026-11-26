@@ -2,6 +2,7 @@ generated
 src/generated
 /projects
 /ACE.lnk
+/docs/archive
 
 # Локальная конфигурация рабочей среды (не исходники)
 /config/layout.json
@@ -226,3 +227,4 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
