@@ -205,6 +205,13 @@ class HintCatalogs:
         self.refresh_localization(background=background)
         self.refresh_sections(background=background)
 
+    _TITLES = {
+        "colors": "Подсказки: цвета",
+        "includes": "Подсказки: include",
+        "localization": "Подсказки: локализация",
+        "sections": "Подсказки: секции",
+    }
+
     def _run(self, key, build, apply, background):
         if self._closed or key in self._pending:
             return
@@ -217,7 +224,12 @@ class HintCatalogs:
                 def work(_log):
                     return build()
 
-                handle = self._tasks.run(work, on_done=apply)
+                handle = self._tasks.run(
+                    work,
+                    on_done=apply,
+                    operation_key="platform.hints.%s" % key,
+                    title=self._TITLES.get(key, "Подсказки: %s" % key),
+                )
                 if handle is not None:
                     self._handles[key] = handle
                 return

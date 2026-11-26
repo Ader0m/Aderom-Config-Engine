@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from ui.operations import normalize_operation_key
+from ui.tasks import current_task
 
 from .common import _SDK_API_MARKER
 
@@ -50,6 +51,15 @@ class TaskApiAdapter:
         if priority:
             kwargs["priority"] = priority
         return self._service.run(fn, **kwargs)
+
+    def progress(self, done=None, total=None, message=None):
+        handle = current_task()
+        if handle is None:
+            return False
+        if self._owner and handle.owner and handle.owner != self._owner:
+            return False
+        handle.progress(done=done, total=total, message=message)
+        return True
 
     def cancel_owner(self):
         return self._service.cancel_owner(self._owner)

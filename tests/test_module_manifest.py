@@ -313,10 +313,15 @@ class BuiltinModuleManifestTest(unittest.TestCase):
 
     def test_builtin_modules_have_no_class_manifest(self):
         from modules.base.module import BaseModule
+        from modules.item_browser.module import ItemBrowserModule
         from modules.ogg_editor.module import OggEditorModule
 
-        self.assertNotIn("manifest", vars(BaseModule))
-        self.assertNotIn("manifest", vars(OggEditorModule))
+        for module_class in (
+            BaseModule,
+            ItemBrowserModule,
+            OggEditorModule,
+        ):
+            self.assertNotIn("manifest", vars(module_class))
 
 
 if __name__ == "__main__":

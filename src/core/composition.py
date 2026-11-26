@@ -32,7 +32,6 @@ class CoreComposition:
 
     def __init__(
         self,
-        cache,
         tree_builder,
         tree_query,
         graph_builder,
@@ -43,7 +42,6 @@ class CoreComposition:
         cache_service=None,
         snapshot_service=None,
     ):
-        self.cache = cache
         self.cache_service = cache_service
         self.snapshot_service = snapshot_service
         self.generated_dir = Path(generated_dir)
@@ -79,11 +77,9 @@ class CoreComposition:
         )
         self.patch = PatchServices(
             resolver_service,
-            cache,
             xml_resolve_service,
         )
         self.cache_control = CacheControl(
-            cache,
             cache_service,
             self.resolve,
             self.graph,

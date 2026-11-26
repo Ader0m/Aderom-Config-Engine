@@ -458,9 +458,8 @@ def _build_xml_plan(
 class XmlPlanner:
     """Планировщик XML/DXML-патчей."""
 
-    def __init__(self, resolver_adapter=None, cache=None):
+    def __init__(self, resolver_adapter=None):
         self.resolver_adapter = resolver_adapter
-        self.cache = cache
 
     def plan_xml_document_change(
         self,

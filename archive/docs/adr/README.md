@@ -139,3 +139,8 @@
 
 - [ADR-36](ADR-36-graph-confidence.md) — `confidence` связей графа,
   правила `exact/probable/heuristic`, отображение в UI и SDK `0.13.0`.
+
+Решение шага 8.6:
+
+- [ADR-37](ADR-37-release-gate-write.md) — release gate, экспериментальная
+  пользовательская запись патчей, статус UI и порядок отката.

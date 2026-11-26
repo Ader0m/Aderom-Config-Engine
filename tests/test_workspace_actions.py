@@ -30,6 +30,7 @@ class _Api:
         self.statuses = []
         self.errors = []
         self.ready = []
+        self._closing = False
 
     def log(self, message):
         self.logs.append(str(message))
@@ -146,6 +147,22 @@ class WorkspaceActionsTest(unittest.TestCase):
         )
         self.assertTrue(
             any("Корней: 3; LTX: 12; XML: 2" in message for message in api.logs),
+            api.logs,
+        )
+
+    def test_scan_cancelled_during_close_is_not_shown_as_error(self):
+        actions, api, events = self._actions(_Tasks())
+        api._closing = True
+
+        actions._on_scan_done(None, RuntimeError("Операция отменена"))
+
+        self.assertEqual(api.errors, [])
+        self.assertNotIn(
+            (Events.ERROR, "Операция отменена"),
+            events.published,
+        )
+        self.assertIn(
+            "Пересборка VFS прервана при закрытии",
             api.logs,
         )
 

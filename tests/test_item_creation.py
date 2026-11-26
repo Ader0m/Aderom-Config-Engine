@@ -27,35 +27,18 @@ _app = qapp()
 
 class _Ui:
     def __init__(self):
-        self.files = {}
         self.errors = []
         self.logs = []
         self.overlay = ProjectOverlay()
-        self.resolved = None
 
     def is_project_active(self):
         return True
-
-    def resolved_draft(self, tab_id):
-        return self.resolved
 
     def project_name(self):
         return "Мой проект"
 
     def project_overlay(self):
         return self.overlay
-
-    def read_project_text(self, path):
-        return self.files.get(Path(path), "")
-
-    def write_project_text(self, path, text):
-        self.files[Path(path)] = str(text)
-        return True
-
-    def write_project_texts(self, files):
-        for path, text in files:
-            self.files[Path(path)] = str(text)
-        return True
 
     def show_error(self, message):
         self.errors.append(str(message))
@@ -69,6 +52,32 @@ class _Ui:
     def theme_color(self, name, fallback=None):
         return fallback
 
+
+class _Documents:
+    def __init__(self):
+        self.files = {}
+        self.resolved = None
+
+    def resolved_draft(self, tab_id):
+        return self.resolved
+
+    def has_resolved_document(self, tab_id):
+        return self.resolved is not None
+
+    def read_project_text(self, path):
+        return self.files.get(Path(path), "")
+
+    def write_project_text(self, path, text):
+        self.files[Path(path)] = str(text)
+        return True
+
+    def write_project_texts(self, files):
+        for path, text in files:
+            self.files[Path(path)] = str(text)
+        return True
+
+
+class _Items:
     def project_tag(self, name):
         from app.features.items.creation import project_tag
 
@@ -136,8 +145,8 @@ class _Ctx:
     def __init__(self, scan_dir):
         self.ui = _Ui()
         self.services = _Services(scan_dir)
-        self.documents = self.ui
-        self.items = self.ui
+        self.documents = _Documents()
+        self.items = _Items()
         self.projects = self.ui
         self.paths = SimpleNamespace(
             key=lambda path: str(Path(path)).lower(),
@@ -268,7 +277,7 @@ class NewItemFileEditTest(unittest.TestCase):
             )
 
             ctx = _Ctx(cfg)
-            ctx.ui.files[path] = file_text
+            ctx.documents.files[path] = file_text
             ctx.ui.overlay = ProjectOverlay(
                 source_files={path: file_text},
                 new_files=frozenset({path}),
@@ -280,7 +289,7 @@ class NewItemFileEditTest(unittest.TestCase):
             feature._root_path = Path("system.ltx")
             feature._tab_id = "base.resolved:system.ltx"
             feature._title = "[Res]system.ltx"
-            ctx.ui.resolved = SimpleNamespace(
+            ctx.documents.resolved = SimpleNamespace(
                 text=(
                     "[base_item]\n"
                     "kind = i_food\n"
@@ -308,9 +317,9 @@ class NewItemFileEditTest(unittest.TestCase):
                 )
             )
 
-            self.assertIn("kind = i_med", ctx.ui.files[path])
+            self.assertIn("kind = i_med", ctx.documents.files[path])
             self.assertEqual(
-                ctx.ui.resolved.text,
+                ctx.documents.resolved.text,
                 "[base_item]\nkind = i_food\n\n"
                 "[new_item]\nkind =\ncost =\n",
             )
@@ -331,7 +340,7 @@ class ItemCreationTest(unittest.TestCase):
         self.feature._root_path = Path("system.ltx")
         self.feature._tab_id = "base.resolved:system.ltx"
         self.feature._title = "[Res]system.ltx"
-        self.ctx.ui.resolved = SimpleNamespace(
+        self.ctx.documents.resolved = SimpleNamespace(
             text="[base]\n",
             line_sources=(),
         )
@@ -371,7 +380,7 @@ class ItemCreationTest(unittest.TestCase):
     def test_creates_item_and_localization(self):
         self.assertTrue(self.feature._create_item("new_item", "base_item"))
 
-        item_text = self.ctx.ui.files[self.item_path]
+        item_text = self.ctx.documents.files[self.item_path]
         self.assertIn("[new_item]:base_item", item_text)
         self.assertIn("kind =", item_text)
         self.assertIn("cost =", item_text)
@@ -385,7 +394,7 @@ class ItemCreationTest(unittest.TestCase):
             item_text,
         )
 
-        xml_text = self.ctx.ui.files[self.xml_path]
+        xml_text = self.ctx.documents.files[self.xml_path]
         self.assertIn('encoding="windows-1251"', xml_text)
         self.assertIn('id="st_ace_мой_проект_name"', xml_text)
         self.assertIn('id="st_ace_мой_проект_descr"', xml_text)
@@ -394,21 +403,21 @@ class ItemCreationTest(unittest.TestCase):
         self.assertTrue(self.feature._create_item("first", "base_item"))
         self.assertTrue(self.feature._create_item("second", None))
 
-        item_text = self.ctx.ui.files[self.item_path]
+        item_text = self.ctx.documents.files[self.item_path]
         self.assertIn("[second]", item_text)
         self.assertIn(
             "inv_name = st_ace_мой_проект_2_name",
             item_text,
         )
 
-        xml_text = self.ctx.ui.files[self.xml_path]
+        xml_text = self.ctx.documents.files[self.xml_path]
         self.assertIn('id="st_ace_мой_проект_2_name"', xml_text)
         self.assertIn('id="st_ace_мой_проект_2_descr"', xml_text)
 
     def test_duplicate_section_is_rejected(self):
         self.assertFalse(self.feature._create_item("base_item", None))
         self.assertTrue(self.ctx.ui.errors)
-        self.assertFalse(self.item_path in self.ctx.ui.files)
+        self.assertFalse(self.item_path in self.ctx.documents.files)
 
 
 if __name__ == "__main__":

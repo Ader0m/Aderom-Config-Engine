@@ -21,32 +21,32 @@ Legacy-карантин: пуст
 | Параметр | Значение |
 |---|---|
 | Режим | **migration / guardrails** |
-| Текущий этап | **Этап 6 завершён (шаги 6.1–6.9); Этап 7 завершён (шаги 7.1–7.10); Этап 8: шаги 8.1–8.2, 8.4–8.5 завершены; 8.3 (19023/19024) оставлен открытым, сверка с игрой ждёт дампа**; `base` обязателен по ADR-35; **Этап 9: безопасная часть cleanup выполнена (core root, мёртвый код, CACHE-3, DATA-4, SDK-4); release gate остаётся** |
+| Текущий этап | **Этап 6 завершён (шаги 6.1–6.9); Этап 7 завершён (шаги 7.1–7.10); Этап 8: шаги 8.1–8.2, 8.4–8.6 завершены; 8.3 (19023/19024) остаётся задокументированным открытым отличием, сверка с игрой ждёт дампа; release gate 8.6 включил экспериментальную запись**; `base` обязателен по ADR-35; **Этап 9: безопасная часть cleanup выполнена (core root, мёртвый код, CACHE-3, DATA-4, SDK-4, 9.4 — composition cache); боевой release gate и остатки Этапа 9 остаются** |
 | Baseline Этапа 3 | старт — коммит `7c7ef26`; завершение — ADR-16, ADR-17 |
 | Baseline Этапа 4 | старт — коммит `50afaf7`; шаги 4.1–4.3 — ADR-18, ADR-19 |
 | Baseline Этапа 5 | старт — коммит `2f0c05d`; шаг 5.1 — ADR-20; шаг 5.2 — ADR-21; шаг 5.3 — ADR-22; шаг 5.4 — ADR-23; шаг 5.5 — ADR-24 |
 | Baseline Этапа 6 | старт — коммит `56d233a`; шаг 6.1 — владение вкладками/окнами; шаг 6.2 — операции/зависимости; шаг 6.3 — WindowService/раскладка/specs; шаг 6.4 — ThemeService и токены; шаг 6.5 — контексты открытия и режимы редактора; шаг 6.6 — пул TaskService и приоритеты; шаг 6.7 — HintService и закрытие UI→core; шаг 6.8 — dependency gating проектов и предметов; шаг 6.9 — жизненный цикл ProjectService, фоновое закрытие и тема модулей |
 | Baseline Этапа 7 | старт — коммит `fc5fad8`; шаг 7.1 — `module.json` и валидация до импорта; шаг 7.2 — состояния загрузчика, `config/modules.json`, каскадная деактивация; шаг 7.3 — `CapabilitiesApi`, протоколы и удаление registry из публичного SDK; шаг 7.4 — `base`/`item_browser`, workspace и общие действия в платформе; шаг 7.5 — OGG на capability `section.graph`, optional dragdrop; шаг 7.6 — домен items в `app/features/items`, `core` без предметов; шаг 7.7 — conformance модуля-образца; шаг 7.8 — item-кэши через `CacheService`, единый `LocalizationService`; шаг 7.9 — graph-кэш через `CacheService`; шаг 7.10 — `confidence` связей графа и SDK `0.13.0` |
-| Базовая проверка | **1365 passed, 1 skipped, 76 subtests**; `compileall` и `git diff --check` чистые |
-| Запись патчей | **заморожена**: `PATCH_WRITE_EXPERIMENTAL=False`, доступен только предпросмотр |
+| Базовая проверка | **1370 passed, 1 skipped, 76 subtests**; `compileall` и `git diff --check` чистые |
+| Запись патчей | **включена экспериментально**: `PATCH_WRITE_EXPERIMENTAL=True` (release gate 8.6); паритет 19023/19024 не подтверждён; откат — `False` |
 | SDK | `0.13.0`; breaking changes Этапов 1–2, 5 по ADR-14, ADR-15, ADR-20, 7.10 по ADR-36; additive `TaskApi` по ADR-25; `WindowSpec`/`DockSpec`/`TabSpec` по ADR-26; контексты `FileOpenHandler` по ADR-27; стабильный `handler_id` по ADR-28; пул и `priority` по ADR-29; `Events.UI_THEME_CHANGED` по ADR-30; шаг 7.1: `ModuleManifest.id`, `ModuleRequirement.id`, DTO capability в `module.json`; шаг 7.3: `CapabilitiesApi`, `Capability`, ошибки capability, `MODULE_MANIFEST_VERSION`; шаг 7.10: `GraphMatch.confidence` (обязательное keyword-only), `GraphNode.primary_confidence` по ADR-36; `CapabilityRegistry`/`CapabilityScope` удалены из публичного SDK |
 | Данные проекта | схема `2`; one-time forward migration при загрузке с backup; обратное чтение не поддерживается |
 | Кэш | `generated/cache-v2/*`; старый кэш не читается и удаляется при старте |
 | Снимок VFS | `WorkspaceSession.snapshot_id`; смена overlay — новая ревизия |
-| Производительность | открытие/resolved в пределах 10% от `stage0.json`; полная пересборка с снимком 1694–1718 мс (+9.1…+10.6%) |
+| Производительность | открытие/resolved в пределах 10% от `stage0.json`; полная пересборка с снимком 1703–1768 мс (+9.7…+13.9%), `tree_build_raw` +2.1…+6.0%, снимок ~122 мс; рост полной метрики объяснён снимком и разбросом машины |
 
 ---
 
 ## 2. Что сейчас запрещено
 
-- Добавлять новые фичи в patch path вне шагов Этапа 5.
-- Включать `PATCH_WRITE_EXPERIMENTAL` без отдельного решения оператора
-  (сейчас `False`; безопасная запись — шаги 5.3+ и Этап 8).
+- Добавлять новые фичи в patch path вне ADR/release gate.
+- Считать экспериментальную запись боевой до подтверждения паритета
+  `19023/19024` и зелёного `tools/semantic_parity.py --release-gate`.
 - Расширять `tests/architecture_allowlist.py` без решения оператора и ADR.
 - Игнорировать обязательность `base`: `base` всегда загружается и не
   отключается через `config/modules.json` (ADR-35).
-- Начинать следующие шаги Этапа 8 без отдельного подтверждения
-  оператора.
+- Закрывать 8.3 без игрового дампа или подгонять `Resolver4` под
+  расхождение.
 - Экспортировать `CapabilityRegistry`/`CapabilityScope` из `sdk`/
   `sdk.kernel`: это внутренняя реализация платформенного загрузчика.
 - Вызывать `ctx.capabilities.provide` вне `register` или предоставлять
@@ -169,9 +169,11 @@ Legacy-карантин: пуст
 `confidence` связей. По ADR-35 `base` обязателен и загружается всегда.
 Этап 8 начат с отдельного подтверждения оператора: шаги 8.1–8.2
 завершены (property-дамп, сравнение и отчёт), шаг 8.4 — эталонные
-наборы и полный round-trip, шаг 8.5 — нагрузочные проверки; шаг 8.3
-(19023/19024) оставлен открытым, фактическая сверка с игрой ждёт
-игрового дампа.
+наборы и полный round-trip, шаг 8.5 — нагрузочные проверки, шаг 8.6 —
+release gate с экспериментальной записью (ADR-37). Шаг 8.3
+(19023/19024) остаётся задокументированным открытым отличием,
+фактическая сверка с игрой ждёт игрового дампа; боевой статус записи
+не объявлен.
 
 ---
 
@@ -191,7 +193,8 @@ Legacy-карантин: пуст
   из узких сервисов (`tree`, `resolve`, `data`, `patch`, `prebuild`,
   `graph`, `cache_control`); не публичный порт (`SDK-4` закрыт):
   публичные порты — `core.api.*`, `core/api/services.py` удалён;
-  корень `core/__init__.py` сужен на Этапе 9;
+  корень `core/__init__.py` сужен на Этапе 9; с 9.4 не принимает
+  `cache`;
 - `core/tree/graph.py` — graph-кэш и `confidence` связей закрыты
   шагами 7.9–7.10.
 
@@ -298,7 +301,7 @@ OWN-1/OWN-2/OWN-3 (владение вкладками и окнами) закр
 - `core/composition.py` — внутренний композиционный `CoreComposition`,
   не публичный API модулей; `core/__init__.py` больше не реэкспортирует
   внутренности, публичные порты — `core.api.*`, `core/api/services.py`
-  удалён;
+  удалён; с 9.4 `CoreComposition` не принимает `cache`;
 - `ctx.items`/`ctx.projects`/`ctx.documents` — feature-API этапа;
   capability `items.catalog` и вынос домена в модуль — Этап 7;
 - `ogg_editor.requires=("base",)` — намеренная зависимость по ADR-35,
@@ -345,7 +348,7 @@ OWN-1/OWN-2/OWN-3 (владение вкладками и окнами) закр
 - `core/composition.py` — внутренний композиционный `CoreComposition`,
   не публичный API модулей; `core/__init__.py` больше не реэкспортирует
   внутренности, публичные порты — `core.api.*`, `core/api/services.py`
-  удалён;
+  удалён; с 9.4 `CoreComposition` не принимает `cache`;
 - `ctx.items`/`ctx.projects`/`ctx.documents` — feature-API этапа;
   capability `items.catalog` и домен items закрыты шагами 7.3–7.6;
 - `ogg_editor.requires=("base",)` — намеренная зависимость по ADR-35,
@@ -1628,13 +1631,13 @@ SDK `0.12.0` был зафиксирован на шаге 7.3; шаг 7.10 по
 | 19023/19024 | Этап 8, только по игровому дампу; сейчас не трогать |
 | `config/layout.json` | локальный runtime-файл, игнорируется Git; не коммитить |
 
-Ограничения после Этапа 7:
+Ограничения текущего режима (после 8.6):
 
-- не включать запись патчей без отдельного решения оператора;
+- не объявлять экспериментальную запись боевой без закрытия 8.3 и
+  зелёного `tools/semantic_parity.py --release-gate`;
 - не расширять allowlist и legacy-исключения;
-- не менять `tests/main_unit_test_*`;
-- не начинать следующие шаги Этапа 8 без отдельного подтверждения
-  оператора;
+- не менять `tests/main_unit_test_*` без явного подтверждения оператора;
+- не закрывать 8.3 без игрового дампа и не подгонять `Resolver4`;
 - не возвращать class-manifest и не импортировать модуль до проверки
   `module.json`;
 - не писать в обход `PatchCommitService`/`CommitAuthorization`;
@@ -1762,8 +1765,9 @@ SDK `0.12.0` был зафиксирован на шаге 7.3; шаг 7.10 по
   `PATCH_WRITE_EXPERIMENTAL` не менялись; `tests/main_unit_test_*` не
   трогались.
 
-Следующие шаги Этапа 8 (нагрузочные проверки и release gate) требуют
-отдельного подтверждения оператора.
+Следующие на момент шага 8.2 шаги Этапа 8 (нагрузочные проверки и
+release gate) требовали отдельного подтверждения оператора; они закрыты
+в 8.5–8.6.
 
 ---
 
@@ -1805,8 +1809,8 @@ SDK `0.12.0` был зафиксирован на шаге 7.3; шаг 7.10 по
   трогались;
 - тесты: полный прогон — 1347 passed.
 
-Следующие шаги Этапа 8 (release gate) требуют отдельного подтверждения
-оператора.
+На момент шага 8.5 release gate требовал отдельного подтверждения
+оператора; он выполнен в 8.6 в экспериментальном режиме.
 
 ---
 
@@ -1854,12 +1858,53 @@ SDK `0.12.0` был зафиксирован на шаге 7.3; шаг 7.10 по
 - отмена проверяет остановку пула и `done < total`, а не скорость
   отклика UI;
 - оригиналы игры, `Overwrite` и VFS не изменяются;
-- `core.__all__`, `sdk.__all__`, публичный контракт, схема проекта и
-  `PATCH_WRITE_EXPERIMENTAL` не менялись; `tests/main_unit_test_*` не
-  трогались.
+- на шаге 8.5 `core.__all__`, `sdk.__all__`, публичный контракт, схема
+  проекта и `PATCH_WRITE_EXPERIMENTAL` не менялись;
+  `tests/main_unit_test_*` не трогались.
 
-Следующий шаг Этапа 8 — release gate; он требует отдельного
-подтверждения оператора.
+---
+
+## 10.1. Этап 8: шаг 8.6
+
+**Шаг 8.6 завершён в экспериментальном режиме** (ADR-37). Решение
+оператора от 26.11.2026.
+
+Что закрыто:
+
+- `PATCH_WRITE_EXPERIMENTAL=True`: пользовательская запись патчей
+  включена; статус в главном окне — «Запись патчей: экспериментальная»
+  с явной оговоркой, что паритет `19023/19024` не подтверждён;
+- откат — `PATCH_WRITE_EXPERIMENTAL=False`; данные проекта и формат
+  патчей не мигрируются;
+- путь записи не менялся: `PatchCommitService` +
+  `CommitAuthorization`, полный round-trip, без автоподтверждения;
+- release checklist — `docs/Release gate.md`; ADR — ADR-37;
+- `tests/test_feature_flags.py` проверяет включённый флаг и откат;
+- закрытие приложения во время `vfs.rebuild` больше не показывает
+  ошибку отменённой операции и не падает: `on_app_close` отменяет
+  `vfs.rebuild`, `WorkspaceActions._on_scan_done` при `_closing` пишет
+  только журнал, `PlatformApi.show_error` при закрытии не открывает
+  диалог. Регрессия покрыта `tests/test_workspace_actions.py` и
+  `tests/test_platform_api.py`;
+- полный прогон: **1370 passed, 1 skipped, 76 subtests**;
+- `tools/semantic_parity.py --manifest`: 11870/11870 секций, 0
+  отличий; `tools/load_check.py` — `ok=true`, 20000 файлов, 19002
+  секции, 999 корней, отмена работает; `tools/perf_baseline.py` —
+  `tree_build` +9.7…+13.9% (снимок ~122 мс, `tree_build_raw`
+  +2.1…+6.0%), остальные метрики ≤ +7.9% от baseline.
+
+Ограничения:
+
+- **8.3 не закрыт.** Игрового `game_sections.txt`/`game_properties.txt`
+  нет, `--release-gate` не может быть зелёным; отличие остаётся
+  задокументированным открытым, а запись — экспериментальной, не
+  боевой;
+- нагрузочный VFS — синтетический smoke-check, использующий
+  `FileCacheSystem`/`ResolvedCache` напрямую; production-профиль полной
+  композиции он не заменяет;
+- `tests/main_unit_test_patch.py` адаптирован к `CoreComposition` в
+  коммите `676e20c`; это требует явного подтверждения оператора по
+  `AGENTS.md` §4.7.
 
 ---
 
@@ -1892,18 +1937,52 @@ SDK `0.12.0` был зафиксирован на шаге 7.3; шаг 7.10 по
 - `CACHE-3` закрыт: `CacheService` создаёт и хранит resolved-бэкенд;
   `main.py` не создаёт `FileCacheSystem`/`ResolvedCache` раздельно;
   `TreeBuilder`, `ResolverService` и `XmlResolveService` получают только
-  `cache_service`, а `CoreComposition` — переходный `cache=None` как
-  внутренний параметр композиционного объекта; legacy-конструкторы с
-  `cache`/`resolved_cache` остаются для standalone-тестов;
+  `cache_service`; с 9.4 `CoreComposition` не принимает `cache`;
+  legacy-конструкторы с `cache`/`resolved_cache` остаются только как
+  standalone/test seam и в production не используются;
 - удалён мёртвый код: `on_resolved_changed`,
   `sync_resolved_line_edit`, `ProjectService.save_text`,
   `invalidate_forest_signatures`, `_resolved_signature_memo`,
   `header_name`, `field_key`, `SectionSpan`;
 - удалены устаревшие тесты мёртвого кода и исправлены тесты,
   проверявшие подменный контракт;
-- `tests/main_unit_test_*` не изменялись.
+- в самом аудите `tests/main_unit_test_*` не изменялись; отдельно, в
+  коммите `676e20c`, `tests/main_unit_test_patch.py` адаптирован к
+  `CoreComposition`, а в 9.4 переведён на `CacheService`
+  (`TreeBuilder`/`ResolverService`/`XmlResolveService`/
+  `ReferenceGraphBuilder`); ожидаемые значения теста не менялись.
+  Изменение выполнено по явному указанию оператора от 26.11.2026
+  (`AGENTS.md` §4.7).
+
+---
+
+## 12. Этап 9: шаг 9.4
+
+**Шаг 9.4 выполнен: переходный composition-level cache удалён.**
+
+Что изменено:
+
+- `CoreComposition` больше не принимает `cache`; `main.py` не передаёт
+  `cache=None`;
+- `PatchServices` и `CacheControl` больше не принимают legacy `cache`;
+  `CacheControl.invalidate_cache()` очищает только `CacheService`;
+- у `PatchPlanner`, `LtxPlanner`, `XmlPlanner`, `DltxGenerator` и
+  `DxmlGenerator` удалён неиспользуемый параметр `cache`;
+- production-путь `TreeBuilder`/`ResolverService`/`XmlResolveService`/
+  `ReferenceGraphBuilder` работает только через `cache_service`;
+- legacy-конструкторы с `cache`/`resolved_cache` остаются только как
+  standalone/test seam и в production не используются;
+- `tests/main_unit_test_patch.py` переведён с
+  `FileCacheSystem`/`ResolvedCache`/`DisabledCache` на общий
+  `CacheService`; ожидаемые значения не менялись;
+- тесты обновлены; полный прогон — **1370 passed, 1 skipped,
+  76 subtests**.
 
 Что осталось открытым:
 
-- 19023/19024 и release gate Этапа 8 ждут игрового дампа/решения
-  оператора.
+- 19023/19024 ждёт игрового дампа; release gate 8.6 выполнен только в
+  экспериментальном режиме, боевой статус записи не объявлен;
+- поколенческая очистка дискового кэша — отдельный пункт Этапа 9
+  (LRU/лимит байтов в `core/tools/cache.py`, §5.3);
+- legacy-конструкторы для standalone/тестов при необходимости удаляются
+  отдельным решением: сейчас это явно test-only, не production-путь.

@@ -400,7 +400,6 @@ class ProjectServiceTest(unittest.TestCase):
         )
         resolver.ensure_adapter(forest, cfg)
         services = CoreComposition(
-            cache=cache,
             tree_builder=TreeBuilder(cache),
             tree_query=TreeQueryService(),
             graph_builder=ReferenceGraphBuilder(DisabledCache()),
@@ -653,7 +652,6 @@ class ProjectServiceTest(unittest.TestCase):
             resolver.ensure_adapter(forest, cfg)
 
             services = CoreComposition(
-                cache=cache,
                 tree_builder=TreeBuilder(cache),
                 tree_query=TreeQueryService(),
                 graph_builder=ReferenceGraphBuilder(DisabledCache()),
@@ -763,7 +761,6 @@ class ProjectServiceTest(unittest.TestCase):
             resolver.ensure_adapter(forest, cfg)
 
             services = CoreComposition(
-                cache=cache,
                 tree_builder=TreeBuilder(cache),
                 tree_query=TreeQueryService(),
                 graph_builder=ReferenceGraphBuilder(DisabledCache()),
@@ -836,7 +833,6 @@ class ProjectServiceTest(unittest.TestCase):
             resolver.ensure_adapter(forest, cfg)
 
             services = CoreComposition(
-                cache=cache,
                 tree_builder=TreeBuilder(cache),
                 tree_query=TreeQueryService(),
                 graph_builder=ReferenceGraphBuilder(DisabledCache()),
@@ -899,7 +895,6 @@ class ProjectServiceTest(unittest.TestCase):
             resolver.ensure_adapter(forest, cfg)
 
             services = CoreComposition(
-                cache=cache,
                 tree_builder=TreeBuilder(cache),
                 tree_query=TreeQueryService(),
                 graph_builder=ReferenceGraphBuilder(DisabledCache()),
@@ -948,7 +943,6 @@ class ProjectServiceTest(unittest.TestCase):
             resolver.ensure_adapter(forest, cfg)
 
             services = CoreComposition(
-                cache=cache,
                 tree_builder=TreeBuilder(cache),
                 tree_query=TreeQueryService(),
                 graph_builder=ReferenceGraphBuilder(DisabledCache()),
@@ -1010,7 +1004,6 @@ class ProjectServiceTest(unittest.TestCase):
             resolver.ensure_adapter(forest, cfg)
 
             services = CoreComposition(
-                cache=cache,
                 tree_builder=TreeBuilder(cache),
                 tree_query=TreeQueryService(),
                 graph_builder=ReferenceGraphBuilder(DisabledCache()),
@@ -1107,7 +1100,6 @@ class ProjectServiceTest(unittest.TestCase):
             resolver.ensure_adapter(forest, cfg)
 
             services = CoreComposition(
-                cache=cache,
                 tree_builder=TreeBuilder(cache),
                 tree_query=TreeQueryService(),
                 graph_builder=ReferenceGraphBuilder(DisabledCache()),

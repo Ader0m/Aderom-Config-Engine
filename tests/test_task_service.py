@@ -19,6 +19,7 @@ from ui.operations import (
     OperationRegistry,
 )
 from ui.tasks import TaskService, current_task
+from ui.platform.sdk_bridge.tasks import TaskApiAdapter
 
 
 class _BarrierTaskService(TaskService):
@@ -844,6 +845,40 @@ class TaskServiceTest(unittest.TestCase):
             self._wait_until(lambda: handle.is_finished)
         )
         self.assertEqual(seen, [handle.key])
+
+    def test_module_progress_updates_operation_snapshot(self):
+        service = TaskService(max_workers=1)
+        self.addCleanup(service.shutdown, 1000)
+        adapter = TaskApiAdapter(service)
+        adapter.bind_owner("demo")
+        reported = []
+
+        def work(_log):
+            reported.append(adapter.progress(2, 5, "half"))
+            return 1
+
+        handle = adapter.run(
+            work,
+            operation_key="demo.progress",
+            title="Demo progress",
+        )
+        self.assertTrue(
+            self._wait_until(lambda: handle.is_finished)
+        )
+
+        self.assertEqual(reported, [True])
+        self.assertEqual(handle.done, 2)
+        self.assertEqual(handle.total, 5)
+        self.assertEqual(handle.message, "half")
+        snapshot = service.operations.get(handle.key)
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot.done, 2)
+        self.assertEqual(snapshot.total, 5)
+        self.assertEqual(snapshot.message, "half")
+
+    def test_progress_outside_worker_is_rejected(self):
+        adapter = TaskApiAdapter(object())
+        self.assertFalse(adapter.progress(1, 2, "outside"))
 
     def test_self_dependency_is_rejected(self):
         service = TaskService()

@@ -75,6 +75,36 @@ def _language_for_path(path):
     return LANGUAGE_PLAIN
 
 
+def _restyle_line_at_caret(editor):
+    """Явно перекрасить строку под курсором.
+
+    Scintilla красит только изменившийся фрагмент и может отложить
+    вызов лексера до следующей отрисовки. Для LTX/DLTX этого мало:
+    ``tokenize_line`` разбирает строку целиком, поэтому после правки
+    символа нужен запрос на перекраску всей строки.
+    """
+    position = int(editor.SendScintilla(QsciScintilla.SCI_GETCURRENTPOS))
+    line = int(
+        editor.SendScintilla(
+            QsciScintilla.SCI_LINEFROMPOSITION,
+            position,
+        )
+    )
+    start = int(
+        editor.SendScintilla(
+            QsciScintilla.SCI_POSITIONFROMLINE,
+            line,
+        )
+    )
+    end = int(
+        editor.SendScintilla(
+            QsciScintilla.SCI_GETLINEENDPOSITION,
+            line,
+        )
+    )
+    editor.SendScintilla(QsciScintilla.SCI_COLOURISE, start, end)
+
+
 class _LexerScheduler(QObject):
     """Откладывает покраску файла и обновляет статус прогресса."""
 
@@ -654,6 +684,8 @@ class CodeEditor(QWidget):
         # Сравнение всего 40-МБ текста на каждый символ недопустимо.
         # Точный статус пересчитается один раз при сбросе debounce.
         self._set_dirty(True)
+        if self._lexer is not None:
+            _restyle_line_at_caret(self.editor)
 
     def _request_save(self):
         if self.is_editable:
@@ -1489,6 +1521,12 @@ class ResolvedView(QWidget):
             else:
                 return False
 
+            # Правка выполнена программно (карточка/история), поэтому
+            # textChanged подавлен флагом _loading: перекрашиваем
+            # затронутую строку явно.
+            if self._lexer is not None:
+                _restyle_line_at_caret(editor)
+
             if self._document is not None:
                 # Канонический line_sources уже обновлён документом
                 # до вызова view.apply_line_edit. Обновляем панель
@@ -1560,6 +1598,8 @@ class ResolvedView(QWidget):
         self._pending_text = True
         self._sync_timer.start()
         self._set_dirty(True)
+        if self._lexer is not None:
+            _restyle_line_at_caret(self.editor)
 
     def _request_save(self):
         if self._editable:

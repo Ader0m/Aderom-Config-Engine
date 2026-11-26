@@ -526,9 +526,8 @@ def default_new_xml_name(plan: PatchPlan, project_tag: str = "") -> str:
 class DxmlGenerator:
     """Генератор XML/DXML-дельты для патч-мода."""
 
-    def __init__(self, resolver_adapter=None, cache=None):
+    def __init__(self, resolver_adapter=None):
         self.resolver_adapter = resolver_adapter
-        self.cache = cache
 
     def generate(self, plan: PatchPlan) -> GeneratedPatch:
         if plan.target.root_path is None and not plan.is_xml:

@@ -13,11 +13,11 @@
     .venv\\Scripts\\python.exe tools\\semantic_parity.py ^
         --configs "..." --compare game_sections.txt ^
         --compare-properties game_properties.txt ^
-        --known docs\\baseline\\known-parity-differences.json ^
+        --known baseline\\known-parity-differences.json ^
         --report parity-report.json
 
     .venv\\Scripts\\python.exe tools\\semantic_parity.py ^
-        --configs "..." --manifest docs\\baseline\\stage0-manifest.json
+        --configs "..." --manifest baseline\\stage0-manifest.json
 """
 
 from __future__ import annotations

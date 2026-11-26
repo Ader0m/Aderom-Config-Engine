@@ -7,15 +7,9 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
-from core.composition import CoreComposition
 from core.services.cache_control import CacheControl
 from core.services.prebuild import PrebuildServices
 from types import SimpleNamespace
-
-class _Cache:
-    def clear(self):
-        pass
-
 
 class _Resolver:
     def invalidate_cache(self):
@@ -63,7 +57,6 @@ class PrebuildCoordinationTest(unittest.TestCase):
         prebuild._forest = object()
         prebuild._config_dir = Path("configs")
         control = CacheControl(
-            cache=_Cache(),
             cache_service=None,
             resolve=_Resolver(),
             graph=_Graph(),

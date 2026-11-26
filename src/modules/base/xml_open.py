@@ -131,6 +131,8 @@ class XmlFileOpener:
                     request_id,
                 ),
                 on_log=self.ctx.ui.log,
+                operation_key="base.xml.resolve:%s" % self.ctx.paths.key(path),
+                title="XML-резолв: %s" % path.name,
             )
         except Exception as exc:
             self._open_failed(
@@ -179,6 +181,8 @@ class XmlFileOpener:
                     request_id,
                 ),
                 on_log=self.ctx.ui.log,
+                operation_key="base.xml.external:%s" % self.ctx.paths.key(path),
+                title="XML-резолв: %s" % path.name,
             )
         except Exception as exc:
             self._open_failed(

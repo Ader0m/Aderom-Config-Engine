@@ -1303,12 +1303,33 @@ class ModuleLoaderTest(unittest.TestCase):
         self.assertEqual(loader._order, [])
         self.assertTrue(any("FAILED (фаза init)" in line for line in logs))
 
-    def test_activate_and_deactivate_do_not_raise(self):
-        loader = ModuleLoader(lambda manifest: None)
+    def test_activate_and_deactivate_transition_loaded_module(self):
+        package = _TempModules(self)
+        package.add("demo", _manifest("demo"))
+        loader = ModuleLoader(
+            lambda manifest: object(),
+            package=package.package,
+        )
+
         with redirect_stderr(io.StringIO()):
             loader.discover_and_load(log=lambda message: None)
+            self.assertEqual(
+                loader.records["demo"].state,
+                ModuleState.REGISTERED,
+            )
+
             loader.activate_all(log=lambda message: None)
+            self.assertEqual(
+                loader.records["demo"].state,
+                ModuleState.ACTIVE,
+            )
+
             loader.deactivate_all(log=lambda message: None)
+
+        self.assertEqual(
+            loader.records["demo"].state,
+            ModuleState.UNLOADED,
+        )
 
 
 class DependencyIdentityTest(unittest.TestCase):

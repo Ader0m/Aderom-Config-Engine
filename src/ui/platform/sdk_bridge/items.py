@@ -130,7 +130,7 @@ class ItemCatalogApiAdapter:
             rgba=bytes(raw.rgba),
         )
 
-    def load_item_icons(self, catalog, log=None):
+    def load_item_icons(self, catalog, log=None, progress=None):
         requests = []
         for entry in (getattr(catalog, "items", ()) or ()):
             if entry.icon_path is None:
@@ -153,6 +153,7 @@ class ItemCatalogApiAdapter:
             getattr(catalog, "cache_key", "") or "",
             requests,
             log=log,
+            progress=progress,
         )
 
         return tuple(

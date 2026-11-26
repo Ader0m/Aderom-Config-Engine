@@ -4,7 +4,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from tests.support import SRC  # noqa: F401
 
@@ -1443,6 +1443,19 @@ class ProjectAutosaveTest(unittest.TestCase):
             )
             self.assertFalse(target.is_file())
 
+    def test_app_close_cancels_vfs_rebuild(self):
+        tasks = _DeferredTasks()
+        api = self._api(tasks)
+        api.operations.upsert_external(
+            "vfs.rebuild",
+            owner="<platform>",
+            title="VFS",
+            state="running",
+        )
+
+        self.assertTrue(api.on_app_close())
+        self.assertIn("vfs.rebuild", tasks.cancelled_operations)
+
     def test_app_close_is_deferred_while_patch_write_runs(self):
         with tempfile.TemporaryDirectory() as d:
             api = self._api(_DeferredTasks())
@@ -1452,6 +1465,18 @@ class ProjectAutosaveTest(unittest.TestCase):
             self.assertFalse(api.on_app_close())
             self.assertTrue(api._close_pending)
             self.assertEqual(api.tasks.cancelled, [api.project.active.id])
+
+    def test_show_error_is_logged_not_dialoged_during_close(self):
+        api = PlatformApi(FakeEvents(), FakeCommands(), None, None, None)
+        api._closing = True
+        api.window = object()
+        api.log = Mock()
+
+        with patch("ui.platform_api.QMessageBox.critical") as critical:
+            api.show_error("boom")
+
+        critical.assert_not_called()
+        api.log.assert_called_once()
 
     def test_app_close_invalidates_running_autosave(self):
         with tempfile.TemporaryDirectory() as d:

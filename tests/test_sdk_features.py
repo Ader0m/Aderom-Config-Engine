@@ -90,15 +90,49 @@ class PatchApiAdapterTest(unittest.TestCase):
 
 class CapabilityProtocolsTest(unittest.TestCase):
     def test_domain_capability_protocols_are_importable(self):
-        for protocol in (
-            DocumentViewerApi,
-            SectionGraphApi,
-            ItemCatalogApi,
-            ItemSectionDropApi,
-            ProjectAssetsApi,
-            OggEditorApi,
-        ):
-            self.assertTrue(hasattr(protocol, "__mro__"))
+        expected = {
+            DocumentViewerApi: {
+                "open_document",
+                "open_raw_document",
+                "open_resolved_document",
+            },
+            SectionGraphApi: {
+                "register_contributor",
+                "unregister_contributor",
+                "show",
+                "request",
+            },
+            ItemCatalogApi: {
+                "item_catalog_root",
+                "build_item_catalog",
+                "build_item_entry",
+                "build_item_entry_from_block",
+                "edit_localization_text",
+                "read_texture_region",
+                "load_item_icons",
+                "item_entry",
+                "plan_item_creation",
+                "creation_paths",
+                "parent_fields",
+            },
+            ItemSectionDropApi: {"accept_item_section"},
+            ProjectAssetsApi: {
+                "register_project_asset_type",
+                "unregister_project_asset_type",
+                "project_asset_types",
+                "read_project_asset",
+                "update_project_asset",
+                "save_project_asset",
+            },
+            OggEditorApi: {"open_file", "add_file"},
+        }
+
+        for protocol, methods in expected.items():
+            for name in methods:
+                self.assertTrue(
+                    hasattr(protocol, name),
+                    "%s.%s" % (protocol.__name__, name),
+                )
 
     def test_item_api_is_not_kept_as_alias(self):
         import sdk.features.items as items

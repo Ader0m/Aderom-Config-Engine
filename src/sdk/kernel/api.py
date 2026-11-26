@@ -35,6 +35,18 @@ class TaskApi(Protocol):
         запускается раньше.
         """
 
+    def progress(
+        self,
+        done: Optional[int] = None,
+        total: Optional[int] = None,
+        message: Optional[str] = None,
+    ) -> bool:
+        """Обновить прогресс текущей задачи.
+
+        Вызывается из ``fn(log)`` в рабочем потоке. Возвращает ``False``,
+        если вызов сделан вне задачи; в UI-потоке прогресс не меняется.
+        """
+
     def operation_active(self, operation_key: str) -> bool:
         """Активна ли операция с указанным ключом (queued/running)."""
 

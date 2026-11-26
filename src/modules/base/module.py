@@ -211,7 +211,13 @@ class BaseModule(ModuleBase):
             self.ctx.ui.set_status("Открыт: %s" % Path(out).name, 5000)
             self.ctx.ui.log("Сборка открыта: %s" % Path(out).name)
 
-        self.ctx.tasks.run(work, on_done=done, on_log=self.ctx.ui.log)
+        self.ctx.tasks.run(
+            work,
+            on_done=done,
+            on_log=self.ctx.ui.log,
+            operation_key="base.assemble:%s" % self.ctx.paths.key(path),
+            title="Сборка: %s" % path.name,
+        )
 
     def _register_tree_actions(self, ctx):
         ui = ctx.ui

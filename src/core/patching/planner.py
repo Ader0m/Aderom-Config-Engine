@@ -28,11 +28,10 @@ from core.patching.xml.planner import XmlPlanner
 class PatchPlanner:
     """Планировщик патчей с раздельными LTX/XML реализациями."""
 
-    def __init__(self, resolver_adapter=None, cache=None):
+    def __init__(self, resolver_adapter=None):
         self.resolver_adapter = resolver_adapter
-        self.cache = cache
-        self.ltx = LtxPlanner(resolver_adapter, cache)
-        self.xml = XmlPlanner(resolver_adapter, cache)
+        self.ltx = LtxPlanner(resolver_adapter)
+        self.xml = XmlPlanner(resolver_adapter)
 
     # -------------------------------------------------- XML
     def plan_xml_document_change(

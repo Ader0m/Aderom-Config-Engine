@@ -172,6 +172,86 @@ class LtxOverrideTest(unittest.TestCase):
         )
         self.assertIn("x = new", result.generated.files[0].text)
 
+    def test_resolved_inherited_tabbed_line_uses_winner_file(self):
+        winner = self.config / "creatures" / "m_bibliotekar.ltx"
+        winner.parent.mkdir()
+        winner.write_bytes(
+            b"[m_bibliotekar_e]\n"
+            b"Morale_Despondent_Threashold\t= 0.5\n"
+            b"\n"
+            b"[bibliotekar_normal]:m_bibliotekar_e\n"
+        )
+        forest = Forest(self.config, [self.source, winner])
+        baseline = (
+            "; Assembled root: test\n"
+            "\n"
+            "[bibliotekar_normal]\n"
+            "Morale_Despondent_Threashold = 0.5\n"
+        )
+        edited = baseline.replace("= 0.5", "= 0.7")
+
+        result = self.service.plan(
+            self.source,
+            baseline,
+            edited,
+            line_sources=(
+                None,
+                None,
+                None,
+                LineSource(
+                    kind="file",
+                    display="GAME\\creatures\\m_bibliotekar.ltx",
+                    path=winner,
+                    line=0,
+                ),
+                None,
+            ),
+            forest=forest,
+            options=PatchOptions(),
+            resolved=True,
+        )
+
+        self.assertTrue(result.generated.verification.ok)
+        self.assertEqual(
+            result.generated.files[0].relative_path,
+            Path("gamedata") / "configs" / "creatures"
+            / "m_bibliotekar.ltx",
+        )
+        self.assertIn(
+            "Morale_Despondent_Threashold = 0.7",
+            result.generated.files[0].text,
+        )
+
+    def test_resolved_line_without_spaces_around_equals(self):
+        winner = self.config / "items" / "child.ltx"
+        winner.write_bytes(b"[item]\nx=old\n")
+        forest = Forest(self.config, [self.source, winner])
+
+        result = self.service.plan(
+            self.source,
+            "[item]\nx = old\n",
+            "[item]\nx = new\n",
+            line_sources=(
+                LineSource(kind="original", path=self.source, line=1),
+                LineSource(
+                    kind="file",
+                    display="GAME\\items\\child.ltx",
+                    path=winner,
+                    line=0,
+                ),
+            ),
+            forest=forest,
+            options=PatchOptions(),
+            resolved=True,
+        )
+
+        self.assertTrue(result.generated.verification.ok)
+        self.assertEqual(
+            result.generated.files[0].relative_path,
+            Path("gamedata") / "configs" / "items" / "child.ltx",
+        )
+        self.assertIn("x = new", result.generated.files[0].text)
+
     def test_winner_display_path_without_physical_path(self):
         mod_file = (
             Path(self.temp.name)

@@ -145,6 +145,11 @@ class SectionCardMixin:
                 work,
                 on_done=done,
                 on_log=self.log,
+                operation_key="platform.section_card:%s:%s" % (
+                    tab_id,
+                    section,
+                ),
+                title="Карточка секции: %s" % section,
                 owner=tab_id,
             )
         except Exception as exc:

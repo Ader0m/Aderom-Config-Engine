@@ -2,6 +2,7 @@
 """CACHE-3: CacheService — единственный владелец кэшей в production."""
 
 import ast
+import inspect
 import tempfile
 import unittest
 from pathlib import Path
@@ -124,7 +125,6 @@ class CacheOwnershipTest(unittest.TestCase):
         cache = CacheService()
         resolver = ResolverService(cache_service=cache)
         control = CacheControl(
-            cache=None,
             cache_service=cache,
             resolve=resolver,
             graph=SimpleNamespace(clear_cache=lambda: None),
@@ -212,14 +212,12 @@ class CacheOwnershipTest(unittest.TestCase):
 
         services_keywords = call_keywords("CoreComposition")
         self.assertIn("cache_service", services_keywords)
-        self.assertIn("cache", services_keywords)
-        cache_kw = next(
-            keyword
-            for keyword in calls["CoreComposition"][0].keywords
-            if keyword.arg == "cache"
-        )
-        self.assertIsInstance(cache_kw.value, ast.Constant)
-        self.assertIsNone(cache_kw.value.value)
+        self.assertNotIn("cache", services_keywords)
+
+    def test_composition_has_no_legacy_cache_parameter(self):
+        parameters = inspect.signature(CoreComposition).parameters
+        self.assertNotIn("cache", parameters)
+        self.assertIn("cache_service", parameters)
 
 
 if __name__ == "__main__":

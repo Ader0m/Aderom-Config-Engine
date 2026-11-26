@@ -206,7 +206,6 @@ def _make_services(
     from core.xml.service import XmlResolveService
 
     return CoreComposition(
-        cache=cache,
         tree_builder=TreeBuilder(
             cache=cache,
             cache_service=cache_service,

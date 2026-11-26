@@ -3,11 +3,65 @@ import unittest
 
 from tests.support import SRC  # noqa: F401
 
+from PyQt5.Qsci import QsciScintilla
+
+from tests.qt_support import qapp
 from ui import lexers
 
 
 def styles(line):
     return [(start, end, style) for start, end, style in lexers.tokenize_line(line)]
+
+
+class LtxLexerRestyleTest(unittest.TestCase):
+    """Правка фрагмента строки должна перекрашивать строку целиком."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = qapp()
+
+    def test_incremental_recolor_starts_at_line_boundary(self):
+        editor = QsciScintilla()
+        self.addCleanup(editor.deleteLater)
+        lexer = lexers.LtxLexer(editor)
+        editor.setLexer(lexer)
+
+        text = "allow_repair = false\n"
+        editor.setText(text)
+        editor.SendScintilla(QsciScintilla.SCI_COLOURISE, 0, -1)
+
+        editor.setSelection(0, 15, 0, 20)
+        editor.replaceSelectedText("12345")
+        text = editor.text()
+        changed = text.index("12345")
+
+        # Scintilla запрашивает только изменённый фрагмент, начиная с
+        # середины строки. Лексер обязан разобрать строку с её начала.
+        lexer.styleText(changed, len(text))
+
+        start = int(
+            editor.SendScintilla(
+                QsciScintilla.SCI_POSITIONFROMLINE,
+                0,
+            )
+        )
+        result = [
+            int(
+                editor.SendScintilla(
+                    QsciScintilla.SCI_GETSTYLEAT,
+                    start + index,
+                )
+            )
+            for index in range(len(text.rstrip("\n")))
+        ]
+        self.assertEqual(
+            result[changed:changed + 5],
+            [lexers.STYLE_NUMBER] * 5,
+        )
+        self.assertEqual(
+            result[:12],
+            [lexers.STYLE_KEY] * 12,
+        )
 
 
 class LtxLexerTest(unittest.TestCase):

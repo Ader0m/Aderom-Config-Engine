@@ -182,21 +182,58 @@ def split_line_ending(line: str) -> Tuple[str, str]:
     return line, ""
 
 
+def _comparable_key_line(line: str):
+    """Сравнимое представление LTX-строки без пробелов и комментариев."""
+    clean = strip_comments(str(line or "")).strip()
+    if not clean:
+        return None
+    parsed = parse_key_line(clean)
+    if parsed is None:
+        return None
+    operation, key, raw_value, has_value = parsed
+    if not has_value:
+        return (operation, key.casefold(), None)
+    value, _inside = parse_value(raw_value)
+    return (operation, key.casefold(), value)
+
+
 def find_winner_line(
     path: Path,
     old_line: str,
     used: Optional[set] = None,
 ) -> int:
-    """Найти номер строки в файле-победителе по её тексту."""
+    """Найти номер строки в файле-победителе по её тексту.
+
+    Resolved-текст нормализует пробелы, поэтому физическая строка может
+    отличаться табами или числом пробелов. Сначала ищем точное
+    совпадение, затем совпадение без учёта пробелов и разбора LTX.
+    """
     text, _encoding = read_ltx(path)
     needle = str(old_line or "").strip()
     if not needle:
         return 0
     used = used or set()
-    for number, line in enumerate(text.splitlines(), 1):
+    flat = " ".join(needle.split())
+    lines = text.splitlines()
+    fallback = 0
+    for number, line in enumerate(lines, 1):
         if number in used:
             continue
-        if line.strip() == needle:
+        stripped = line.strip()
+        if stripped == needle:
+            return number
+        if not fallback and " ".join(stripped.split()) == flat:
+            fallback = number
+    if fallback:
+        return fallback
+
+    comparable = _comparable_key_line(needle)
+    if comparable is None:
+        return 0
+    for number, line in enumerate(lines, 1):
+        if number in used:
+            continue
+        if _comparable_key_line(line) == comparable:
             return number
     return 0
 

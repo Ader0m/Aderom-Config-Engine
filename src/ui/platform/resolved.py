@@ -257,7 +257,13 @@ class ResolvedDocumentMixin:
                 done(None, exc)
             return True
 
-        run(work, on_done=done, on_log=self.log)
+        run(
+            work,
+            on_done=done,
+            on_log=self.log,
+            operation_key="documents.reload:%s" % tab_id,
+            title="Обновление документа: %s" % title,
+        )
         return True
 
     def _ensure_resolved_document(
@@ -770,7 +776,15 @@ class ResolvedDocumentMixin:
             )
 
         try:
-            run(work, on_done=done)
+            run(
+                work,
+                on_done=done,
+                operation_key="documents.edit:%s:%s" % (
+                    tab_id,
+                    section.lower(),
+                ),
+                title="Правка документа: %s" % (document.title or tab_id),
+            )
         except Exception as exc:
             self._finish_resolved_edit(tab_id, job, False, str(exc))
 

@@ -23,6 +23,9 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from .operations import RUNNING
+from .platform.theme import theme_service
+
 
 class OperationCenterDialog(QDialog):
     """Немодальный список операций."""
@@ -184,6 +187,8 @@ class OperationCenter(QWidget):
         self._on_clear = on_clear
         self._snapshots = ()
         self._dialog = None
+        self._button_signature = None
+        self._fraction = 0.0
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -194,21 +199,112 @@ class OperationCenter(QWidget):
         self.button.clicked.connect(self.open)
         layout.addWidget(self.button)
         self.setVisible(False)
+        self._apply_style(0.0)
+
+    @staticmethod
+    def _current_operation(active):
+        """Первый запущенный процесс; при равенстве — стабильный ключ."""
+        running = [item for item in active if item.state == RUNNING]
+        candidates = running or list(active)
+        if not candidates:
+            return None
+        return min(
+            candidates,
+            key=lambda item: (float(item.started_at or 0.0), item.key),
+        )
+
+    def _apply_style(self, fraction):
+        self._fraction = max(0.0, min(1.0, float(fraction or 0.0)))
+        palette = theme_service().palette
+        if self._fraction >= 1.0:
+            background = palette.accent_green
+        elif self._fraction > 0.0:
+            background = (
+                "qlineargradient(x1:0, y1:0, x2:1, y2:0, "
+                "stop:0 %s, stop:%.4f %s, stop:%.4f %s, stop:1 %s)"
+                % (
+                    palette.accent_green,
+                    self._fraction,
+                    palette.accent_green,
+                    self._fraction,
+                    palette.bg_panel,
+                    palette.bg_panel,
+                )
+            )
+        else:
+            background = palette.bg_panel
+        self.button.setStyleSheet(
+            "QToolButton {"
+            " background: %s;"
+            " color: %s;"
+            " border: 1px solid %s;"
+            " padding: 2px 8px;"
+            " }"
+            " QToolButton:hover { border-color: %s; }"
+            " QToolButton:pressed { background: %s; }"
+            % (
+                background,
+                palette.text,
+                palette.border,
+                palette.border_hover,
+                palette.bg_titlebar,
+            )
+        )
+
+    def refresh_theme(self):
+        self._apply_style(self._fraction)
+
+    def _set_button(self, text, fraction, tooltip, visible):
+        signature = (
+            text,
+            round(float(fraction or 0.0), 4),
+            tooltip,
+            bool(visible),
+        )
+        if signature == self._button_signature:
+            return
+        self._button_signature = signature
+        self.button.setText(text)
+        self.button.setToolTip(tooltip)
+        self.setVisible(bool(visible))
+        self._apply_style(fraction)
 
     def refresh(self):
         snapshots = self._registry.snapshots()
         self._snapshots = snapshots
         active = [item for item in snapshots if item.is_active]
-        if active:
-            self.button.setText("Операции: %d" % len(active))
-            self.button.setToolTip("Открыть центр операций")
-            self.setVisible(True)
+        current = self._current_operation(active)
+        if current is not None:
+            if current.total > 0:
+                text = "%s %d/%d" % (
+                    current.display_title,
+                    current.done,
+                    current.total,
+                )
+                fraction = current.progress
+            else:
+                text = current.display_title
+                fraction = 0.0
+            tooltip = "Открыть центр операций"
+            if len(active) > 1:
+                tooltip += "; активных операций: %d" % len(active)
+            if current.message:
+                tooltip += "\n%s" % current.message
+            self._set_button(text, fraction, tooltip, True)
         elif snapshots:
-            self.button.setText("Операции: готово")
-            self.button.setToolTip("Открыть центр операций")
-            self.setVisible(True)
+            self._set_button(
+                "Операции: готово",
+                0.0,
+                "Открыть центр операций",
+                True,
+            )
         else:
-            self.setVisible(False)
+            self._set_button(
+                "Операции",
+                0.0,
+                "Открыть центр операций",
+                False,
+            )
         if self._dialog is not None and self._dialog.isVisible():
             self._dialog.set_snapshots(snapshots)
 

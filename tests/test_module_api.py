@@ -8,9 +8,13 @@ from tests.support import SRC  # noqa: F401
 from ui.platform.sdk_bridge import (
     CommandApiAdapter,
     CoreApiAdapter,
+    DocumentApiAdapter,
     EventApiAdapter,
+    ItemCatalogApiAdapter,
+    PatchApiAdapter,
     TaskApiAdapter,
     UiApiAdapter,
+    build_module_context,
 )
 from ui.platform.sdk_bridge.common import _to_graph_node_view
 from sdk import DEFAULT_SEARCH_DELAY_MS
@@ -77,13 +81,39 @@ class ModuleApiTest(unittest.TestCase):
         self.assertEqual(manifest.platforms, ("windows",))
 
     def test_module_base_lifecycle_methods_are_callable(self):
-        module = ModuleBase()
+        class RecordingModule(ModuleBase):
+            def __init__(self):
+                self.calls = []
+
+            def init(self, ctx):
+                super().init(ctx)
+                self.calls.append("init")
+
+            def register(self, ctx):
+                super().register(ctx)
+                self.calls.append("register")
+
+            def activate(self, ctx):
+                super().activate(ctx)
+                self.calls.append("activate")
+
+            def deactivate(self, ctx):
+                super().deactivate(ctx)
+                self.calls.append("deactivate")
+
+        module = RecordingModule()
         context = _context()
 
         module.init(context)
         module.register(context)
         module.activate(context)
         module.deactivate(context)
+
+        self.assertEqual(
+            module.calls,
+            ["init", "register", "activate", "deactivate"],
+        )
+        self.assertIs(module.ctx, context)
 
     def test_context_accepts_ready_adapters_and_is_not_global(self):
         first = _context()
@@ -120,6 +150,28 @@ class ModuleApiTest(unittest.TestCase):
             self.assertTrue(hasattr(context, name), name)
         self.assertEqual(context.module_id, "test")
         self.assertIs(context.kernel.capabilities, context.capabilities)
+
+    def test_build_module_context_exposes_real_adapters(self):
+        context = build_module_context(
+            ModuleManifest(id="test", name="Test"),
+            sdk_version="0.14.0",
+            events=EventBus(),
+            commands=CommandBus(),
+            ui=_Ui(),
+            tasks=_Tasks(),
+            services=_Services(),
+            paths=None,
+            items=object(),
+        )
+
+        self.assertIsInstance(context.ui, UiApiAdapter)
+        self.assertIsInstance(context.documents, DocumentApiAdapter)
+        self.assertIsInstance(context.patches, PatchApiAdapter)
+        self.assertIsInstance(context.items, ItemCatalogApiAdapter)
+        self.assertIsInstance(context.events, EventApiAdapter)
+        self.assertIsInstance(context.commands, CommandApiAdapter)
+        self.assertIsInstance(context.tasks, TaskApiAdapter)
+        self.assertIsInstance(context.services, CoreApiAdapter)
 
     def test_section_graph_contributors_are_collected(self):
         class Provider:

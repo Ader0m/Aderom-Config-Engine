@@ -95,7 +95,7 @@ from PyQt5.QtWidgets import (
 from .session import resolved_tab_id
 
 WINDOW_KEY = "item_browser.item_viewer"
-PROGRESS_KEY = "item_browser.item_viewer.progress"
+
 GRID_SIZE = 50
 GALLERY_ICON_SIZE = 100
 PLACEHOLDER_SIZE = 50
@@ -677,7 +677,11 @@ class ItemViewerFeature:
 
             # Ядро декодирует иконки пакетно: кэш регионов + пул процессов.
             # Модуль только превращает готовые RGBA в QImage.
-            icons = self.ctx.items.load_item_icons(catalog, log=log)
+            icons = self.ctx.items.load_item_icons(
+                catalog,
+                log=log,
+                progress=self.ctx.tasks.progress,
+            )
             images = {
                 icon.section: _image_from_region(icon)
                 for icon in icons
@@ -760,14 +764,7 @@ class ItemViewerFeature:
 
     # -------------------------------------------------- фоновая задача
     def _on_log(self, message):
-        text = str(message)
-        if text.startswith("item progress:"):
-            self.ctx.ui.log_status(
-                PROGRESS_KEY,
-                "Предметы: %s" % text.split(":", 1)[1].strip(),
-            )
-            return
-        self.ctx.ui.log(text)
+        self.ctx.ui.log(str(message))
 
     def _on_done(self, result, err, token):
         if token != self._request_seq:
@@ -1046,7 +1043,15 @@ class ItemViewerFeature:
 
         self._entry_refresh_inflight.add(key)
         try:
-            run(work, on_done=done)
+            run(
+                work,
+                on_done=done,
+                operation_key="items.entry:%s:%s" % (
+                    tab_id,
+                    section.lower(),
+                ),
+                title="Карточка предмета: %s" % section,
+            )
         except Exception as exc:
             self._entry_refresh_inflight.discard(key)
             self.ctx.ui.log(
@@ -1232,9 +1237,7 @@ class ItemViewerFeature:
         if record is None:
             return
         root_tab, _section, _card = record
-        fn = getattr(self.ctx.ui, "release_resolved_document", None)
-        if callable(fn):
-            fn(root_tab)
+        self.ctx.documents.release_resolved_document(root_tab)
         self._card_retains.discard(str(tab_id))
 
     def _on_card_requested(self, request):
@@ -1284,9 +1287,7 @@ class ItemViewerFeature:
             existing[2].refresh()
             return
 
-        retain = getattr(self.ctx.ui, "retain_resolved_document", None)
-        if callable(retain):
-            retain(tab_id)
+        self.ctx.documents.retain_resolved_document(tab_id)
         self._card_retains.add(card_tab_id)
 
         card = ItemCardView(
@@ -1609,11 +1610,9 @@ class ItemViewerFeature:
     def _start_field_job(self, job):
         """Запустить фоновую правку (или синхронный fallback)."""
         if job.get("kind") == "rename":
-            async_name = "rename_resolved_field_async"
+            async_fn = self.ctx.documents.rename_resolved_field_async
         else:
-            async_name = "apply_resolved_field_edit_async"
-
-        async_fn = getattr(self.ctx.ui, async_name, None)
+            async_fn = self.ctx.documents.apply_resolved_field_edit_async
         if callable(async_fn):
             def done(ok, error=None):
                 self._finish_field_job(job, bool(ok), error)
@@ -1797,6 +1796,7 @@ class ItemViewerFeature:
                 label,
                 current,
                 updated,
+                async_writer,
             )
 
         if not callable(writer):
@@ -1869,6 +1869,7 @@ class ItemViewerFeature:
         label,
         current,
         updated,
+        writer,
     ):
         """Поставить запись XML в очередь и заблокировать представления."""
         path = Path(path)
@@ -1881,11 +1882,6 @@ class ItemViewerFeature:
             )
             return False
 
-        writer = getattr(
-            self.ctx.ui,
-            "write_project_text_async",
-            None,
-        )
         if not callable(writer):
             return False
 

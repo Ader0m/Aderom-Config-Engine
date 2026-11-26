@@ -139,11 +139,12 @@ class ItemFeatureService:
     def read_texture_region(self, path, x, y, width, height):
         return self.icons.read_region(path, x, y, width, height)
 
-    def load_item_icons(self, catalog_key, requests, log=None):
+    def load_item_icons(self, catalog_key, requests, log=None, progress=None):
         return self.icons.load(
             catalog_key,
             requests,
             log=log,
+            progress=progress,
         )
 
     # -------------------------------------------------- локализация

@@ -123,7 +123,7 @@ class _Tasks:
     def __init__(self):
         self.calls = 0
 
-    def run(self, fn, on_done=None, on_log=None):
+    def run(self, fn, on_done=None, on_log=None, **kwargs):
         self.calls += 1
         result = fn(lambda message: None)
         if on_done is not None:

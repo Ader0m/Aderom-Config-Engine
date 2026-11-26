@@ -70,16 +70,16 @@ def _preview():
 
 
 class FeatureFlagTest(unittest.TestCase):
-    def test_patch_write_flag_is_off_by_default(self):
-        self.assertFalse(PATCH_WRITE_EXPERIMENTAL)
-        self.assertFalse(patch_write_enabled())
+    def test_patch_write_flag_is_enabled_after_release_gate(self):
+        self.assertTrue(PATCH_WRITE_EXPERIMENTAL)
+        self.assertTrue(patch_write_enabled())
 
-    def test_patch_write_flag_can_be_enabled_explicitly(self):
+    def test_patch_write_flag_can_be_rolled_back(self):
         with patch(
             "ui.platform.feature_flags.PATCH_WRITE_EXPERIMENTAL",
-            True,
+            False,
         ):
-            self.assertTrue(patch_write_enabled())
+            self.assertFalse(patch_write_enabled())
 
     def test_preview_dialog_default_is_fail_safe(self):
         calls = []
@@ -228,6 +228,20 @@ def _risky_preview(project):
 
 
 class ProjectControllerWriteGateTest(unittest.TestCase):
+    def test_preview_dialog_receives_enabled_write_after_release_gate(self):
+        controller = _Controller(Mock())
+        controller.window = None
+
+        with patch(
+            "ui.platform.project_controller.patch_write_enabled",
+            return_value=True,
+        ), patch(
+            "ui.platform.project_controller.ProjectPreviewDialog",
+        ) as dialog_cls:
+            controller._show_preview_dialog(_preview())
+
+        self.assertTrue(dialog_cls.call_args.kwargs["write_enabled"])
+
     def test_write_preview_does_not_write_when_flag_is_off(self):
         services = Mock()
         controller = _Controller(services)

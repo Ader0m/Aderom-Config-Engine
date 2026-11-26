@@ -74,6 +74,25 @@ class ItemIconTest(unittest.TestCase):
         self.assertEqual(result[0][1].rgba, b"\xff\0\0\xff")
         self.assertEqual(result[1][1].rgba, b"\0\xff\0\xff")
 
+    def test_reports_structured_progress(self):
+        service = _service(workers=1)
+        requests = [
+            ("first", self.dds, 0, 0, 1, 1),
+            ("second", self.dds, 1, 0, 1, 1),
+        ]
+        calls = []
+
+        service.load(
+            "catalog",
+            requests,
+            progress=lambda done, total, message: calls.append(
+                (done, total, message)
+            ),
+        )
+
+        self.assertEqual(calls[-1], (2, 2, "Иконки предметов"))
+        self.assertTrue(all(total == 2 for _done, total, _msg in calls))
+
     def test_memory_cache_avoids_second_decode(self):
         service = _service(workers=1)
         requests = [("first", self.dds, 0, 0, 1, 1)]

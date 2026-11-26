@@ -402,7 +402,6 @@ class ReferenceGraphTest(unittest.TestCase):
             SimpleNamespace(),
         )
         control = CacheControl(
-            cache=None,
             cache_service=None,
             resolve=SimpleNamespace(
                 invalidate_cache=lambda: None,

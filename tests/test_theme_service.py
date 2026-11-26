@@ -10,7 +10,6 @@ from tests.qt_support import qapp
 from ui.platform.theme import (
     DEFAULT_PALETTE,
     ThemeService,
-    apply_override_theme,
     apply_theme,
     theme_service,
 )
@@ -33,23 +32,12 @@ class ThemeServiceTest(unittest.TestCase):
         self.assertIn("#101010", self.app.styleSheet())
         self.assertIs(theme_service(), theme_service())
 
-    def test_listeners_and_override(self):
+    def test_listeners(self):
         service = ThemeService()
         seen = []
         service.subscribe(lambda palette: seen.append(palette.bg_main))
         service.apply(self.app)
         self.assertTrue(seen)
-
-        service.set_override(True)
-        self.assertEqual(
-            service.token("tab_bg"),
-            DEFAULT_PALETTE.override_tab_bg,
-        )
-        service.set_override(False)
-        self.assertEqual(
-            service.token("tab_bg"),
-            DEFAULT_PALETTE.tab_bg,
-        )
 
     def test_listener_error_is_isolated(self):
         service = ThemeService()
@@ -64,18 +52,13 @@ class ThemeServiceTest(unittest.TestCase):
             service.apply(self.app)
         self.assertTrue(seen)
 
-    def test_apply_theme_and_override_wrappers(self):
+    def test_apply_theme_wrapper(self):
         palette = apply_theme(self.app)
         self.assertIs(palette, theme_service().palette)
-        self.assertIs(
-            apply_override_theme(self.app, True),
-            theme_service().palette,
-        )
         self.assertEqual(
             theme_service().token("tab_bg"),
-            DEFAULT_PALETTE.override_tab_bg,
+            DEFAULT_PALETTE.tab_bg,
         )
-        apply_override_theme(self.app, False)
 
 
 if __name__ == "__main__":

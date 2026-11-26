@@ -97,11 +97,14 @@ class ItemCatalogApi(Protocol):
         self,
         catalog: ItemCatalog,
         log: Optional[Callable[[str], None]] = None,
+        progress: Optional[Callable] = None,
     ) -> tuple[ItemIcon, ...]:
         """Пакетно декодировать иконки каталога.
 
         Ядро использует кэш регионов и пул процессов; модуль получает
         готовые RGBA-иконки и не занимает UI-поток декодированием DDS.
+        ``progress(done, total, message)`` — необязательный структурированный
+        прогресс; ``log`` остаётся для текстовых сообщений.
         """
 
     def item_entry(self, tab_id: str, section: str):

@@ -31,12 +31,12 @@ from core.patching.writer import PatchWriter
 class PatchServices:
     """Патч-конвейер: единственный владелец patch engine."""
 
-    def __init__(self, resolver, cache, xml):
+    def __init__(self, resolver, xml):
         self.resolver = resolver
         self.xml = xml
-        self.patch = PatchPlanner(resolver, cache)
-        self.dltx = DltxGenerator(resolver, cache)
-        self.dxml = DxmlGenerator(resolver, cache)
+        self.patch = PatchPlanner(resolver)
+        self.dltx = DltxGenerator(resolver)
+        self.dxml = DxmlGenerator(resolver)
         self.patch_verifier = ModelPatchVerifier()
         self.resolver_patch_verifier = ResolverPatchVerifier()
         self.xml_patch_verifier = XmlModelPatchVerifier()

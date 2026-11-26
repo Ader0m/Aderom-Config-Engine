@@ -182,7 +182,7 @@ def main():
     configure_cache_dir(generated_dir / "theme_icons")
 
     app = QApplication(sys.argv)
-    app.setApplicationName("LTX Explorer")
+    app.setApplicationName("Aderom Config Editor")
     app.setApplicationVersion("0.4.0")
     apply_theme(app)
 
@@ -229,7 +229,6 @@ def main():
 
     # Фасад (тонкий, только агрегирует сервисы)
     services = CoreComposition(
-        cache=None,
         tree_builder=tree_builder,
         tree_query=tree_query,
         graph_builder=graph_builder,

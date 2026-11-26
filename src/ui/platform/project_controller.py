@@ -12,7 +12,7 @@ import threading
 from dataclasses import replace
 from pathlib import Path
 
-from PyQt5.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PyQt5.QtWidgets import QFileDialog, QMessageBox
 
 from sdk.contracts.events import Events, PLATFORM_OWNER
 from sdk.features.projects import AssetDraftInfo, ProjectChanged, SavedDraft
@@ -286,7 +286,12 @@ class ProjectControllerMixin:
             return True
 
         try:
-            run(work, on_done=finish)
+            run(
+                work,
+                on_done=finish,
+                operation_key="project.text-save:%s" % key,
+                title="Сохранение текста: %s" % path.name,
+            )
         except Exception as exc:
             self._text_save_jobs.pop(key, None)
             self.log(
@@ -1702,6 +1707,8 @@ class ProjectControllerMixin:
                     saved,
                     err,
                 ),
+                operation_key="project.autosave:%s" % project.id,
+                title="Автосохранение: %s" % project.name,
                 owner=project.id,
             )
         except Exception:
@@ -1806,6 +1813,8 @@ class ProjectControllerMixin:
 
     def on_app_close(self):
         self._closing = True
+        if self.operations.is_active("vfs.rebuild"):
+            self.tasks.cancel_operation("vfs.rebuild")
         if self.operations.is_active("project.create"):
             self.tasks.cancel_operation("project.create")
             self.set_status("Создание проекта: ожидание завершения…")
@@ -2072,6 +2081,11 @@ class ProjectControllerMixin:
                     forest,
                 ),
                 on_log=self.log,
+                operation_key="project.roundtrip:%s:%s" % (
+                    project.id,
+                    getattr(forest, "cache_id", "") or "",
+                ),
+                title="Проверка патча: %s" % project.name,
                 owner=project.id,
             )
         except Exception as exc:
@@ -2398,38 +2412,5 @@ class ProjectControllerMixin:
         updater = getattr(self.window, "refresh_project_actions", None)
         if callable(updater):
             updater()
-
-        self._apply_override_warning()
-
-    def _apply_override_warning(self):
-        """Красные полосы и заголовок при опасном режиме Override."""
-        if self.window is None:
-            return
-
-        mode = self.project.patch_mode() if self.project.is_active else ""
-        xml_mode = (
-            self.project.active.xml_patch_mode
-            if self.project.is_active
-            else ""
-        )
-        enabled = mode == "override" or xml_mode == "xml_override"
-
-        if enabled == self._override_theme_enabled:
-            return
-        self._override_theme_enabled = enabled
-
-        try:
-            from .theme import apply_override_theme, apply_window_caption
-
-            apply_override_theme(QApplication.instance(), enabled)
-            apply_window_caption(self.window, enabled)
-        except Exception as exc:
-            self.log("Theme: не удалось применить Override-оформление: %s" % exc)
-
-        self.window.setWindowTitle(
-            "Внимание - включен опасный режим работы"
-            if enabled
-            else "LTX Explorer"
-        )
 
     # -------------------------------------------------- ui-сервисы

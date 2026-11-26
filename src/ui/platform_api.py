@@ -178,9 +178,6 @@ class PlatformApi(
         self._autosave_pending = False
         self._autosave_project = None
         self._autosave_pending_project = None
-        # На старте действует обычная тема. ``False`` (а не ``None``)
-        # избавляет первую правку от повторной установки stylesheet.
-        self._override_theme_enabled = False
 
         # Отложенная навигация: ключ — id запроса открытия.
         # Несколько запросов на один путь не перетирают друг друга:
@@ -479,7 +476,6 @@ class PlatformApi(
     # -------------------------------------------------- привязка окна
     def bind_window(self, window):
         self.window = window
-        self._override_theme_enabled = None
         self._window_manager.bind_main_window(window)
         self._shortcut_manager.attach(window)
         self._mouse_manager.attach(window)
@@ -626,6 +622,9 @@ class PlatformApi(
             self.window.statusBar().showMessage(str(msg), timeout)
 
     def show_error(self, text):
+        if getattr(self, "_closing", False):
+            self.log("Ошибка при закрытии: %s" % text)
+            return
         if self.window is not None:
             try:
                 QMessageBox.critical(self.window, "Ошибка", str(text))

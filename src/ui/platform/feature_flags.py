@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Feature flags переходного периода.
+"""Feature flags релизного режима.
 
-Флаг ``PATCH_WRITE_EXPERIMENTAL`` замораживает запись патчей до Этапа 5.
-До этого разрешён только предпросмотр. Включение флага допустимо после
-Этапов 5 и 8, вместе с авторизацией записи и release gate.
+``PATCH_WRITE_EXPERIMENTAL`` включает пользовательскую запись патчей
+после release gate Этапа 8.6. Паритет 19023/19024 остаётся
+задокументированным открытым отличием, поэтому включён экспериментальный,
+а не боевой режим. Откат — вернуть ``False``.
 """
 
-PATCH_WRITE_EXPERIMENTAL = False
+PATCH_WRITE_EXPERIMENTAL = True
 
 
 def patch_write_enabled() -> bool:

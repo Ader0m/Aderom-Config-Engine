@@ -79,9 +79,20 @@ class _FocusUi(_Ui):
         return True
 
 
+class _Documents:
+    """Project text API для сырого просмотра LTX."""
+
+    def read_project_text(self, path):
+        path = Path(path)
+        if path.is_file():
+            return path.read_text(encoding="utf-8")
+        return ""
+
+
 class _Ctx:
     def __init__(self, path):
         self.ui = _Ui()
+        self.documents = _Documents()
         self.services = _Services(path)
 
 

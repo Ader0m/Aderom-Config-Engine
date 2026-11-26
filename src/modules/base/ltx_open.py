@@ -220,12 +220,7 @@ class LtxFileOpener:
         try:
             # Виртуальный черновик проекта может ещё не существовать
             # на диске, поэтому сначала спрашиваем текст у платформы.
-            reader = getattr(self.ctx.ui, "read_project_text", None)
-            raw_content = (
-                reader(path)
-                if callable(reader)
-                else self.ctx.services.read_text(path)
-            )
+            raw_content = self.ctx.documents.read_project_text(path)
             if not raw_content and Path(path).is_file():
                 raw_content = self.ctx.services.read_text(path)
             return raw_content or ""
@@ -279,6 +274,8 @@ class LtxFileOpener:
                     request_id,
                 ),
                 on_log=self.ctx.ui.log,
+                operation_key="base.ltx.resolve:%s" % self.ctx.paths.key(path),
+                title="LTX-резолв: %s" % path.name,
             )
         except Exception as exc:
             self._open_failed(path, request_id)

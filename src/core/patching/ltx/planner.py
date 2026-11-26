@@ -238,9 +238,8 @@ def _build_plan(
 class LtxPlanner:
     """Планировщик LTX-патчей (корень, одна строка, многострочная правка)."""
 
-    def __init__(self, resolver_adapter=None, cache=None):
+    def __init__(self, resolver_adapter=None):
         self.resolver_adapter = resolver_adapter
-        self.cache = cache
 
     def plan_document_change(
         self,

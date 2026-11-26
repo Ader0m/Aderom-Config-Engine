@@ -194,12 +194,57 @@ class LtxLexer(QsciLexerCustom):
         if end <= start:
             return
 
+        # Scintilla запрашивает покраску только изменённого фрагмента,
+        # а tokenize_line разбирает строку целиком. Без расширения до
+        # границ строк изменённая строка остаётся с прежними цветами
+        # (или получает стиль обрывка): правка символа в середине
+        # строки не перекрашивает её начало и соседние токены.
+        start, end = self._line_range(editor, start, end, total)
+
         self._timer.stop()
         self._next = None
         self._total = total
         self._full_pass = start <= 0 and end >= total
 
         self._style_chunk(editor, start, end)
+
+    @staticmethod
+    def _line_range(editor, start, end, total):
+        """Расширить диапазон стилизации до целых строк (байты)."""
+        total = max(0, int(total))
+        start = min(max(0, int(start)), total)
+        end = min(max(0, int(end)), total)
+        if end <= start:
+            return start, end
+
+        line = int(
+            editor.SendScintilla(
+                QsciScintilla.SCI_LINEFROMPOSITION,
+                start,
+            )
+        )
+        start = int(
+            editor.SendScintilla(
+                QsciScintilla.SCI_POSITIONFROMLINE,
+                line,
+            )
+        )
+
+        # end — исключающая граница: последний стилизуемый байт end-1
+        # может находиться в середине строки.
+        last_line = int(
+            editor.SendScintilla(
+                QsciScintilla.SCI_LINEFROMPOSITION,
+                max(start, end - 1),
+            )
+        )
+        line_end = int(
+            editor.SendScintilla(
+                QsciScintilla.SCI_GETLINEENDPOSITION,
+                last_line,
+            )
+        )
+        return start, min(total, max(end, line_end))
 
     def _continue_styling(self):
         if self._next is None:
@@ -224,12 +269,28 @@ class LtxLexer(QsciLexerCustom):
         chunk_end = min(end, start + self.CHUNK_BYTES)
         raw = bytes(editor.bytes(start, chunk_end))
 
-        # Не разрезаем строку посередине, если это возможно.
+        # Не разрезаем строку посередине: tokenize_line получает только
+        # целые строки. Если строка длиннее порции, забираем её целиком.
         if chunk_end < end:
             last_newline = raw.rfind(b"\n")
             if last_newline >= 0:
                 raw = raw[:last_newline + 1]
                 chunk_end = start + len(raw)
+            else:
+                line = int(
+                    editor.SendScintilla(
+                        QsciScintilla.SCI_LINEFROMPOSITION,
+                        start,
+                    )
+                )
+                line_end = int(
+                    editor.SendScintilla(
+                        QsciScintilla.SCI_GETLINEENDPOSITION,
+                        line,
+                    )
+                )
+                chunk_end = min(end, max(chunk_end, line_end))
+                raw = bytes(editor.bytes(start, chunk_end))
 
         if raw.endswith(b"\x00"):
             raw = raw[:-1]

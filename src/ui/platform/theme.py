@@ -28,7 +28,7 @@
 import logging
 import os
 import tempfile
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from string import Template
 from typing import Optional
 
@@ -123,10 +123,6 @@ class Palette:
 
     # ============ Служебные токены ============
     tree_highlight: str = "#4F4F00"
-    override_tab_bg: str = "#C05A7A"
-    override_tab_bg_selected: str = "#D66B8B"
-    override_tab_text: str = "#FFE3EC"
-    override_tab_text_selected: str = "#FFFFFF"
 
     # ============ Шрифты (только pt!) ============
     ui_font_family: str = '"Segoe UI", "Inter", sans-serif'
@@ -1029,19 +1025,6 @@ class ThemeService:
                 log.exception("Ошибка подписчика темы")
         return self._current
 
-    def set_override(self, enabled: bool) -> Palette:
-        if enabled:
-            self._current = replace(
-                self._base,
-                tab_bg=self._base.override_tab_bg,
-                tab_bg_selected=self._base.override_tab_bg_selected,
-                tab_text=self._base.override_tab_text,
-                tab_text_selected=self._base.override_tab_text_selected,
-            )
-        else:
-            self._current = self._base
-        return self.apply()
-
 
 _THEME_SERVICE = ThemeService()
 
@@ -1070,62 +1053,3 @@ def __getattr__(name):  # PEP 562: модульный атрибут DARK_THEME 
 def apply_theme(app, palette: Optional[Palette] = None) -> Palette:
     """Применить тему и запомнить палитру в ThemeService."""
     return _THEME_SERVICE.apply(app, palette)
-
-
-# Розовые цвета опасного режима Override берутся из токенов палитры.
-OVERRIDE_PINK = DEFAULT_PALETTE.override_tab_bg
-OVERRIDE_PINK_SELECTED = DEFAULT_PALETTE.override_tab_bg_selected
-
-
-def apply_override_theme(app, enabled: bool) -> Palette:
-    """Включает/выключает розовые вкладки редактора в режиме Override."""
-    if app is not None:
-        _THEME_SERVICE._app = app
-    return _THEME_SERVICE.set_override(bool(enabled))
-
-
-def apply_window_caption(window, enabled: bool) -> None:
-    """Красит нативную шапку окна Windows в розовый/обычный цвет."""
-    if os.name != "nt" or window is None:
-        return
-    try:
-        import ctypes
-
-        hwnd = int(window.winId())
-        dwm = ctypes.windll.dwmapi
-        # DWMWA_CAPTION_COLOR = 35, DWMWA_TEXT_COLOR = 36,
-        # DWMWA_BORDER_COLOR = 34. COLORREF = 0x00BBGGRR.
-        if enabled:
-            caption = _colorref(OVERRIDE_PINK)
-            text = _colorref("#FFFFFF")
-            border = _colorref(OVERRIDE_PINK)
-            for attr, value in (
-                (35, caption),
-                (36, text),
-                (34, border),
-            ):
-                dwm.DwmSetWindowAttribute(
-                    ctypes.c_void_p(hwnd),
-                    attr,
-                    ctypes.byref(ctypes.c_int(value)),
-                    ctypes.sizeof(ctypes.c_int),
-                )
-        else:
-            default = ctypes.c_int(0xFFFFFFFF)
-            for attr in (35, 36, 34):
-                dwm.DwmSetWindowAttribute(
-                    ctypes.c_void_p(hwnd),
-                    attr,
-                    ctypes.byref(default),
-                    ctypes.sizeof(ctypes.c_int),
-                )
-    except Exception:
-        pass
-
-
-def _colorref(color: str) -> int:
-    value = color.lstrip("#")
-    r = int(value[0:2], 16)
-    g = int(value[2:4], 16)
-    b = int(value[4:6], 16)
-    return (b << 16) | (g << 8) | r

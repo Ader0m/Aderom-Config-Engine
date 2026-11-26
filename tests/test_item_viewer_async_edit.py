@@ -17,15 +17,41 @@ _app = qapp()
 
 
 class _Ui:
+    """Только UI-API: документы проекта живут в отдельном адаптере."""
+
     def __init__(self):
-        self.text = "[item]\nkind = i_food\n"
-        self.calls = []
         self.errors = []
         self.logs = []
         self.statuses = []
+        self.busy = []
 
     def is_project_active(self):
         return True
+
+    def item_entry(self, tab_id, section):
+        raise AssertionError("синхронная сборка не должна вызываться")
+
+    def show_error(self, message):
+        self.errors.append(str(message))
+
+    def log(self, message):
+        self.logs.append(str(message))
+
+    def set_status(self, message, timeout=0):
+        self.statuses.append(str(message))
+
+    def set_editor_tab_busy(self, tab_id, busy):
+        self.busy.append((str(tab_id), bool(busy)))
+
+
+class _Documents:
+    """DocumentApi: правки resolved-документа и их асинхронная очередь."""
+
+    def __init__(self):
+        self.text = "[item]\nkind = i_food\n"
+        self.calls = []
+        self.pending = []
+        self.started = []
 
     def has_resolved_document(self, tab_id):
         return True
@@ -58,17 +84,37 @@ class _Ui:
         self.text = "[item]\n%s = %s\n" % (new_key, value)
         return True
 
-    def item_entry(self, tab_id, section):
-        raise AssertionError("синхронная сборка не должна вызываться")
+    def apply_resolved_field_edit_async(
+        self,
+        tab_id,
+        section,
+        key,
+        value,
+        on_done=None,
+    ):
+        self.started.append(("field", section, key, value))
+        self.pending.append((section, key, value, on_done))
+        return True
 
-    def show_error(self, message):
-        self.errors.append(str(message))
+    def rename_resolved_field_async(
+        self,
+        tab_id,
+        section,
+        old_key,
+        new_key,
+        value,
+        on_done=None,
+    ):
+        self.started.append(("rename", section, new_key, value))
+        self.pending.append((section, new_key, value, on_done))
+        return True
 
-    def log(self, message):
-        self.logs.append(str(message))
-
-    def set_status(self, message, timeout=0):
-        self.statuses.append(str(message))
+    def complete_next(self, ok=True):
+        section, key, value, on_done = self.pending.pop(0)
+        if ok:
+            self.text = "[item]\n%s = %s\n" % (key, value)
+        if on_done is not None:
+            on_done(ok, None if ok else "ошибка")
 
 
 class _Services:
@@ -118,12 +164,12 @@ class _Tasks:
 
 
 class _Ctx:
-    def __init__(self, ui, tasks):
+    def __init__(self, ui, documents, tasks):
         self.ui = ui
         self.tasks = tasks
         self.services = _Services()
         self.events = None
-        self.documents = ui
+        self.documents = documents
         self.items = ItemCatalogApiAdapter(self.services, ui)
         self.projects = ui
 
@@ -147,9 +193,10 @@ class _FakeCard:
 class AsyncFieldQueueTest(unittest.TestCase):
     def setUp(self):
         self.ui = _Ui()
+        self.documents = _Documents()
         self.tasks = _Tasks()
         self.feature = ItemViewerFeature(
-            _Ctx(self.ui, self.tasks),
+            _Ctx(self.ui, self.documents, self.tasks),
             _Session(),
         )
         self.feature._tab_id = "tab"
@@ -160,20 +207,24 @@ class AsyncFieldQueueTest(unittest.TestCase):
     def tearDown(self):
         self.feature.close()
 
-    def test_field_edit_is_applied_before_background_build(self):
+    def test_field_edit_is_queued_before_background_build(self):
         self.assertTrue(
             self.feature._apply_field("tab", "item", "kind", "i_med")
         )
 
         self.assertEqual(
-            self.ui.calls,
-            [("item", "kind", "i_med")],
+            self.documents.started,
+            [("field", "item", "kind", "i_med")],
         )
+        self.assertEqual(self.documents.calls, [])
         # Проекция ещё считается в фоне — карточка не обновляется
         # синхронно в UI-потоке.
         self.assertEqual(self.card.entries, [])
-        self.assertEqual(len(self.tasks.jobs), 1)
+        self.assertEqual(self.tasks.jobs, [])
 
+        self.documents.complete_next(True)
+
+        self.assertEqual(len(self.tasks.jobs), 1)
         self.tasks.flush()
 
         self.assertEqual(len(self.card.entries), 1)
@@ -189,21 +240,29 @@ class AsyncFieldQueueTest(unittest.TestCase):
         )
 
         self.assertEqual(len(self.feature._field_jobs), 1)
-        self.assertEqual(self.ui.calls, [])
+        self.assertEqual(self.documents.started, [])
 
         self.feature._field_job_active = False
         self.feature._pump_field_jobs()
 
         self.assertEqual(
-            self.ui.calls,
-            [("item", "kind", "i_food")],
+            self.documents.started,
+            [("field", "item", "kind", "i_food")],
         )
 
     def test_failed_edit_reports_error_and_refreshes(self):
-        def fail(*_args, **_kwargs):
-            return False
+        def fail_async(
+            tab_id,
+            section,
+            key,
+            value,
+            on_done=None,
+        ):
+            if on_done is not None:
+                on_done(False, "ошибка")
+            return True
 
-        self.ui.apply_resolved_field_edit = fail
+        self.documents.apply_resolved_field_edit_async = fail_async
 
         self.assertTrue(
             self.feature._apply_field("tab", "item", "kind", "i_med")
@@ -215,52 +274,13 @@ class AsyncFieldQueueTest(unittest.TestCase):
         self.assertEqual(len(self.card.entries), 1)
 
 
-class _AsyncUi(_Ui):
-    """UI, который принимает правку в очередь и завершает её позже."""
-
-    def __init__(self):
-        super().__init__()
-        self.pending = []
-        self.started = []
-
-    def apply_resolved_field_edit_async(
-        self,
-        tab_id,
-        section,
-        key,
-        value,
-        on_done=None,
-    ):
-        self.started.append(("field", section, key, value))
-        self.pending.append((section, key, value, on_done))
-        return True
-
-    def rename_resolved_field_async(
-        self,
-        tab_id,
-        section,
-        old_key,
-        new_key,
-        value,
-        on_done=None,
-    ):
-        self.started.append(("rename", section, new_key, value))
-        self.pending.append((section, new_key, value, on_done))
-        return True
-
-    def complete_next(self, ok=True):
-        section, key, value, on_done = self.pending.pop(0)
-        if ok:
-            self.text = "[item]\n%s = %s\n" % (key, value)
-        on_done(ok, None if ok else "ошибка")
-
-
 class AsyncQueueBackendTest(unittest.TestCase):
     def setUp(self):
-        self.ui = _AsyncUi()
+        self.ui = _Ui()
+        self.documents = _Documents()
         self.tasks = _Tasks()
         self.feature = ItemViewerFeature(
-            _Ctx(self.ui, self.tasks),
+            _Ctx(self.ui, self.documents, self.tasks),
             _Session(),
         )
         self.feature._tab_id = "tab"
@@ -276,13 +296,16 @@ class AsyncQueueBackendTest(unittest.TestCase):
             self.feature._apply_field("tab", "item", "kind", "i_med")
         )
 
-        self.assertEqual(self.ui.started, [("field", "item", "kind", "i_med")])
+        self.assertEqual(
+            self.documents.started,
+            [("field", "item", "kind", "i_med")],
+        )
         # Транзакция ещё выполняется в фоне: синхронного применения нет,
         # и пересборка карточки ещё не запускалась.
-        self.assertEqual(self.ui.calls, [])
+        self.assertEqual(self.documents.calls, [])
         self.assertEqual(self.tasks.jobs, [])
 
-        self.ui.complete_next(True)
+        self.documents.complete_next(True)
 
         self.assertEqual(len(self.tasks.jobs), 1)
         self.tasks.flush()
@@ -297,17 +320,17 @@ class AsyncQueueBackendTest(unittest.TestCase):
         )
 
         # Вторая правка не уходит в платформу, пока первая не завершена.
-        self.assertEqual(len(self.ui.pending), 1)
+        self.assertEqual(len(self.documents.pending), 1)
         self.assertEqual(
-            [item[2] for item in self.ui.started],
+            [item[2] for item in self.documents.started],
             ["kind"],
         )
 
-        self.ui.complete_next(True)
+        self.documents.complete_next(True)
         self.feature._pump_field_jobs()
 
         self.assertEqual(
-            [item[2] for item in self.ui.started],
+            [item[2] for item in self.documents.started],
             ["kind", "cost"],
         )
 

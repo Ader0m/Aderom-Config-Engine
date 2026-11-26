@@ -16,13 +16,35 @@ _app = qapp()
 
 
 class _Ui:
-    def __init__(self, tabs, document):
+    def __init__(self, tabs):
         self.tabs = tabs
-        self.document = document
         self.errors = []
 
     def open_tab(self, spec, widget):
         self.tabs.open_tab(spec.id, spec.title, widget)
+
+    def is_project_active(self):
+        return True
+
+    def save_project_now(self):
+        return 1
+
+    def show_error(self, message):
+        self.errors.append(str(message))
+
+    def set_status(self, *args, **kwargs):
+        pass
+
+    def log(self, message):
+        pass
+
+    def theme_color(self, name, fallback=None):
+        return fallback
+
+
+class _Documents:
+    def __init__(self, document):
+        self.document = document
 
     def retain_resolved_document(self, tab_id):
         if tab_id != self.document.tab_id:
@@ -41,17 +63,11 @@ class _Ui:
             return None
         return self.document.snapshot()
 
-    def item_entry(self, tab_id, section):
-        if tab_id != self.document.tab_id:
-            return None
-        text = self.document.current_text
-        if "[%s]" % section not in text:
-            return None
-        value = "i_med" if "kind = i_med" in text else "i_food"
-        return ItemEntry(
-            section=section,
-            fields=(ItemField("kind", value, 2),),
-        )
+    def has_resolved_document(self, tab_id):
+        return tab_id == self.document.tab_id
+
+    def resolved_document_title(self, tab_id):
+        return self.document.title
 
     def apply_resolved_field_edit(self, tab_id, section, key, value):
         if tab_id != self.document.tab_id:
@@ -63,55 +79,44 @@ class _Ui:
             return False
         return self.document.apply_line_edit(action, line_number, text)
 
-    def is_project_active(self):
-        return True
-
-    def save_project_now(self):
-        return 1
-
     def undo_resolved_document(self, tab_id):
         return self.document.undo()
 
     def redo_resolved_document(self, tab_id):
         return self.document.redo()
 
-    def resolved_document_title(self, tab_id):
-        return self.document.title
-
     def open_resolved_document(self, tab_id, line_number=None):
         return True
 
-    def show_error(self, message):
-        self.errors.append(str(message))
-
-    def set_status(self, *args, **kwargs):
-        pass
-
-    def log(self, message):
-        pass
-
-    def theme_color(self, name, fallback=None):
-        return fallback
-
 
 class _Items:
-    def __init__(self, ui):
-        self._ui = ui
+    def __init__(self, documents):
+        self._documents = documents
 
     def item_entry(self, tab_id, section):
-        return self._ui.item_entry(tab_id, section)
+        document = self._documents.document
+        if tab_id != document.tab_id:
+            return None
+        text = document.current_text
+        if "[%s]" % section not in text:
+            return None
+        value = "i_med" if "kind = i_med" in text else "i_food"
+        return ItemEntry(
+            section=section,
+            fields=(ItemField("kind", value, 2),),
+        )
 
     def build_item_entry(self, forest, text, section, log=None, overlay=None):
-        return self._ui.item_entry(self._ui.document.tab_id, section)
+        return self.item_entry(self._documents.document.tab_id, section)
 
 
 class _Ctx:
-    def __init__(self, events, ui):
+    def __init__(self, events, ui, documents, items):
         self.events = events
         self.ui = ui
         self.services = None
-        self.documents = ui
-        self.items = _Items(ui)
+        self.documents = documents
+        self.items = items
         self.projects = ui
 
 
@@ -127,16 +132,20 @@ class ItemCardTabTest(unittest.TestCase):
             line_sources=(None, None, None),
             events=self.bus,
         )
-        self.ui = _Ui(self.tabs, self.document)
+        self.ui = _Ui(self.tabs)
+        self.documents = _Documents(self.document)
         self.feature = ItemViewerFeature(
-            _Ctx(self.bus, self.ui),
+            _Ctx(
+                self.bus,
+                self.ui,
+                self.documents,
+                _Items(self.documents),
+            ),
             session=None,
         )
         self.feature._tab_id = self.document.tab_id
         self.feature._root_path = self.document.root_path
         self.feature._title = self.document.title
-        self.feature._resolved_text = self.document.current_text
-        self.feature._line_sources = self.document.line_sources
 
     def tearDown(self):
         self.feature.close()

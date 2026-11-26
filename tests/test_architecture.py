@@ -3,7 +3,7 @@
 
 Правила матрицы импортов — docs/Целевая архитектура приложения.md, §3.3.
 Текущие legacy-исключения зафиксированы в tests/architecture_allowlist.py
-и docs/Миграционные исключения.md. Новые исключения добавляет только
+и разделе «Legacy» docs/README.md. Новые исключения добавляет только
 оператор.
 """
 
@@ -561,6 +561,51 @@ class ArchitectureBoundaryTest(unittest.TestCase):
                         % (_rel(path), name.value)
                     )
 
+    def test_modules_do_not_lookup_unknown_sdk_methods_by_name(self):
+        """Модуль не должен брать у ctx.ui/ctx.documents чужие методы."""
+        from sdk.features.documents.api import DocumentApi
+        from sdk.ui.api import UiApi
+
+        def members(protocol):
+            return {
+                name
+                for name in dir(protocol)
+                if not name.startswith("_")
+                and callable(getattr(protocol, name))
+            }
+
+        allowed = {
+            "ui": members(UiApi),
+            "documents": members(DocumentApi),
+        }
+        accessor = re.compile(r"^(?:self\.)?ctx\.(ui|documents)$")
+        offenders = []
+        for path in _files("modules"):
+            for node in ast.walk(_parse(path)):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "getattr"
+                ):
+                    continue
+                if len(node.args) < 2:
+                    continue
+                method = node.args[1]
+                if not isinstance(method, ast.Constant):
+                    continue
+                if not isinstance(method.value, str):
+                    continue
+                match = accessor.match(ast.unparse(node.args[0]))
+                if match is None:
+                    continue
+                api = match.group(1)
+                if method.value not in allowed[api]:
+                    offenders.append(
+                        "%s:%d ctx.%s.%s"
+                        % (_rel(path), node.lineno, api, method.value)
+                    )
+        self.assertEqual(offenders, [])
+
     def test_core_has_no_item_domain(self):
         self.assertFalse((ROOT / "core" / "items").exists())
         for path in _files("core"):
@@ -669,6 +714,95 @@ class ArchitectureBoundaryTest(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertFalse(result.get("value"))
         self.assertEqual(calls, [])
+
+
+class PlatformBoundaryTest(unittest.TestCase):
+    """Платформа не знает команды конкретного модуля и его виджеты."""
+
+    def test_platform_does_not_reference_base_namespace(self):
+        offenders = []
+        for path in _files("ui/platform"):
+            for node in ast.walk(_parse(path)):
+                if not isinstance(node, ast.Constant):
+                    continue
+                if not isinstance(node.value, str):
+                    continue
+                if node.value.startswith("base."):
+                    offenders.append("%s:%d" % (_rel(path), node.lineno))
+        self.assertEqual(offenders, [])
+
+    def test_sdk_bridge_does_not_access_window_file_tree(self):
+        offenders = []
+        bridge = ROOT / "ui" / "platform" / "sdk_bridge"
+        for path in bridge.glob("*.py"):
+            for node in ast.walk(_parse(path)):
+                if (
+                    isinstance(node, ast.Attribute)
+                    and node.attr == "file_tree"
+                ):
+                    offenders.append("%s:%d" % (_rel(path), node.lineno))
+        self.assertEqual(offenders, [])
+
+
+class TaskNamingBoundaryTest(unittest.TestCase):
+    """Фоновые задачи платформы и модулей должны иметь имя и ключ."""
+
+    def test_background_tasks_have_operation_key_and_title(self):
+        offenders = []
+        for path in _all_src_files():
+            tree = _parse(path)
+            run_aliases = set()
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Assign):
+                    continue
+                call = node.value
+                if not (
+                    isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Name)
+                    and call.func.id == "getattr"
+                ):
+                    continue
+                if len(call.args) < 2:
+                    continue
+                receiver = ast.unparse(call.args[0])
+                name = call.args[1]
+                if not (
+                    isinstance(name, ast.Constant)
+                    and name.value == "run"
+                    and "tasks" in receiver
+                ):
+                    continue
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        run_aliases.add(target.id)
+
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                is_task_run = False
+                if isinstance(node.func, ast.Attribute):
+                    if node.func.attr != "run":
+                        continue
+                    receiver = ast.unparse(node.func.value)
+                    is_task_run = (
+                        receiver == "tasks"
+                        or receiver.endswith(".tasks")
+                        or receiver.endswith("._tasks")
+                    )
+                elif isinstance(node.func, ast.Name):
+                    is_task_run = node.func.id in run_aliases
+                if not is_task_run:
+                    continue
+                keywords = {keyword.arg for keyword in node.keywords}
+                if (
+                    "operation_key" not in keywords
+                    or "title" not in keywords
+                ):
+                    offenders.append(
+                        "%s:%d %s"
+                        % (_rel(path), node.lineno, ast.unparse(node.func))
+                    )
+        self.assertEqual(offenders, [])
 
 
 class AppPatchConstructionBoundaryTest(unittest.TestCase):

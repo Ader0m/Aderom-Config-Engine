@@ -23,7 +23,7 @@ class _Tasks:
 
     def run(self, fn, on_done=None, owner=None, **kwargs):
         handle = _Handle()
-        self.calls.append((fn, on_done, handle))
+        self.calls.append((fn, on_done, handle, kwargs))
         return handle
 
 
@@ -59,7 +59,9 @@ class HintCatalogsBackgroundTest(unittest.TestCase):
         self.assertEqual(services.calls, [])
         self.assertEqual(len(tasks.calls), 2)
 
-        build, apply, handle = tasks.calls[0]
+        build, apply, handle, kwargs = tasks.calls[0]
+        self.assertEqual(kwargs["operation_key"], "platform.hints.colors")
+        self.assertEqual(kwargs["title"], "Подсказки: цвета")
         # TaskService всегда передаёт рабочий лог-приёмник.
         self.assertEqual(build(lambda _message: None), "COLORS")
         apply("COLORS", None)

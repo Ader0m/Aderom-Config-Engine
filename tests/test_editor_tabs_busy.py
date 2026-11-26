@@ -192,7 +192,7 @@ class _RefreshServices(_Services):
 class _SyncTasks:
     """Выполняет фоновую задачу сразу, как будто она уже завершилась."""
 
-    def run(self, fn, on_done=None, on_log=None):
+    def run(self, fn, on_done=None, on_log=None, **kwargs):
         try:
             result = fn(lambda _message: None)
         except Exception as exc:

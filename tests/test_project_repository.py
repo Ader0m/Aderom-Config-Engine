@@ -123,7 +123,9 @@ class ProjectRepositoryValidationTest(unittest.TestCase):
         return meta
 
     def test_valid_meta_passes(self):
-        ProjectRepository.validate_meta(self._meta())
+        self.assertIsNone(
+            ProjectRepository.validate_meta(self._meta())
+        )
 
     def test_missing_required_field_is_reported(self):
         for field in (

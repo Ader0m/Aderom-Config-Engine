@@ -61,7 +61,6 @@ def _services(config_dir, generated_dir):
     resolver = ResolverService(cache, ResolvedCache())
     resolver.ensure_adapter(forest, config_dir)
     services = CoreComposition(
-        cache=cache,
         tree_builder=TreeBuilder(cache),
         tree_query=TreeQueryService(),
         graph_builder=ReferenceGraphBuilder(DisabledCache()),

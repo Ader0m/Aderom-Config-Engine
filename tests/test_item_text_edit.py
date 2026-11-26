@@ -583,16 +583,14 @@ class ItemCardTextEditTest(unittest.TestCase):
 
 
 class _Ui:
-    def __init__(self, entry, path):
-        self.entry = entry
-        self.path = path
-        self.files = {
-            path: RU_XML,
-        }
+    """UI-API: только окна, статус и открытие сырых файлов."""
+
+    def __init__(self):
         self.errors = []
         self.logs = []
         self.status = []
         self.opened_raw = []
+        self.busy = []
 
     def open_raw_at_line(self, path, line_number):
         self.opened_raw.append((Path(path), int(line_number)))
@@ -603,14 +601,33 @@ class _Ui:
     def is_project_active(self):
         return True
 
+    def show_error(self, message):
+        self.errors.append(str(message))
+
+    def log(self, message):
+        self.logs.append(str(message))
+
+    def set_status(self, message, timeout=0):
+        self.status.append(str(message))
+
+    def set_editor_tab_busy(self, tab_id, busy):
+        self.busy.append((str(tab_id), bool(busy)))
+
+
+class _Documents:
+    """DocumentApi: текстовые черновики проекта."""
+
+    def __init__(self, path, text=RU_XML, defer_async=False):
+        self.files = {Path(path): str(text)}
+        self.async_calls = []
+        self.pending = []
+        self.defer_async = bool(defer_async)
+
     def has_resolved_document(self, tab_id):
         return True
 
     def resolved_document_title(self, tab_id):
         return ""
-
-    def item_entry(self, tab_id, section):
-        return self.entry
 
     def read_project_text(self, path):
         return self.files.get(Path(path), "")
@@ -626,19 +643,24 @@ class _Ui:
         on_done=None,
         original_text=None,
     ):
+        self.async_calls.append((Path(path), text, original_text))
+        if self.defer_async:
+            self.pending.append((Path(path), text, on_done))
+            return True
         ok = self.write_project_text(path, text)
         if on_done is not None:
-            on_done(ok, "" if ok else "write failed")
+            on_done(ok, None if ok else "write failed")
         return ok
 
-    def show_error(self, message):
-        self.errors.append(str(message))
 
-    def log(self, message):
-        self.logs.append(str(message))
+class _Items:
+    """ItemCatalogApi: только проекция предмета для карточки."""
 
-    def set_status(self, message, timeout=0):
-        self.status.append(str(message))
+    def __init__(self, entry):
+        self.entry = entry
+
+    def item_entry(self, tab_id, section):
+        return self.entry
 
 
 class _Services:
@@ -647,11 +669,14 @@ class _Services:
 
 
 class _Ctx:
-    def __init__(self, ui):
+    def __init__(self, ui, documents, items_entry):
         self.ui = ui
         self.services = _Services()
-        self.documents = ui
-        self.items = ItemCatalogApiAdapter(self.services, ui)
+        self.documents = documents
+        self.items = ItemCatalogApiAdapter(
+            self.services,
+            _Items(items_entry),
+        )
         self.projects = ui
         self.paths = SimpleNamespace(
             key=lambda path: str(Path(path)).lower(),
@@ -662,7 +687,7 @@ class _Ctx:
 
 
 class ItemTextFeatureTest(unittest.TestCase):
-    def test_apply_writes_xml_draft_and_refreshes(self):
+    def test_apply_writes_xml_draft(self):
         path = Path("gamedata") / "configs" / "text" / "rus" / "ru.xml"
         entry = ItemEntry(
             section="item",
@@ -674,24 +699,32 @@ class ItemTextFeatureTest(unittest.TestCase):
                 path,
             ),
         )
-        ui = _Ui(entry, path)
-        feature = ItemViewerFeature(_Ctx(ui), session=None)
+        ui = _Ui()
+        documents = _Documents(path)
+        feature = ItemViewerFeature(
+            _Ctx(ui, documents, entry),
+            session=None,
+        )
 
         self.assertTrue(
             feature._apply_item_text("tab", "item", "name", "Новое имя")
         )
 
-        self.assertIn("<text>Новое имя</text>", ui.files[path])
+        self.assertIn("<text>Новое имя</text>", documents.files[path])
         self.assertIn(
             "<text>Старое описание</text>",
-            ui.files[path],
+            documents.files[path],
         )
         self.assertEqual(ui.errors, [])
 
     def test_apply_without_source_reports_error(self):
         entry = ItemEntry(section="item", fields=())
-        ui = _Ui(entry, Path("ru.xml"))
-        feature = ItemViewerFeature(_Ctx(ui), session=None)
+        ui = _Ui()
+        documents = _Documents(Path("ru.xml"))
+        feature = ItemViewerFeature(
+            _Ctx(ui, documents, entry),
+            session=None,
+        )
 
         self.assertFalse(
             feature._apply_item_text("tab", "item", "name", "x")
@@ -699,40 +732,16 @@ class ItemTextFeatureTest(unittest.TestCase):
         self.assertTrue(ui.errors)
 
 
-class _AsyncUi(_Ui):
-    def __init__(self, entry, path):
-        super().__init__(entry, path)
-        self.async_calls = []
-        self.pending = []
-        self.busy = []
-        self.statuses = []
-
-    def write_project_text_async(
-        self,
-        path,
-        text,
-        on_done=None,
-        original_text=None,
-    ):
-        self.async_calls.append(
-            (Path(path), text, original_text)
-        )
-        self.pending.append((Path(path), text, on_done))
-        return True
-
-    def set_editor_tab_busy(self, tab_id, busy):
-        self.busy.append((str(tab_id), bool(busy)))
-
-    def set_status(self, message, timeout=0):
-        self.statuses.append(str(message))
-
-
 class TextSourceNavigationTest(unittest.TestCase):
     def test_feature_opens_raw_xml_at_source_line(self):
         path = Path("gamedata") / "configs" / "text" / "rus" / "ru.xml"
         source = LocalizationString("st_desc", "", path, line=17)
-        ui = _Ui(ItemEntry(section="item", fields=()), path)
-        feature = ItemViewerFeature(_Ctx(ui), session=None)
+        entry = ItemEntry(section="item", fields=())
+        ui = _Ui()
+        feature = ItemViewerFeature(
+            _Ctx(ui, _Documents(path), entry),
+            session=None,
+        )
 
         self.assertTrue(feature._open_text_source(source))
         self.assertEqual(ui.opened_raw, [(path, 17)])
@@ -792,10 +801,29 @@ class AsyncItemTextFeatureTest(unittest.TestCase):
             ),
         )
 
+    def test_edit_uses_documents_api_without_ui_writer(self):
+        path = Path("gamedata") / "configs" / "text" / "rus" / "ru.xml"
+        ui = _Ui()
+        documents = _Documents(path, defer_async=True)
+        feature = ItemViewerFeature(
+            _Ctx(ui, documents, self._entry(path)),
+            session=None,
+        )
+
+        self.assertTrue(
+            feature._apply_item_text("tab", "item", "name", "Новое имя")
+        )
+
+        self.assertEqual(len(documents.async_calls), 1)
+
     def test_edit_uses_async_writer_and_marks_card_busy(self):
         path = Path("gamedata") / "configs" / "text" / "rus" / "ru.xml"
-        ui = _AsyncUi(self._entry(path), path)
-        feature = ItemViewerFeature(_Ctx(ui), session=None)
+        ui = _Ui()
+        documents = _Documents(path, defer_async=True)
+        feature = ItemViewerFeature(
+            _Ctx(ui, documents, self._entry(path)),
+            session=None,
+        )
         card = _FakeCard("item")
         feature._cards["card-tab"] = ("tab", "item", card)
 
@@ -803,8 +831,8 @@ class AsyncItemTextFeatureTest(unittest.TestCase):
             feature._apply_item_text("tab", "item", "name", "Новое имя")
         )
 
-        self.assertEqual(len(ui.async_calls), 1)
-        self.assertEqual(ui.async_calls[0][0], path)
+        self.assertEqual(len(documents.async_calls), 1)
+        self.assertEqual(documents.async_calls[0][0], path)
         self.assertIn(("card-tab", True), ui.busy)
         self.assertEqual(card.saving, [True])
 
@@ -813,10 +841,10 @@ class AsyncItemTextFeatureTest(unittest.TestCase):
         self.assertFalse(
             feature._apply_item_text("tab", "item", "name", "Ещё имя")
         )
-        self.assertEqual(len(ui.async_calls), 1)
-        self.assertIn("уже сохраняется", ui.statuses[-1])
+        self.assertEqual(len(documents.async_calls), 1)
+        self.assertIn("уже сохраняется", ui.status[-1])
 
-        _path, _text, on_done = ui.pending[0]
+        _path, _text, on_done = documents.pending[0]
         on_done(True, None)
 
         self.assertEqual(card.saving, [True, False])
@@ -825,15 +853,19 @@ class AsyncItemTextFeatureTest(unittest.TestCase):
 
     def test_edit_is_rolled_back_when_save_fails(self):
         path = Path("gamedata") / "configs" / "text" / "rus" / "ru.xml"
-        ui = _AsyncUi(self._entry(path), path)
-        feature = ItemViewerFeature(_Ctx(ui), session=None)
+        ui = _Ui()
+        documents = _Documents(path, defer_async=True)
+        feature = ItemViewerFeature(
+            _Ctx(ui, documents, self._entry(path)),
+            session=None,
+        )
         card = _FakeCard("item")
         feature._cards["card-tab"] = ("tab", "item", card)
 
         self.assertTrue(
             feature._apply_item_text("tab", "item", "name", "Новое имя")
         )
-        _path, _text, on_done = ui.pending[0]
+        _path, _text, on_done = documents.pending[0]
         on_done(False, "диск недоступен")
 
         self.assertTrue(ui.errors)

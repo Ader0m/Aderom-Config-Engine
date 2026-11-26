@@ -24,70 +24,13 @@ _app = qapp()
 
 class _Ui:
     def __init__(self):
-        self.document = None
         self.errors = []
-        self.calls = []
 
     def is_project_active(self):
         return True
 
-    def resolved_draft(self, tab_id):
-        if self.document is None or tab_id != self.document.tab_id:
-            return None
-        return self.document.snapshot()
-
-    def apply_resolved_line_edit(self, tab_id, action, line_number, text=""):
-        if self.document is None or tab_id != self.document.tab_id:
-            return False
-        self.calls.append((action, line_number, text))
-        return self.document.apply_line_edit(action, line_number, text)
-
-    def item_entry(self, tab_id, section):
-        if self.document is None or tab_id != self.document.tab_id:
-            return None
-        if section.lower() != "item":
-            return None
-        text = self.document.current_text
-        value = "i_food"
-        if "kind = i_med" in text:
-            value = "i_med"
-        return ItemEntry(
-            section="item",
-            fields=(ItemField("kind", value, 2),),
-        )
-
-    def sync_resolved_tab(self, *args):
-        pass
-
-    def open_resolved_tab(self, *args, **kwargs):
-        pass
-
-    def open_resolved_document(self, *args, **kwargs):
-        pass
-
-    def resolved_document_title(self, tab_id):
-        return ""
-
-    def has_resolved_document(self, tab_id):
-        return self.document is not None and tab_id == self.document.tab_id
-
-    def ensure_resolved_document(self, *args, **kwargs):
-        return True
-
-    def retain_resolved_document(self, tab_id):
-        return True
-
-    def release_resolved_document(self, tab_id):
-        return True
-
     def save_project_now(self):
         return 1
-
-    def undo_resolved_document(self, tab_id):
-        return False
-
-    def redo_resolved_document(self, tab_id):
-        return False
 
     def show_error(self, message):
         self.errors.append(str(message))
@@ -102,13 +45,65 @@ class _Ui:
         return fallback
 
 
+class _Documents:
+    def __init__(self):
+        self.document = None
+        self.calls = []
+
+    def resolved_draft(self, tab_id):
+        if self.document is None or tab_id != self.document.tab_id:
+            return None
+        return self.document.snapshot()
+
+    def apply_resolved_line_edit(self, tab_id, action, line_number, text=""):
+        if self.document is None or tab_id != self.document.tab_id:
+            return False
+        self.calls.append((action, line_number, text))
+        return self.document.apply_line_edit(action, line_number, text)
+
+    def has_resolved_document(self, tab_id):
+        return self.document is not None and tab_id == self.document.tab_id
+
+    def resolved_document_title(self, tab_id):
+        return ""
+
+    def sync_resolved_tab(self, *args):
+        pass
+
+    def open_resolved_tab(self, *args, **kwargs):
+        pass
+
+    def open_resolved_document(self, *args, **kwargs):
+        pass
+
+    def ensure_resolved_document(self, *args, **kwargs):
+        return True
+
+    def retain_resolved_document(self, tab_id):
+        return True
+
+    def release_resolved_document(self, tab_id):
+        return True
+
+    def undo_resolved_document(self, tab_id):
+        return False
+
+    def redo_resolved_document(self, tab_id):
+        return False
+
+
+class _Items:
+    def item_entry(self, tab_id, section):
+        return None
+
+
 class _Ctx:
     def __init__(self):
         self.ui = _Ui()
         self.events = None
         self.services = None
-        self.documents = self.ui
-        self.items = self.ui
+        self.documents = _Documents()
+        self.items = _Items()
         self.projects = self.ui
 
 
@@ -127,13 +122,11 @@ class ItemLineEditTest(unittest.TestCase):
             "[item]\nkind = i_food\ncost = 10\n",
             line_sources=(None, None, None),
         )
-        self.ctx.ui.document = self.document
+        self.ctx.documents.document = self.document
         self.feature = ItemViewerFeature(self.ctx, _Session())
         self.feature._root_path = Path("system.ltx")
         self.feature._tab_id = self.document.tab_id
         self.feature._title = "[Res]system.ltx"
-        self.feature._resolved_text = self.document.current_text
-        self.feature._line_sources = self.document.line_sources
 
     def test_replace_line_goes_through_document(self):
         self.assertTrue(
@@ -145,7 +138,7 @@ class ItemLineEditTest(unittest.TestCase):
         )
         self.assertIn("kind = i_med", self.document.current_text)
         self.assertEqual(
-            self.ctx.ui.calls,
+            self.ctx.documents.calls,
             [("replace", 2, "kind = i_med")],
         )
 

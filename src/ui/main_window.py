@@ -42,7 +42,7 @@ class MainWindow(QMainWindow):
         self.api = api
         self.setAcceptDrops(True)
 
-        self.setWindowTitle("LTX Explorer")
+        self.setWindowTitle("Aderom Config Editor")
         self.resize(1400, 900)
 
         self._init_ui()
@@ -74,6 +74,9 @@ class MainWindow(QMainWindow):
         log_text = getattr(self, "log_text", None)
         if log_text is not None:
             log_text.refresh_theme()
+        center = getattr(self, "operation_center", None)
+        if center is not None:
+            center.refresh_theme()
         events = getattr(self.api, "events", None)
         if events is not None:
             events.publish(Events.UI_THEME_CHANGED, _palette)
@@ -307,7 +310,8 @@ class MainWindow(QMainWindow):
         if PATCH_WRITE_EXPERIMENTAL:
             self.patch_write_label.setText("Запись патчей: экспериментальная")
             self.patch_write_label.setToolTip(
-                "Запись включена в экспериментальном режиме."
+                "Запись включена в экспериментальном режиме. "
+                "Паритет 19023/19024 не подтверждён."
             )
         else:
             self.patch_write_label.setText("Запись патчей: выключена")

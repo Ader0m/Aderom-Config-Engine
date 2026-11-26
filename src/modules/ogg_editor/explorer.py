@@ -1093,6 +1093,8 @@ class OggExplorerWindow(QWidget):
                 work,
                 on_done=done,
                 on_log=getattr(self.ctx, "log", None),
+                operation_key="ogg_editor.section_drop:%s" % payload.section,
+                title="OGG: разбор секции %s" % payload.section,
             )
         return True
 
@@ -1332,6 +1334,8 @@ class OggExplorerWindow(QWidget):
                 result,
                 error,
             ),
+            operation_key="ogg_editor.scan",
+            title="OGG: сканирование звуков",
         )
 
     def _on_scan_done(self, generation, result, error):
@@ -1387,6 +1391,8 @@ class OggExplorerWindow(QWidget):
                 result,
                 error,
             ),
+            operation_key="ogg_editor.filter",
+            title="OGG: фильтрация",
         )
 
     def _on_filter_done(self, generation, nodes, error):
@@ -1655,6 +1661,8 @@ class OggExplorerWindow(QWidget):
                 result,
                 error,
             ),
+            operation_key="ogg_editor.fields:%s" % generation,
+            title="OGG: чтение полей",
         )
 
     def _on_fields_done(self, generation, paths, result, error):

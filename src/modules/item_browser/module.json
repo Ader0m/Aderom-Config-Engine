@@ -7,7 +7,7 @@
   "author": "ACE",
   "entrypoint": "module:MODULE",
   "sdk": {
-    "min": "0.13.0"
+    "min": "0.14.0"
   },
   "requires": [],
   "optional_requires": [],

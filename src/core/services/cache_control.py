@@ -11,14 +11,12 @@ class CacheControl:
 
     def __init__(
         self,
-        cache,
         cache_service,
         resolve,
         graph,
         data,
         prebuild,
     ):
-        self.cache = cache
         self.cache_service = cache_service
         self.resolve = resolve
         self.graph = graph
@@ -28,8 +26,6 @@ class CacheControl:
     def invalidate_cache(self):
         """Очистить общий кэш ядра и пометить предсборку устаревшей."""
         self.prebuild.mark_stale()
-        if self.cache is not None:
-            self.cache.clear()
         if self.cache_service is not None:
             self.cache_service.clear()
         self.resolve.invalidate_cache()

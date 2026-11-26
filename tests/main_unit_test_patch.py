@@ -3,7 +3,7 @@
 
 ВАЖНО: файлы ``main_unit_test_*`` нельзя создавать без команды оператора
 и нельзя изменять без его положительного отклика. Подробнее см.
-``docs/main_unit_tests.md``.
+``docs/README.md``.
 
 Набор данных повторяет поведение реального ``game.ltx`` Anomaly:
 
@@ -24,11 +24,10 @@ from pathlib import Path
 
 from tests.support import SRC  # noqa: F401
 
+from core.cache.service import CacheService
 from core.resolver.assembly import AssemblyService
 from core.composition import CoreComposition
-from core.tools.cache import FileCacheSystem
-from core.tree.graph import DisabledCache, ReferenceGraphBuilder
-from core.tools.cache import ResolvedCache
+from core.tree.graph import ReferenceGraphBuilder
 from core.resolver.service import ResolverService
 from core.tree.builder import TreeBuilder
 from core.tree.query import TreeQueryService
@@ -122,15 +121,16 @@ class PatchDataSetBase(unittest.TestCase):
         self._write(self.root, GAME_LTX)
         self._write(self.maps, GAME_MAPS_SINGLE_LTX)
 
-        self.cache = FileCacheSystem()
-        self.forest = TreeBuilder(cache=self.cache).build(
+        self.cache_service = CacheService()
+        self.forest = TreeBuilder(
+            cache_service=self.cache_service,
+        ).build(
             self.config,
             self.root,
             use_cache=False,
         )
         self.resolver = ResolverService(
-            cache=self.cache,
-            resolved_cache=ResolvedCache(),
+            cache_service=self.cache_service,
         )
         self.resolver.ensure_adapter(self.forest, self.config)
 
@@ -180,17 +180,23 @@ class PatchModesTest(PatchDataSetBase):
 
     def _services(self):
         return CoreComposition(
-            cache=self.cache,
-            tree_builder=TreeBuilder(self.cache),
+            tree_builder=TreeBuilder(
+                cache_service=self.cache_service,
+            ),
             tree_query=TreeQueryService(),
-            graph_builder=ReferenceGraphBuilder(DisabledCache()),
+            graph_builder=ReferenceGraphBuilder(
+                cache_service=self.cache_service,
+            ),
             resolver_service=self.resolver,
             assembly_service=AssemblyService(
                 self.resolver,
                 self.base / "generated",
             ),
             generated_dir=self.base / "generated",
-            xml_resolve_service=XmlResolveService(),
+            xml_resolve_service=XmlResolveService(
+                cache_service=self.cache_service,
+            ),
+            cache_service=self.cache_service,
         )
 
     def _preview_item(self, mode):

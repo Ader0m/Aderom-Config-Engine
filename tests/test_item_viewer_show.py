@@ -72,7 +72,7 @@ class _Ui:
             sections=(ItemSection(name="item", fields=("kind",)),),
         )
 
-    def load_item_icons(self, catalog, log=None):
+    def load_item_icons(self, catalog, log=None, progress=None):
         return ()
 
     def resolved_draft(self, tab_id):
@@ -133,6 +133,9 @@ class _Tasks:
         result = work(lambda message: None)
         on_done(result, None)
 
+    def progress(self, done=None, total=None, message=None):
+        return True
+
     def operation_active(self, operation_key):
         return False
 
@@ -151,6 +154,9 @@ class _WaitingTasks:
     def run(self, work, on_done, on_log=None, **kwargs):
         self.calls.append((work, on_done, kwargs))
         return None
+
+    def progress(self, done=None, total=None, message=None):
+        return True
 
     def operation_active(self, operation_key):
         return operation_key in self.active
@@ -240,6 +246,9 @@ class ItemViewerShowTest(unittest.TestCase):
             self.assertTrue(
                 any("сборка каталога" in str(item) for item in ctx.ui.status)
             )
+            self.assertEqual(ctx.ui.errors, [])
+            self.assertIsNotNone(feature._window)
+            self.assertEqual(feature._window.card.section(), "item")
         finally:
             feature.close()
 

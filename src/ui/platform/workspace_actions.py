@@ -155,6 +155,9 @@ class WorkspaceActions:
 
     def _on_scan_done(self, forest, err):
         if err is not None:
+            if getattr(self.api, "_closing", False):
+                self.api.log("Пересборка VFS прервана при закрытии")
+                return
             self.api.set_status("Ошибка")
             self.api.show_error(str(err))
             self.events.publish(Events.ERROR, str(err))

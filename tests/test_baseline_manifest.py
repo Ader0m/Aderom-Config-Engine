@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-MANIFEST = ROOT / "docs" / "baseline" / "stage0-manifest.json"
+MANIFEST = ROOT / "baseline" / "stage0-manifest.json"
 
 
 class BaselineManifestTest(unittest.TestCase):

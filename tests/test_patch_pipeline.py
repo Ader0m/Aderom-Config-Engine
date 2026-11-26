@@ -292,7 +292,6 @@ class PatchPipelineTest(unittest.TestCase):
             resolver = ResolverService(cache, ResolvedCache())
             resolver.ensure_adapter(forest, cfg)
             services = CoreComposition(
-                cache=cache,
                 tree_builder=TreeBuilder(cache),
                 tree_query=TreeQueryService(),
                 graph_builder=ReferenceGraphBuilder(DisabledCache()),
@@ -357,7 +356,6 @@ class PatchPipelineTest(unittest.TestCase):
             resolver = ResolverService(cache, ResolvedCache())
             resolver.ensure_adapter(forest, cfg)
             services = CoreComposition(
-                cache=cache,
                 tree_builder=TreeBuilder(cache),
                 tree_query=TreeQueryService(),
                 graph_builder=ReferenceGraphBuilder(DisabledCache()),
@@ -415,7 +413,6 @@ class PatchPipelineTest(unittest.TestCase):
             resolver = ResolverService(cache, ResolvedCache())
             resolver.ensure_adapter(forest, cfg)
             services = CoreComposition(
-                cache=cache,
                 tree_builder=TreeBuilder(cache),
                 tree_query=TreeQueryService(),
                 graph_builder=ReferenceGraphBuilder(DisabledCache()),
@@ -755,7 +752,6 @@ class PatchPipelineTest(unittest.TestCase):
             resolver.ensure_adapter(forest, cfg)
 
             services = CoreComposition(
-                cache=cache,
                 tree_builder=TreeBuilder(cache),
                 tree_query=TreeQueryService(),
                 graph_builder=ReferenceGraphBuilder(DisabledCache()),

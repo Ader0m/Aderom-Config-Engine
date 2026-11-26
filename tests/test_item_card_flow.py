@@ -127,8 +127,6 @@ class ResolvedItemFlowTest(unittest.TestCase):
         self.feature._tab_id = self.tab_id
         self.feature._root_path = root / "system.ltx"
         self.feature._title = "[Res]system.ltx"
-        self.feature._resolved_text = self.document.current_text
-        self.feature._line_sources = self.document.line_sources
 
     def tearDown(self):
         self.feature.close()

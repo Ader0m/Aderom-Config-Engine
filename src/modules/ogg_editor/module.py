@@ -584,6 +584,8 @@ class OggEditorModule(ModuleBase):
             work,
             on_done=done,
             on_log=self.ctx.log,
+            operation_key="ogg_editor.section:%s" % section_name,
+            title="OGG: секция %s" % section_name,
         )
 
     # ------------------------------------------------------------ мультиредактирование
@@ -793,6 +795,8 @@ class OggEditorModule(ModuleBase):
             work,
             on_done=done,
             on_log=self.ctx.log,
+            operation_key="ogg_editor.multi_edit",
+            title="OGG: мультиредактирование",
         )
 
     # ------------------------------------------------------------ события

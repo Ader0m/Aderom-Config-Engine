@@ -49,6 +49,8 @@ class CommonActions:
             work,
             on_done=self._on_assemble_done,
             on_log=self.api.log,
+            operation_key="platform.assemble:%s" % self.api.paths.key(path),
+            title="Сборка: %s" % path.name,
         )
 
     def _on_assemble_done(self, out, err):

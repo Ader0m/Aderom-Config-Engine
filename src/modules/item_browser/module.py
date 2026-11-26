@@ -82,8 +82,12 @@ class _ItemCatalogProvider:
     def read_texture_region(self, path, x, y, width, height):
         return self._api.read_texture_region(path, x, y, width, height)
 
-    def load_item_icons(self, catalog, log=None):
-        return self._api.load_item_icons(catalog, log=log)
+    def load_item_icons(self, catalog, log=None, progress=None):
+        return self._api.load_item_icons(
+            catalog,
+            log=log,
+            progress=progress,
+        )
 
     def item_entry(self, tab_id, section):
         return self._api.item_entry(tab_id, section)

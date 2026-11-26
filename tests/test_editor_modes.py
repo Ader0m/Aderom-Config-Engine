@@ -5,9 +5,12 @@ import unittest
 
 from tests.support import SRC  # noqa: F401
 
+from PyQt5.Qsci import QsciScintilla
+from PyQt5.QtTest import QTest
 from PyQt5.QtWidgets import QWidget
 
 from tests.qt_support import qapp
+from ui import lexers
 from ui.editor import CodeEditor, ResolvedView
 from ui.editor_tabs import EditorTabs
 
@@ -16,6 +19,50 @@ class EditorModeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = qapp()
+
+    @staticmethod
+    def _line_styles(editor, line):
+        start = int(
+            editor.SendScintilla(
+                QsciScintilla.SCI_POSITIONFROMLINE,
+                line,
+            )
+        )
+        end = int(
+            editor.SendScintilla(
+                QsciScintilla.SCI_GETLINEENDPOSITION,
+                line,
+            )
+        )
+        return [
+            int(editor.SendScintilla(QsciScintilla.SCI_GETSTYLEAT, pos))
+            for pos in range(start, end)
+        ]
+
+    def test_resolved_view_recolors_edited_line(self):
+        view = ResolvedView()
+        self.addCleanup(view.deleteLater)
+        view.set_content(
+            "[a]\nkey = false\n",
+            [None, None, None],
+            "a.ltx",
+        )
+        view.set_editable(True)
+        QTest.qWait(50)
+        view.editor.SendScintilla(QsciScintilla.SCI_COLOURISE, 0, -1)
+
+        view.editor.setSelection(1, 6, 1, 11)
+        view.editor.replaceSelectedText("12345")
+        self.assertEqual(
+            self._line_styles(view.editor, 1)[6:11],
+            [lexers.STYLE_NUMBER] * 5,
+        )
+
+        self.assertTrue(view.apply_line_edit("replace", 2, "key = false"))
+        self.assertEqual(
+            self._line_styles(view.editor, 1)[6:11],
+            [lexers.STYLE_CONSTANT] * 5,
+        )
 
     def test_raw_is_read_only_until_project_allows_edit(self):
         editor = CodeEditor()

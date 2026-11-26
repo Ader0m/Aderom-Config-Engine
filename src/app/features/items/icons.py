@@ -110,12 +110,13 @@ class ItemIconService:
         )
 
     # -------------------------------------------------- пакетная загрузка
-    def load(self, catalog_key, requests, log=None):
+    def load(self, catalog_key, requests, log=None, progress=None):
         """Загрузить иконки для списка ``(section, path, x, y, w, h)``.
 
         Возвращает кортеж ``(section, TextureRegion)`` в порядке запросов.
         Ошибки отдельных иконок не прерывают загрузку: для них модуль
-        покажет заглушку.
+        покажет заглушку. ``progress(done, total, message)`` — необязательный
+        структурированный прогресс.
         """
         requests = list(requests or ())
         if not requests:
@@ -165,7 +166,7 @@ class ItemIconService:
             def compute_bundle():
                 nonlocal computed_here
                 computed_here = True
-                decoded = self._decode_missing(missing, log)
+                decoded = self._decode_missing(missing, log, progress)
                 if not decoded:
                     return None
                 return {
@@ -200,7 +201,7 @@ class ItemIconService:
             # запрошенных регионов (старый частичный bundle или новый
             # предмет на том же атласе), догружаем их.
             if still_missing and not computed_here:
-                decoded = self._decode_missing(still_missing, log)
+                decoded = self._decode_missing(still_missing, log, progress)
                 for section, key, region in decoded:
                     bundle[key] = region
                     self._cache_service.set(
@@ -224,7 +225,7 @@ class ItemIconService:
             if section in result
         )
 
-    def _decode_missing(self, jobs, log):
+    def _decode_missing(self, jobs, log, progress=None):
         if log:
             workers = self._workers or _default_workers()
             if not can_spawn_processes():
@@ -233,7 +234,7 @@ class ItemIconService:
                 "Предметы: декодирование иконок %d (процессов: %d)…"
                 % (len(jobs), workers)
             )
-        decoded, errors = self._decode(jobs, log)
+        decoded, errors = self._decode(jobs, log, progress)
         if errors and log:
             log(
                 "Предметы: не удалось декодировать иконок: %d"
@@ -242,7 +243,7 @@ class ItemIconService:
         return decoded
 
     # -------------------------------------------------- декодирование
-    def _decode(self, jobs, log):
+    def _decode(self, jobs, log, progress=None):
         total = len(jobs)
         workers = self._workers or _default_workers()
 
@@ -253,6 +254,7 @@ class ItemIconService:
                     workers,
                     total,
                     log,
+                    progress,
                 )
                 if errors and not decoded:
                     # Например, дочерний процесс не видит VFS MO2.
@@ -262,7 +264,7 @@ class ItemIconService:
                             "Предметы: пул не прочитал иконки, "
                             "повторяю в основном процессе"
                         )
-                    return self._decode_sequential(jobs, log)
+                    return self._decode_sequential(jobs, log, progress)
                 return decoded, errors
             except Exception as exc:
                 if log:
@@ -271,9 +273,9 @@ class ItemIconService:
                         "декодирую последовательно" % exc
                     )
 
-        return self._decode_sequential(jobs, log)
+        return self._decode_sequential(jobs, log, progress)
 
-    def _decode_parallel(self, jobs, workers, total, log):
+    def _decode_parallel(self, jobs, workers, total, log, progress=None):
         ctx = mp.get_context("spawn")
         pool = ctx.Pool(processes=min(workers, max(1, len(jobs))))
         decoded = []
@@ -303,7 +305,7 @@ class ItemIconService:
                     errors += 1
                     logger.debug("Иконка %s: %s", section, error)
 
-                self._log_progress(log, done, total)
+                self._log_progress(log, progress, done, total)
         except BaseException:
             failed = True
             raise
@@ -322,7 +324,7 @@ class ItemIconService:
 
         return decoded, errors
 
-    def _decode_sequential(self, jobs, log):
+    def _decode_sequential(self, jobs, log, progress=None):
         decoded = []
         errors = 0
         total = len(jobs)
@@ -336,17 +338,21 @@ class ItemIconService:
                 errors += 1
                 logger.debug("Иконка %s: %s", section, exc)
 
-            self._log_progress(log, index, total)
+            self._log_progress(log, progress, index, total)
 
         return decoded, errors
 
     @staticmethod
-    def _log_progress(log, done, total):
-        if not log or not total:
+    def _log_progress(log, progress, done, total):
+        if not total:
             return
-        step = max(1, total // 20)
-        if done % step == 0 or done == total:
-            log("item progress: %d/%d" % (done, total))
+        step = max(1, total // 50)
+        if done % step != 0 and done != total:
+            return
+        if callable(progress):
+            progress(done, total, "Иконки предметов")
+        elif log:
+            log("Предметы: иконки %d/%d" % (done, total))
 
     # -------------------------------------------------- ключи
     @staticmethod

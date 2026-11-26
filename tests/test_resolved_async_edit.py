@@ -58,7 +58,7 @@ class _Services:
 
 
 class _InlineTasks:
-    def run(self, fn, on_done=None, on_log=None):
+    def run(self, fn, on_done=None, on_log=None, **kwargs):
         try:
             result = fn(lambda _message: None)
         except Exception as exc:
@@ -74,7 +74,7 @@ class _DeferredTasks:
     def __init__(self):
         self.jobs = []
 
-    def run(self, fn, on_done=None, on_log=None):
+    def run(self, fn, on_done=None, on_log=None, **kwargs):
         self.jobs.append((fn, on_done))
         return None
 
